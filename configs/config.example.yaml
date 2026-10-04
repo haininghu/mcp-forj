@@ -1,0 +1,42 @@
+# Example configuration for mcp-forj.
+# Copy to configs/config.yaml and adjust. The real config is git-ignored.
+#
+# Secrets are NEVER stored here: reference an environment variable by name.
+
+server:
+  name: mcp-forj
+  log_level: info          # debug | info | warn | error
+  noai:
+    marker_file: .noai     # repository marker that disables all access
+    cache_ttl: 5m          # how long a marker check result is cached
+    fail_mode: closed      # closed = deny when the marker cannot be checked
+
+providers:
+  # A GitLab instance. Add more entries for more instances.
+  - name: gitlab-work
+    type: gitlab
+    base_url: https://gitlab.example.com
+    token_env: GITLAB_WORK_TOKEN
+    request_timeout: 30s
+    default_effect: deny
+    rules:
+      # Inspect and comment on MRs, but do not read source or change anything.
+      - repositories:
+          - "team/service-a"
+          - "team/service-b"
+        effect: allow
+        capabilities:
+          - mr:read
+          - mr:comment
+
+      # Read-only access to all other repositories in this group.
+      - repositories:
+          - "team/*"
+        effect: allow
+        capabilities:
+          - mr:read
+
+      # Explicit denial (overrides anything broader that might follow).
+      - repositories:
+          - "legacy/**"
+        effect: deny

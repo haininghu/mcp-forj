@@ -1,0 +1,24 @@
+# Local opencode configuration (machine-specific, must never be committed)
+opencode.json
+opencode.jsonc
+
+# Build artifacts
+/bin/
+/dist/
+/mcp-forj
+
+# Test / coverage output
+*.out
+coverage.html
+
+# Local runtime configuration and secrets
+configs/config.yaml
+configs/*.local.yaml
+.env
+.env.*
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
