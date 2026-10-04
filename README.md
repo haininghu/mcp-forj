@@ -40,19 +40,21 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 
 ## Tools
 
-| Tool                       | Required capability | Description                          |
-|----------------------------|---------------------|--------------------------------------|
-| `list_repositories`        | –                   | List configured repositories.        |
-| `list_merge_requests`      | `mr:read`           | List merge requests.                 |
-| `get_merge_request`        | `mr:read`           | Fetch one merge request.             |
-| `list_merge_request_notes` | `mr:read`           | List comments on a merge request.    |
-| `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.          |
-| `read_file`                | `repo:read`         | Read a repository file.              |
+| Tool                       | Required capability | Description                             |
+|----------------------------|---------------------|-----------------------------------------|
+| `list_configured_rules`    | –                   | List configured rules and capabilities. |
+| `list_repositories`        | `repo:list`         | Discover repositories matching patterns.|
+| `list_merge_requests`      | `mr:read`           | List merge requests.                    |
+| `get_merge_request`        | `mr:read`           | Fetch one merge request.                |
+| `list_merge_request_notes` | `mr:read`           | List comments on a merge request.       |
+| `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.             |
+| `read_file`                | `repo:read`         | Read a repository file.                 |
 
 ## Configuration
 
 See `configs/config.example.yaml`. Capabilities:
 
+- `repo:list` – discover repositories matching the configured patterns.
 - `repo:read` – read repository files.
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:comment` – comment on merge requests.
@@ -60,10 +62,13 @@ See `configs/config.example.yaml`. Capabilities:
 - `mr:write` – reserved.
 - `repo:write` – reserved.
 
-Tokens are supplied via environment variables named by `token_env`; they are never
-written to the config file and never logged. The token must be able to read
-repository files on the default branch so the `.noai` check works; otherwise all
-access is denied (fail-closed).
+`list_repositories` requires `repo:list` and returns only repositories for which the
+matching rule grants it. Repositories carrying the `.noai` marker are excluded.
+
+The `token` field accepts either a literal secret or `${NAME}` references expanded
+from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is
+never logged. It must be able to read repository files on the default branch so the
+`.noai` check works; otherwise all access is denied (fail-closed).
 
 ## License
 

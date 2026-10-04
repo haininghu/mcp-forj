@@ -1,8 +1,20 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.2** (critic-reviewed; changes from v0.1 incorporated)
+Status: **Draft v0.3** (adds `repo:list` and inline/env token config)
 Author: orchestrator
-Scope: first iteration (GitLab only; MR metadata + comments)
+Scope: first iteration (GitLab only; MR metadata + comments + repo listing)
+
+## Changelog vs. v0.2
+
+- **T1** Replaced `token_env` with `token`. The value may be a literal secret or
+  reference an environment variable with `${NAME}`. Literal secrets are discouraged
+  but supported.
+- **T2** Added the `repo:list` capability and a provider `ListRepositories`
+  operation. `list_repositories` now enumerates concrete repositories (requires
+  `repo:list`); the previous config-only view moved to `list_configured_rules`.
+- **T3** Repository enumeration filters candidates through the normal policy check
+  per repository, so `.noai` repositories are excluded and marker-check failures
+  fail closed per repository.
 
 ## Changelog vs. v0.1 (critic feedback incorporated)
 
@@ -103,6 +115,7 @@ are rejected — fail closed).
 
 | Capability   | Meaning                                                       |
 |--------------|---------------------------------------------------------------|
+| `repo:list`  | Discover repositories matching the configured patterns.       |
 | `repo:read`  | Read repository files / directory listings.                   |
 | `mr:read`    | List and view merge request **metadata** and notes. No diffs. |
 | `mr:diff`    | Read merge request diff content. *(reserved, not in v1)*      |
@@ -110,8 +123,13 @@ are rejected — fail closed).
 | `mr:write`   | Create, update, merge, or close merge requests. *(reserved)*  |
 | `repo:write` | Modify repository content (branches, files, pushes). *(reserved)* |
 
-Only `repo:read`, `mr:read`, and `mr:comment` are used by v1 tools. The remaining
-capabilities are defined but unused so the config vocabulary is stable.
+`repo:list`, `repo:read`, `mr:read`, and `mr:comment` are used by v1 tools. The
+remaining capabilities are defined but unused so the config vocabulary is stable.
+
+`repo:list` is granted per pattern. A repository is only returned by
+`list_repositories` if the requesting rule grants `repo:list` for that exact
+repository, so a grant on `legacy/**` lets an agent discover the repositories under
+`legacy/` without exposing anything else.
 
 The example from the requirements maps to:
 `allow: [mr:read, mr:comment]` — inspect and comment on MRs, but no `repo:read`,
@@ -139,7 +157,8 @@ providers:
   - name: gitlab-work        # logical name used by all tools
     type: gitlab             # provider factory key
     base_url: https://gitlab.example.com
-    token_env: GITLAB_WORK_TOKEN   # secret is read from the environment
+    # Either a literal secret (discouraged) or an environment reference:
+    token: "${GITLAB_WORK_TOKEN}"
     request_timeout: 30s
     rules:
       - repositories: ["team/service-a", "team/service-b"]
@@ -148,9 +167,30 @@ providers:
       - repositories: ["team/*"]
         effect: allow
         capabilities: [mr:read]
+      - repositories: ["archive/**"]
+        effect: allow
+        capabilities: [repo:list, mr:read]
       - repositories: ["legacy/**"]
         effect: deny
 ```
+
+### Token handling
+
+- `token` is the only secret field and is represented by a `config.Secret` type
+  whose `String`/`GoString` return `[REDACTED]`, so accidental `%+v`/slog dumps of
+  the configuration cannot leak it. The raw value is reachable only via
+  `Secret.Value()`.
+- The value is **whole-string only**: after trimming surrounding whitespace, if it
+  matches `^\$\{[A-Za-z_][A-Za-z0-9_]*\}$` the named environment variable is
+  expanded; otherwise the value is used as a literal. Embedded mixing
+  (`"prefix-${VAR}"`) is intentionally not supported in v1, which removes the need
+  for an escape mechanism and lets literal secrets contain `$`.
+- If the referenced environment variable is unset or empty, configuration loading
+  fails. A missing or empty resolved token is a validation error.
+- The resolved token is never logged and never returned in tool output. Error
+  messages name only the environment variable, never its value.
+- **Literal secrets are discouraged**: prefer `${...}` and keep the real config
+  (`configs/config.yaml`) git-ignored.
 
 ### Rule semantics
 
@@ -176,7 +216,7 @@ The marker is checked at the repository's **default branch** (HEAD), using the
 server's own token via a dedicated provider call (`FileExists`). This is a
 privileged internal call and is not exposed as a capability.
 
-> **Operational requirement:** the provider token (`token_env`) must be able to
+> **Operational requirement:** the provider token (`token`) must be able to
 > read repository files at least on the default branch. A token scoped to
 > merge-request access only will make the `.noai` check fail, which (by design)
 > denies **every** operation on that provider. Document this clearly for operators.
@@ -208,10 +248,16 @@ type Note struct {
     CreatedAt time.Time
 }
 
+type RepoListOptions struct {
+    Search string // optional provider-side search term (usually a namespace prefix)
+    Limit  int
+}
+
 type Provider interface {
     Name() string
     Type() string
 
+    ListRepositories(ctx context.Context, opts RepoListOptions) ([]Repository, error)
     ListMergeRequests(ctx context.Context, repo string, opts ListOptions) ([]MergeRequest, error)
     GetMergeRequest(ctx context.Context, repo string, number int64) (*MergeRequest, error)
     ListMergeRequestNotes(ctx context.Context, repo string, number int64) ([]Note, error)
@@ -227,23 +273,48 @@ to implement `Provider` and register a case. `number` is provider-neutral on
 purpose: GitLab uses a project-scoped `iid`, GitHub a global PR number, Forjo a
 global index; each provider maps its native identifier.
 
+`ListRepositories` is **membership-scoped** (only repositories the token can see as
+a member) and **paginated**: the GitLab implementation maps `Limit` to `PerPage`
+(default 100) and follows pages until `Limit` is reached or the provider is
+exhausted. If more repositories exist than the limit allows, the server reports
+`truncated: true`. A single page is never silently treated as complete.
+
 ## 8. MCP Tools (first iteration)
 
 | Tool                        | Capability   | Provider operation          |
 |-----------------------------|--------------|-----------------------------|
-| `list_repositories`         | none         | — (from config)             |
+| `list_configured_rules`     | none         | — (from config)             |
+| `list_repositories`         | `repo:list`  | `ListRepositories`          |
 | `list_merge_requests`       | `mr:read`    | `ListMergeRequests`         |
 | `get_merge_request`         | `mr:read`    | `GetMergeRequest`           |
 | `list_merge_request_notes`  | `mr:read`    | `ListMergeRequestNotes`     |
 | `add_merge_request_note`    | `mr:comment` | `AddMergeRequestNote`       |
 | `read_file`                 | `repo:read`  | `ReadFile`                  |
 
-`list_repositories` is config-only (no remote call, no secrets) and returns each
-configured repository together with its **configured** capabilities. It deliberately
-does not require a capability. It does **not** claim the capabilities are effective:
-`.noai` is enforced per operation and may further restrict access. It does not
-perform `.noai` checks (N privileged calls would be out of scope for v1) and must
-not reveal `.noai` state.
+`list_configured_rules` is config-only (no remote call, no secrets) and returns each
+configured rule with its **configured** capabilities. It requires no capability and
+is the discoverability entry point. It does **not** claim the capabilities are
+effective and does not reveal `.noai` state.
+
+`list_repositories` enumerates concrete repositories from the provider and requires
+`repo:list`:
+
+- Input: `provider` (optional; all listable providers when omitted), `search`
+  (optional provider-side search term), `limit` (optional).
+- A provider is eligible only if at least one allow-rule grants `repo:list`
+  (`Guard.AuthorizeList`). When `provider` is omitted, ineligible providers are
+  skipped; when it is given explicitly, an ineligible provider is an error.
+- The server issues one `ListRepositories` call per provider with the caller's
+  `search` (or none) and filters the candidates client-side. Prefix derivation from
+  glob patterns was deliberately **cut** in v1: client-side `Authorize` is the
+  security boundary and provider-side searching is a passthrough for the caller.
+- Every candidate repository returned by the provider is filtered through the normal
+  `Guard.Authorize(..., repo:list)` check. Repositories blocked by `.noai` are
+  **excluded**. A marker-check failure omits only that repository (fail-closed per
+  repository) and increments an `omitted` counter that is reported in the result, so
+  a listing is never silently incomplete.
+- Results are deduplicated by provider+path and capped at the limit with a
+  `truncated` flag.
 
 Tool arguments are validated with explicit bounds:
 - `provider` must name a configured provider.
@@ -257,9 +328,18 @@ Tool arguments are validated with explicit bounds:
 ## 9. Security Considerations
 
 - **Deny by default**, hardcoded at provider and rule level.
-- **`.noai` is authoritative** and fail-closed; checked before every operation.
-- **Secrets**: tokens come from environment variables, are never logged, and are
-  never returned in tool output. Config values are redacted in logs.
+- **`.noai` is authoritative** and fail-closed; checked before every operation. For
+  `list_repositories`, each candidate is checked individually: blocked repositories
+  are excluded and the count of omitted repositories is reported, so results are
+  never silently incomplete. A repository whose marker cannot be checked is omitted
+  (fail-closed).
+- **`list_configured_rules` exposes the policy** (patterns and effects) to the
+  caller. This is intentional in the single-trusted-agent model and reveals no
+  secrets; revisit if per-client identities are ever added.
+- **Secrets**: the token may be a literal or a `${NAME}` environment reference; the
+  resolved value is never logged and never returned in tool output. Errors name only
+  the environment variable, not its value. Literal secrets are discouraged and the
+  real config is git-ignored.
 - **Path safety** for `read_file` and any future path input. Checks run **before**
   normalization, in this order:
   1. reject if the path is empty;
@@ -282,13 +362,16 @@ Tool arguments are validated with explicit bounds:
 ## 10. Testing Strategy
 
 - `internal/config`: parsing, defaults, unknown capability rejection, missing
-  `token_env`, duplicate provider names, empty rules.
+  `token`, literal token (including one containing `$`), whole-string `${VAR}`
+  resolution, unset/empty `${VAR}` rejection, whitespace trimming, duplicate
+  provider names, empty rules, and a redaction assertion that `fmt.Sprintf("%+v",
+  cfg)` / `Secret.String()` never contains the resolved value.
 - `internal/policy`: rule precedence, `*` vs `**` glob matching, default deny,
   capability subset, deny override.
 - `internal/policy/noai`: marker present/absent, provider error (always deny).
 - `internal/server`: end-to-end tool calls against a **fake provider** using the
-  SDK's in-memory transports; assert allow, capability denial, `.noai` denial, and
-  argument validation.
+  SDK's in-memory transports; assert allow, capability denial, `.noai` denial, repo
+  listing filtering, and argument validation.
 - `internal/provider/gitlab`: mapping logic plus an `httptest`-based client test.
 
 ### Security-critical tests (mandatory)
@@ -304,10 +387,19 @@ Tool arguments are validated with explicit bounds:
    rejected.
 7. Rule precedence: specific-before-broad, `deny` override, default deny, `*` vs
    `**`.
-8. Unknown capability and missing `token_env` rejected at config load.
-9. Token never appears in tool output or logs (assert on captured logs).
-10. `list_repositories` reports configured capabilities and does not leak `.noai`
-    state.
+8. Unknown capability and missing `token` rejected at config load; an unset `${VAR}`
+   reference is rejected.
+9. Token never appears in tool output or logs (assert on captured logs), including
+   when it is supplied literally.
+10. `list_configured_rules` reports configured capabilities and does not leak `.noai`
+    state or the token.
+11. `list_repositories` without `repo:list` → denied; with `repo:list` on
+    `archive/**` only repositories matching that pattern are returned; a `deny` rule
+    ordered before a broad `repo:list` allow excludes the denied repository; a
+    `.noai` repository is excluded and counted as omitted; a marker-check error
+    omits only that repository; `truncated` is set when the cap is hit; when
+    `provider` is omitted an ineligible provider is skipped, when given explicitly
+    it is an error.
 
 ## 11. Dependencies
 
@@ -350,7 +442,20 @@ Makefile                        build/test/lint targets
 
 ## 14. Resolved Questions (from v0.1)
 
-1. `list_repositories` stays **config-only** (no capability); returns **configured**
-   capabilities and states that `.noai` may further restrict.
+1. The config-only view moved to `list_configured_rules` (no capability); it returns
+   **configured** capabilities and states that `.noai` may further restrict.
 2. `.noai` cache **removed** for v1; marker checked on every operation.
-3. `token_file` **deferred**; env-var-only for v1.
+3. `token_file` **deferred**; `token` accepts a literal or a `${VAR}` reference.
+
+## 15. Resolved Questions (v0.3)
+
+1. **Token**: `token` is a whole-string literal or a single `${NAME}` reference;
+   resolution happens at load time and an unset/empty reference is a hard error.
+   Literal secrets are supported but discouraged. The value is held in a redacting
+   `Secret` type.
+2. **`repo:list` scope**: granted per pattern. Enumeration queries the provider and
+   filters each candidate through the normal per-repository `repo:list` check, so
+   `.noai` repositories are excluded and grants cannot leak beyond their pattern.
+3. **Listing pagination**: the provider maps the limit to `PerPage` and follows pages
+   up to the limit, reporting `truncated`. Derived-prefix querying was cut; `search`
+   is a caller-controlled passthrough.

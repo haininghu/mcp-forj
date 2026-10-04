@@ -1,7 +1,8 @@
 # Example configuration for mcp-forj.
 # Copy to configs/config.yaml and adjust. The real config is git-ignored.
 #
-# Secrets are NEVER stored here: reference an environment variable by name.
+# `token` may be a literal secret or reference environment variables with
+# ${NAME}. Prefer ${NAME} so no secret is written into the file.
 
 server:
   name: mcp-forj
@@ -17,7 +18,7 @@ providers:
   - name: gitlab-work
     type: gitlab
     base_url: https://gitlab.example.com
-    token_env: GITLAB_WORK_TOKEN
+    token: "${GITLAB_WORK_TOKEN}"
     request_timeout: 30s
     # Access is deny-by-default; only the rules below grant anything.
     rules:
@@ -35,6 +36,15 @@ providers:
           - "team/*"
         effect: allow
         capabilities:
+          - mr:read
+
+      # Discover and read the archived repositories, but do not comment or write.
+      # `list_repositories` returns only repositories matching this pattern.
+      - repositories:
+          - "archive/**"
+        effect: allow
+        capabilities:
+          - repo:list
           - mr:read
 
       # Explicit denial (overrides anything broader that might follow).
