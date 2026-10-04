@@ -1,0 +1,257 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+const validYAML = `
+server:
+  name: test-server
+  log_level: debug
+  noai:
+    marker_file: .noai
+providers:
+  - name: gitlab-work
+    type: gitlab
+    base_url: https://gitlab.example.com
+    token_env: GITLAB_WORK_TOKEN
+    request_timeout: 45s
+    rules:
+      - repositories: ["team/service-a"]
+        effect: allow
+        capabilities: [mr:read, mr:comment]
+      - repositories: ["legacy/**"]
+        effect: deny
+`
+
+func TestParseValid(t *testing.T) {
+	cfg, err := Parse([]byte(validYAML))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Server.Name != "test-server" {
+		t.Errorf("server name = %q, want test-server", cfg.Server.Name)
+	}
+	if cfg.Server.LogLevel != "debug" {
+		t.Errorf("log level = %q, want debug", cfg.Server.LogLevel)
+	}
+	if len(cfg.Providers) != 1 {
+		t.Fatalf("providers = %d, want 1", len(cfg.Providers))
+	}
+	p := cfg.Providers[0]
+	if p.RequestTimeout != Duration(45*time.Second) {
+		t.Errorf("request timeout = %s, want 45s", p.RequestTimeout)
+	}
+	if got := p.Rules[0].Capabilities; len(got) != 2 || got[0] != "mr:read" {
+		t.Errorf("capabilities = %v", got)
+	}
+	if _, ok := cfg.ProviderByName("gitlab-work"); !ok {
+		t.Error("ProviderByName did not find configured provider")
+	}
+	if _, ok := cfg.ProviderByName("missing"); ok {
+		t.Error("ProviderByName found a missing provider")
+	}
+}
+
+func TestParseDefaults(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: http://gitlab.internal
+    token_env: TOKEN
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Server.Name != defaultServerName {
+		t.Errorf("server name = %q, want %q", cfg.Server.Name, defaultServerName)
+	}
+	if cfg.Server.LogLevel != defaultLogLevel {
+		t.Errorf("log level = %q, want %q", cfg.Server.LogLevel, defaultLogLevel)
+	}
+	if cfg.Server.NoAI.MarkerFile != defaultMarkerFile {
+		t.Errorf("marker file = %q, want %q", cfg.Server.NoAI.MarkerFile, defaultMarkerFile)
+	}
+	if cfg.Providers[0].RequestTimeout != Duration(defaultRequestTimeout) {
+		t.Errorf("request timeout = %s, want %s", cfg.Providers[0].RequestTimeout, defaultRequestTimeout)
+	}
+}
+
+func TestDurationStringAndText(t *testing.T) {
+	var d Duration
+	if err := d.UnmarshalText([]byte("1m30s")); err != nil {
+		t.Fatalf("UnmarshalText: %v", err)
+	}
+	if got := d.String(); got != "1m30s" {
+		t.Errorf("String = %q, want 1m30s", got)
+	}
+	if err := d.UnmarshalText([]byte("nonsense")); err == nil {
+		t.Error("UnmarshalText accepted invalid duration")
+	}
+}
+
+func TestValidationFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "unknown capability",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [repo:teleport]
+`,
+			wantErr: "unknown capability",
+		},
+		{
+			name: "missing token_env",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`,
+			wantErr: "token_env is required",
+		},
+		{
+			name: "duplicate provider name",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - repositories: ["a/c"]
+        effect: allow
+        capabilities: [mr:read]
+`,
+			wantErr: "duplicate provider name",
+		},
+		{
+			name: "bad effect",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - repositories: ["a/b"]
+        effect: maybe
+`,
+			wantErr: "effect must be",
+		},
+		{
+			name: "bad log level",
+			yaml: `
+server:
+  log_level: verbose
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`,
+			wantErr: "invalid log_level",
+		},
+		{
+			name: "relative base_url",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: gitlab.example.com
+    token_env: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`,
+			wantErr: "absolute http(s) URL",
+		},
+		{
+			name: "unsupported type",
+			yaml: `
+providers:
+  - name: p
+    type: github
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`,
+			wantErr: "unsupported type",
+		},
+		{
+			name: "empty repositories",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules:
+      - effect: allow
+        capabilities: [mr:read]
+`,
+			wantErr: "repositories must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("Parse succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestUnknownFieldRejected(t *testing.T) {
+	yaml := `
+server:
+  bogus: true
+`
+	if _, err := Parse([]byte(yaml)); err == nil {
+		t.Fatal("Parse accepted an unknown field")
+	}
+}
