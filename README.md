@@ -54,13 +54,16 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 See `configs/config.example.yaml`. Capabilities:
 
 - `repo:read` – read repository files.
-- `mr:read` – view merge requests, diffs and notes.
+- `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:comment` – comment on merge requests.
+- `mr:diff` – read merge request diffs (reserved, not used in v1).
 - `mr:write` – reserved.
 - `repo:write` – reserved.
 
 Tokens are supplied via environment variables named by `token_env`; they are never
-written to the config file and never logged.
+written to the config file and never logged. The token must be able to read
+repository files on the default branch so the `.noai` check works; otherwise all
+access is denied (fail-closed).
 
 ## License
 

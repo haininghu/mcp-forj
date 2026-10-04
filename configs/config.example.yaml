@@ -8,8 +8,9 @@ server:
   log_level: info          # debug | info | warn | error
   noai:
     marker_file: .noai     # repository marker that disables all access
-    cache_ttl: 5m          # how long a marker check result is cached
-    fail_mode: closed      # closed = deny when the marker cannot be checked
+    # The marker is checked on every operation (fail-closed, no caching).
+    # The provider token below MUST be able to read repository files on the
+    # default branch, otherwise the check fails and everything is denied.
 
 providers:
   # A GitLab instance. Add more entries for more instances.
@@ -18,7 +19,7 @@ providers:
     base_url: https://gitlab.example.com
     token_env: GITLAB_WORK_TOKEN
     request_timeout: 30s
-    default_effect: deny
+    # Access is deny-by-default; only the rules below grant anything.
     rules:
       # Inspect and comment on MRs, but do not read source or change anything.
       - repositories:
