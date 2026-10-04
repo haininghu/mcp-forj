@@ -15,7 +15,7 @@ func (s stubProvider) ListMergeRequests(context.Context, string, ListOptions) ([
 func (s stubProvider) GetMergeRequest(context.Context, string, int64) (*MergeRequest, error) {
 	return nil, ErrNotFound
 }
-func (s stubProvider) ListMergeRequestNotes(context.Context, string, int64) ([]Note, error) {
+func (s stubProvider) ListMergeRequestNotes(context.Context, string, int64, ListOptions) ([]Note, error) {
 	return nil, nil
 }
 func (s stubProvider) AddMergeRequestNote(context.Context, string, int64, string) (*Note, error) {

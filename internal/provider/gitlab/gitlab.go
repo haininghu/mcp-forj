@@ -89,8 +89,12 @@ func (c *Client) GetMergeRequest(ctx context.Context, repo string, number int64)
 }
 
 // ListMergeRequestNotes implements provider.Provider.
-func (c *Client) ListMergeRequestNotes(ctx context.Context, repo string, number int64) ([]provider.Note, error) {
-	notes, _, err := c.api.Notes.ListMergeRequestNotes(repo, number, nil, gitlab.WithContext(ctx))
+func (c *Client) ListMergeRequestNotes(ctx context.Context, repo string, number int64, opts provider.ListOptions) ([]provider.Note, error) {
+	listOpts := &gitlab.ListMergeRequestNotesOptions{}
+	if opts.Limit > 0 {
+		listOpts.PerPage = int64(opts.Limit)
+	}
+	notes, _, err := c.api.Notes.ListMergeRequestNotes(repo, number, listOpts, gitlab.WithContext(ctx))
 	if err != nil {
 		return nil, mapError(err)
 	}

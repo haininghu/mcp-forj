@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hvo/mcp-forj/internal/policy"
 )
 
 const validYAML = `
@@ -243,6 +245,47 @@ providers:
 				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestZeroProvidersRejected(t *testing.T) {
+	_, err := Parse([]byte("server:\n  name: empty\n"))
+	if err == nil {
+		t.Fatal("Parse accepted a config with no providers")
+	}
+	if !strings.Contains(err.Error(), "at least one provider") {
+		t.Errorf("error = %q, want mention of at least one provider", err)
+	}
+}
+
+func TestEmptyRulesDenyByDefault(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token_env: T
+    rules: []
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected empty rules: %v", err)
+	}
+	specs := make([]policy.RuleSpec, 0, len(cfg.Providers[0].Rules))
+	for _, rule := range cfg.Providers[0].Rules {
+		specs = append(specs, policy.RuleSpec{
+			Repositories: rule.Repositories,
+			Effect:       rule.Effect,
+			Capabilities: rule.Capabilities,
+		})
+	}
+	pol, err := policy.Build(specs)
+	if err != nil {
+		t.Fatalf("policy.Build: %v", err)
+	}
+	decision := pol.Evaluate("team/app", policy.CapMRRead)
+	if decision.Allowed || decision.Matched {
+		t.Errorf("empty rules allowed access: %+v", decision)
 	}
 }
 

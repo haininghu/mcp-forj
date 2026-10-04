@@ -75,7 +75,7 @@ type Provider interface {
 	// GetMergeRequest fetches a single merge request by number.
 	GetMergeRequest(ctx context.Context, repo string, number int64) (*MergeRequest, error)
 	// ListMergeRequestNotes lists the notes of a merge request.
-	ListMergeRequestNotes(ctx context.Context, repo string, number int64) ([]Note, error)
+	ListMergeRequestNotes(ctx context.Context, repo string, number int64, opts ListOptions) ([]Note, error)
 	// AddMergeRequestNote creates a note on a merge request.
 	AddMergeRequestNote(ctx context.Context, repo string, number int64, body string) (*Note, error)
 

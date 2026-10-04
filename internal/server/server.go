@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"path"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -188,13 +189,13 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 	if limit <= 0 || limit > maxListResults {
 		limit = maxListResults
 	}
-	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit})
+	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit + 1})
 	if err != nil {
 		return nil, nil, mapProviderError(err)
 	}
 	truncated := false
-	if len(mrs) > maxListResults {
-		mrs = mrs[:maxListResults]
+	if len(mrs) > limit {
+		mrs = mrs[:limit]
 		truncated = true
 	}
 	out := make([]mergeRequestJSON, 0, len(mrs))
@@ -227,13 +228,14 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	if err != nil {
 		return nil, nil, err
 	}
-	notes, err := p.ListMergeRequestNotes(ctx, in.Repo, in.Number)
+	limit := maxListResults
+	notes, err := p.ListMergeRequestNotes(ctx, in.Repo, in.Number, provider.ListOptions{Limit: limit + 1})
 	if err != nil {
 		return nil, nil, mapProviderError(err)
 	}
 	truncated := false
-	if len(notes) > maxListResults {
-		notes = notes[:maxListResults]
+	if len(notes) > limit {
+		notes = notes[:limit]
 		truncated = true
 	}
 	out := make([]noteJSON, 0, len(notes))
@@ -280,7 +282,7 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	content := string(data)
 	truncated := false
 	if len(data) > maxFileBytes {
-		content = string(data[:maxFileBytes]) + truncatedMarker
+		content = safePrefix(string(data), maxFileBytes) + truncatedMarker
 		truncated = true
 	}
 	return jsonResult(readFileOutput{
@@ -385,11 +387,33 @@ func toNoteJSON(note provider.Note) noteJSON {
 	return out
 }
 
+// truncateText limits s to at most max bytes without splitting a UTF-8 rune,
+// appending truncatedMarker when truncation occurs.
 func truncateText(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max] + truncatedMarker
+	return safePrefix(s, max) + truncatedMarker
+}
+
+// safePrefix returns the longest prefix of s that is at most max bytes and ends
+// on a UTF-8 rune boundary. Invalid trailing bytes are dropped.
+func safePrefix(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if max >= len(s) {
+		return s
+	}
+	p := s[:max]
+	for len(p) > 0 {
+		r, size := utf8.DecodeLastRuneInString(p)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		p = p[:len(p)-size]
+	}
+	return p
 }
 
 func jsonResult(v any) (*mcp.CallToolResult, any, error) {

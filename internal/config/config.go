@@ -131,6 +131,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: invalid log_level %q", c.Server.LogLevel)
 	}
 
+	if len(c.Providers) == 0 {
+		return fmt.Errorf("config: at least one provider is required")
+	}
+
 	seen := make(map[string]bool, len(c.Providers))
 	for i := range c.Providers {
 		p := &c.Providers[i]

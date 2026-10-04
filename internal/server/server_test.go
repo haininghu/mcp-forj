@@ -3,11 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -29,11 +31,11 @@ type fakeProvider struct {
 func (f *fakeProvider) Name() string { return f.name }
 func (f *fakeProvider) Type() string { return "fake" }
 
-func (f *fakeProvider) ListMergeRequests(context.Context, string, provider.ListOptions) ([]provider.MergeRequest, error) {
+func (f *fakeProvider) ListMergeRequests(_ context.Context, _ string, opts provider.ListOptions) ([]provider.MergeRequest, error) {
 	if f.providerErr != nil {
 		return nil, f.providerErr
 	}
-	return f.mrs, nil
+	return applyLimit(f.mrs, opts.Limit), nil
 }
 
 func (f *fakeProvider) GetMergeRequest(_ context.Context, _ string, number int64) (*provider.MergeRequest, error) {
@@ -48,11 +50,19 @@ func (f *fakeProvider) GetMergeRequest(_ context.Context, _ string, number int64
 	return nil, provider.ErrNotFound
 }
 
-func (f *fakeProvider) ListMergeRequestNotes(context.Context, string, int64) ([]provider.Note, error) {
+func (f *fakeProvider) ListMergeRequestNotes(_ context.Context, _ string, _ int64, opts provider.ListOptions) ([]provider.Note, error) {
 	if f.providerErr != nil {
 		return nil, f.providerErr
 	}
-	return f.notes, nil
+	return applyLimit(f.notes, opts.Limit), nil
+}
+
+// applyLimit mimics a provider honoring a page-size limit.
+func applyLimit[T any](items []T, limit int) []T {
+	if limit > 0 && len(items) > limit {
+		return items[:limit]
+	}
+	return items
 }
 
 func (f *fakeProvider) AddMergeRequestNote(_ context.Context, _ string, _ int64, body string) (*provider.Note, error) {
@@ -348,6 +358,74 @@ func TestListRepositoriesReportsConfiguredCapabilities(t *testing.T) {
 	}
 	if strings.Contains(text, ".noai") || strings.Contains(text, "marker") {
 		t.Errorf("output leaked .noai state: %s", text)
+	}
+}
+
+func TestListMergeRequestsTruncation(t *testing.T) {
+	fake := newFake()
+	fake.mrs = nil
+	for i := 0; i < maxListResults+5; i++ {
+		fake.mrs = append(fake.mrs, provider.MergeRequest{Number: int64(i + 1), Title: "mr"})
+	}
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if res.IsError {
+		t.Fatalf("list_merge_requests: %s", resultText(t, res))
+	}
+	var out listMergeRequestsOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !out.Truncated {
+		t.Error("truncated = false, want true")
+	}
+	if len(out.MergeRequests) != maxListResults {
+		t.Errorf("len = %d, want %d", len(out.MergeRequests), maxListResults)
+	}
+}
+
+func TestListMergeRequestNotesTruncation(t *testing.T) {
+	fake := newFake()
+	fake.notes = nil
+	for i := 0; i < maxListResults+5; i++ {
+		fake.notes = append(fake.notes, provider.Note{ID: int64(i + 1), Body: "note"})
+	}
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "list_merge_request_notes", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if res.IsError {
+		t.Fatalf("list_merge_request_notes: %s", resultText(t, res))
+	}
+	var out listNotesOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !out.Truncated {
+		t.Error("truncated = false, want true")
+	}
+	if len(out.Notes) != maxListResults {
+		t.Errorf("len = %d, want %d", len(out.Notes), maxListResults)
+	}
+}
+
+func TestTruncateTextRuneSafe(t *testing.T) {
+	s := "a€b" // 'a' (1 byte) + '€' (3 bytes) + 'b' (1 byte)
+	if got := truncateText(s, 3); got != "a"+truncatedMarker {
+		t.Errorf("truncateText(s, 3) = %q, want %q", got, "a"+truncatedMarker)
+	}
+	if got := truncateText(s, len(s)); got != s {
+		t.Errorf("truncateText(s, len(s)) = %q, want %q", got, s)
+	}
+	if got := safePrefix(s, 4); got != "a€" {
+		t.Errorf("safePrefix(s, 4) = %q, want %q", got, "a€")
+	}
+	if got := safePrefix(s, 2); got != "a" {
+		t.Errorf("safePrefix(s, 2) = %q, want %q", got, "a")
+	}
+	got := truncateText(s, 3)
+	if !utf8.ValidString(strings.TrimSuffix(got, truncatedMarker)) {
+		t.Errorf("truncated prefix is not valid UTF-8: %q", got)
 	}
 }
 
