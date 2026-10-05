@@ -442,14 +442,10 @@ func TestListRepositoriesWithoutCapability(t *testing.T) {
 		t.Errorf("error = %q, want mention of repo:list", resultText(t, res))
 	}
 
-	// With no explicit provider, an ineligible provider is skipped and the
-	// result is empty rather than an error.
+	// provider is required: omitting it must fail rather than list anything.
 	res = env.call(t, "list_repositories", map[string]any{})
-	if res.IsError {
-		t.Fatalf("list_repositories with omitted provider errored: %s", resultText(t, res))
-	}
-	if out := repoJSON(t, res); len(out.Repositories) != 0 {
-		t.Errorf("repositories = %v, want none", out.Repositories)
+	if !res.IsError {
+		t.Fatalf("list_repositories with omitted provider succeeded: %s", resultText(t, res))
 	}
 }
 
@@ -615,10 +611,16 @@ func TestListRepositoriesProviderSelection(t *testing.T) {
 		},
 	)
 
-	// Omitted provider: ineligible one is skipped.
+	// Omitted provider is rejected: provider is required.
 	res := env.call(t, "list_repositories", map[string]any{})
+	if !res.IsError {
+		t.Fatalf("list_repositories with omitted provider succeeded: %s", resultText(t, res))
+	}
+
+	// Explicit eligible provider lists its repositories.
+	res = env.call(t, "list_repositories", map[string]any{"provider": "eligible"})
 	if res.IsError {
-		t.Fatalf("list_repositories: %s", resultText(t, res))
+		t.Fatalf("list_repositories(eligible): %s", resultText(t, res))
 	}
 	out := repoJSON(t, res)
 	if len(out.Repositories) != 1 || out.Repositories[0].Provider != "eligible" {
@@ -638,6 +640,42 @@ func TestListRepositoriesProviderSelection(t *testing.T) {
 	res = env.call(t, "list_repositories", map[string]any{"provider": "missing"})
 	if !res.IsError || !strings.Contains(resultText(t, res), "unknown provider") {
 		t.Errorf("unknown provider result = %q", resultText(t, res))
+	}
+}
+
+func TestListRepositoriesSchemaRequiresProvider(t *testing.T) {
+	env := newTestEnv(t, listReposRules("archive/**"), newFake())
+
+	tools, err := env.session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	var schema any
+	for _, tool := range tools.Tools {
+		if tool.Name == "list_repositories" {
+			schema = tool.InputSchema
+		}
+	}
+	if schema == nil {
+		t.Fatal("list_repositories tool not found")
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatalf("marshal schema: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	required, _ := parsed["required"].([]any)
+	found := false
+	for _, field := range required {
+		if field == "provider" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("provider is not required in list_repositories input schema: %s", data)
 	}
 }
 

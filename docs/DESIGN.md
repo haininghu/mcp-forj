@@ -299,11 +299,11 @@ effective and does not reveal `.noai` state.
 `list_repositories` enumerates concrete repositories from the provider and requires
 `repo:list`:
 
-- Input: `provider` (optional; all listable providers when omitted), `search`
-  (optional provider-side search term), `limit` (optional).
-- A provider is eligible only if at least one allow-rule grants `repo:list`
-  (`Guard.AuthorizeList`). When `provider` is omitted, ineligible providers are
-  skipped; when it is given explicitly, an ineligible provider is an error.
+- Input: `provider` (required; must be a registered provider that grants
+  `repo:list`), `search` (optional provider-side search term), `limit` (optional).
+- The named provider is eligible only if at least one allow-rule grants `repo:list`
+  (`Guard.AuthorizeList`); otherwise the call is an error. There is no
+  all-providers mode: `provider` is mandatory, consistent with the other tools.
 - The server issues one `ListRepositories` call per provider with the caller's
   `search` (or none) and filters the candidates client-side. Prefix derivation from
   glob patterns was deliberately **cut** in v1: client-side `Authorize` is the

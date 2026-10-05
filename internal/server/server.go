@@ -53,7 +53,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_repositories",
-		Description: "Discover repositories the token is a member of that match the configured patterns. Results are capped and filtered per repository; truncated=true means the list may be incomplete because the cap was reached or the provider fetch window was exhausted. Requires the repo:list capability.",
+		Description: "Discover repositories a provider's token is a member of that match the configured patterns. The provider argument is required. Results are capped and filtered per repository; truncated=true means the list may be incomplete because the cap was reached or the provider fetch window was exhausted. Requires the repo:list capability.",
 	}, s.listRepositories)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -87,7 +87,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 type listConfiguredRulesInput struct{}
 
 type listRepositoriesInput struct {
-	Provider string `json:"provider,omitempty" jsonschema:"optional logical provider name; all listable providers when omitted"`
+	Provider string `json:"provider" jsonschema:"logical provider name"`
 	Search   string `json:"search,omitempty" jsonschema:"optional provider-side search term"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of results (capped at 100)"`
 }
@@ -209,80 +209,69 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		limit = maxListResults
 	}
 
-	names, err := s.listableProviders(in.Provider)
+	name, err := s.resolveListableProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	p, ok := s.registry.Get(name)
+	if !ok {
+		return nil, nil, fmt.Errorf("unknown provider %q", name)
+	}
+
+	repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: limit + 1})
+	if err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+
+	// The provider fetch window itself was exhausted: there may be more
+	// candidates that were never returned, so the listing is incomplete even
+	// if filtering happens to leave room under the cap.
+	truncated := len(repos) > limit
 
 	var (
 		collected []repositoryJSON
 		omitted   int
-		truncated bool
 		seen      = make(map[string]bool)
 	)
-	for _, name := range names {
-		p, ok := s.registry.Get(name)
-		if !ok {
+	for _, repo := range repos {
+		key := name + "\x00" + repo.Path
+		if seen[key] {
 			continue
 		}
-		repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: limit + 1})
-		if err != nil {
-			return nil, nil, mapProviderError(err)
-		}
-		// The provider fetch window itself was exhausted: there may be more
-		// candidates that were never returned, so the listing is incomplete even
-		// if filtering happens to leave room under the cap.
-		if len(repos) > limit {
-			truncated = true
-		}
-		for _, repo := range repos {
-			key := name + "\x00" + repo.Path
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
+		seen[key] = true
 
-			if err := s.guard.Authorize(ctx, name, repo.Path, policy.CapRepoList); err != nil {
-				if errors.Is(err, policy.ErrNoAI) || errors.Is(err, policy.ErrMarkerCheck) || errors.Is(err, policy.ErrDenied) {
-					omitted++
-				}
-				continue
+		if err := s.guard.Authorize(ctx, name, repo.Path, policy.CapRepoList); err != nil {
+			if errors.Is(err, policy.ErrNoAI) || errors.Is(err, policy.ErrMarkerCheck) || errors.Is(err, policy.ErrDenied) {
+				omitted++
 			}
-			if len(collected) >= limit {
-				truncated = true
-				continue
-			}
-			collected = append(collected, repositoryJSON{
-				Provider: name,
-				Path:     repo.Path,
-				WebURL:   repo.WebURL,
-			})
+			continue
 		}
+		if len(collected) >= limit {
+			truncated = true
+			continue
+		}
+		collected = append(collected, repositoryJSON{
+			Provider: name,
+			Path:     repo.Path,
+			WebURL:   repo.WebURL,
+		})
 	}
 	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
 }
 
-// listableProviders returns the providers that may list repositories. When
-// requested is non-empty it must be registered and grant repo:list; otherwise
-// every registered provider that grants repo:list is returned.
-func (s *Server) listableProviders(requested string) ([]string, error) {
-	if requested != "" {
-		if _, ok := s.registry.Get(requested); !ok {
-			return nil, fmt.Errorf("unknown provider %q", requested)
-		}
-		if err := s.guard.AuthorizeList(requested); err != nil {
-			return nil, mapAuthorizeListError(err, requested)
-		}
-		return []string{requested}, nil
+// resolveListableProvider validates the required provider argument and returns
+// it when it is registered and grants repo:list.
+func (s *Server) resolveListableProvider(requested string) (string, error) {
+	if requested == "" {
+		return "", errors.New("provider is required")
 	}
-	names := s.registry.Names()
-	listable := make([]string, 0, len(names))
-	for _, name := range names {
-		if err := s.guard.AuthorizeList(name); err == nil {
-			listable = append(listable, name)
-		}
+	if _, ok := s.registry.Get(requested); !ok {
+		return "", fmt.Errorf("unknown provider %q", requested)
 	}
-	return listable, nil
+	if err := s.guard.AuthorizeList(requested); err != nil {
+		return "", mapAuthorizeListError(err, requested)
+	}
+	return requested, nil
 }
 
 func mapAuthorizeListError(err error, providerName string) error {
