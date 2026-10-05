@@ -2,7 +2,7 @@
 
 A policy-governed [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents
 controlled access to code hosting providers. The first iteration supports **GitLab** (multiple instances);
-GitHub and the internal "Forjo" system are planned and already accounted for by the provider abstraction.
+GitHub and the internal "Forgejo" system are planned and already accounted for by the provider abstraction.
 
 Access is **deny-by-default** and configured per provider and repository. Repositories containing a `.noai`
 marker file cannot have their contents read or written; merge-request operations and repository listing

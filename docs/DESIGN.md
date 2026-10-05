@@ -206,7 +206,7 @@ Scope: first iteration (GitLab only; MR metadata + comments + diffs + repo listi
 
 I want a single MCP server that gives AI agents controlled access to several code
 hosting providers. The first provider is GitLab (multiple instances), later GitHub
-and an internal "Forjo" system.
+and an internal "Forgejo" system.
 
 Access must be governed by an explicit configuration: for each provider and
 repository it defines **what an agent may do**. Some repositories may only be
@@ -225,7 +225,7 @@ The first iteration must stay deliberately small so the direction can change lat
 - Per-provider, per-repository **capability** grants.
 - Hard, non-overridable block on repository-content operations (read/write) for
   repositories containing `.noai`.
-- A clean provider abstraction so GitHub/Forjo can be added without touching policy
+- A clean provider abstraction so GitHub/Forgejo can be added without touching policy
   or server code.
 - Good tests and English documentation.
 - Minimal, best-in-class dependencies.
@@ -238,7 +238,7 @@ The first iteration must stay deliberately small so the direction can change lat
 - No OAuth / interactive login. Tokens are read from environment variables only.
 - No HTTP/SSE transport; stdio transport only.
 - No caching of remote data, including the `.noai` marker.
-- No GitHub or Forjo implementation yet (interface only).
+- No GitHub or Forgejo implementation yet (interface only).
 - No multi-user auth or per-client identity — the config describes one trusted agent
   context.
 
@@ -543,7 +543,7 @@ type Provider interface {
 
 A factory maps `type` (e.g. `gitlab`) to a constructor, so new providers only need
 to implement `Provider` and register a case. `number` is provider-neutral on
-purpose: GitLab uses a project-scoped `iid`, GitHub a global PR number, Forjo a
+purpose: GitLab uses a project-scoped `iid`, GitHub a global PR number, Forgejo a
 global index; each provider maps its native identifier.
 
 `ListRepositories` is **paginated**: the GitLab implementation maps `Limit` to
@@ -901,7 +901,7 @@ Makefile                        build/test/lint targets
 
 ## 13. Future Extensibility
 
-- **New providers**: implement `Provider`, add a factory case (`github`, `forjo`).
+- **New providers**: implement `Provider`, add a factory case (`github`, `forgejo`).
 - **New capabilities**: extend the enum and add tools; existing configs stay valid.
   `mr:diff` is already reserved for diff support.
 - **Transport**: add HTTP/streamable transport behind the same server package.
