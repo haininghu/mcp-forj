@@ -1057,12 +1057,107 @@ func TestAddMergeRequestNoteMetadataErrorDenies(t *testing.T) {
 	}
 }
 
-func TestListMergeRequestsFailsClosedWithReadFilter(t *testing.T) {
-	env := newTestEnv(t, filteredReadRules(), newFake())
+func readFilterRules(require, exclude []string) []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRRead,
+			Filter: policy.TagFilter{Require: require, Exclude: exclude},
+		}},
+	}}
+}
+
+func mrListJSON(t *testing.T, res *mcp.CallToolResult) listMergeRequestsOutput {
+	t.Helper()
+	var out listMergeRequestsOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return out
+}
+
+func TestListMergeRequestsTagFilterRequire(t *testing.T) {
+	fake := newFake()
+	fake.mrs = []provider.MergeRequest{
+		{Number: 1, Title: "renovate", Labels: []string{"renovate"}, LabelsKnown: true},
+		{Number: 2, Title: "feature", Labels: []string{"feature"}, LabelsKnown: true},
+	}
+	env := newTestEnv(t, readFilterRules([]string{"renovate"}, nil), fake)
 
 	res := env.call(t, "list_merge_requests", mrArgs())
-	if !res.IsError {
-		t.Fatal("list_merge_requests allowed an active mr:read tag filter, want denial")
+	if res.IsError {
+		t.Fatalf("list_merge_requests errored: %s", resultText(t, res))
+	}
+	out := mrListJSON(t, res)
+	if len(out.MergeRequests) != 1 || out.MergeRequests[0].Title != "renovate" {
+		t.Fatalf("merge_requests = %v, want only the renovate MR", out.MergeRequests)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListMergeRequestsTagFilterExclude(t *testing.T) {
+	fake := newFake()
+	fake.mrs = []provider.MergeRequest{
+		{Number: 1, Title: "renovate", Labels: []string{"renovate"}, LabelsKnown: true},
+		{Number: 2, Title: "blocked", Labels: []string{"renovate", "do-not-touch"}, LabelsKnown: true},
+	}
+	env := newTestEnv(t, readFilterRules(nil, []string{"do-not-touch"}), fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if res.IsError {
+		t.Fatalf("list_merge_requests errored: %s", resultText(t, res))
+	}
+	out := mrListJSON(t, res)
+	if len(out.MergeRequests) != 1 || out.MergeRequests[0].Title != "renovate" {
+		t.Fatalf("merge_requests = %v, want the non-excluded MR only", out.MergeRequests)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListMergeRequestsTagFilterUnknownLabelsOmitted(t *testing.T) {
+	fake := newFake()
+	fake.mrs = []provider.MergeRequest{
+		{Number: 1, Title: "unknown", LabelsKnown: false},
+	}
+	env := newTestEnv(t, readFilterRules([]string{"renovate"}, nil), fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if res.IsError {
+		t.Fatalf("list_merge_requests errored: %s", resultText(t, res))
+	}
+	out := mrListJSON(t, res)
+	if len(out.MergeRequests) != 0 {
+		t.Fatalf("merge_requests = %v, want none (unknown labels fail closed)", out.MergeRequests)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListMergeRequestsNoFilterReturnsAll(t *testing.T) {
+	fake := newFake()
+	fake.mrs = []provider.MergeRequest{
+		{Number: 1, Title: "renovate", Labels: []string{"renovate"}, LabelsKnown: true},
+		{Number: 2, Title: "feature", Labels: []string{"feature"}, LabelsKnown: true},
+		{Number: 3, Title: "unknown", LabelsKnown: false},
+	}
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if res.IsError {
+		t.Fatalf("list_merge_requests errored: %s", resultText(t, res))
+	}
+	out := mrListJSON(t, res)
+	if len(out.MergeRequests) != 3 {
+		t.Fatalf("merge_requests = %d, want all 3", len(out.MergeRequests))
+	}
+	if out.Omitted != 0 {
+		t.Errorf("omitted = %d, want 0", out.Omitted)
 	}
 }
 

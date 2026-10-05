@@ -178,6 +178,7 @@ type mergeRequestJSON struct {
 
 type listMergeRequestsOutput struct {
 	MergeRequests []mergeRequestJSON `json:"merge_requests"`
+	Omitted       int                `json:"omitted"`
 	Truncated     bool               `json:"truncated"`
 }
 
@@ -341,33 +342,51 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
 }
 
-// listMergeRequests lists merge request metadata. The list API returns no
-// labels, so tag filters cannot be evaluated here: resolveAuthorized evaluates
-// the policy with unknown tags, which fails closed when an active mr:read tag
-// filter is configured.
+// listMergeRequests lists merge request metadata. The GitLab list endpoint
+// returns labels, so an active mr:read tag filter is enforced client-side here:
+// each MR is evaluated with its own labels (unknown labels fail closed).
 func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, in listMergeRequestsInput) (*mcp.CallToolResult, any, error) {
-	p, err := s.resolveAuthorized(ctx, in.Provider, in.Repo, policy.CapMRRead)
-	if err != nil {
-		return nil, nil, err
-	}
 	limit := in.Limit
 	if limit <= 0 || limit > maxListResults {
 		limit = maxListResults
+	}
+	p, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit + 1})
 	if err != nil {
 		return nil, nil, mapProviderError(err)
 	}
-	truncated := false
-	if len(mrs) > limit {
-		mrs = mrs[:limit]
-		truncated = true
-	}
-	out := make([]mergeRequestJSON, 0, len(mrs))
+
+	// The provider fetch window itself was exhausted: there may be more
+	// candidates that were never returned, so the listing is incomplete.
+	truncated := len(mrs) > limit
+	var (
+		out     []mergeRequestJSON
+		omitted int
+	)
 	for _, mr := range mrs {
+		decision, err := s.guard.EvaluateWithTags(in.Provider, in.Repo, policy.CapMRRead, tagSetFromMR(mr))
+		if err != nil {
+			return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+		}
+		if !decision.Allowed {
+			if decision.Matched {
+				omitted++
+			}
+			continue
+		}
+		if len(out) >= limit {
+			truncated = true
+			continue
+		}
 		out = append(out, toMergeRequestJSON(mr))
 	}
-	return jsonResult(listMergeRequestsOutput{MergeRequests: out, Truncated: truncated})
+	return jsonResult(listMergeRequestsOutput{MergeRequests: out, Omitted: omitted, Truncated: truncated})
 }
 
 func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in getMergeRequestInput) (*mcp.CallToolResult, any, error) {

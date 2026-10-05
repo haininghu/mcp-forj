@@ -110,8 +110,9 @@ Limitations:
 - MR filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
   `mr:read`), `add_merge_request_note` (`mr:comment`) and `rebase_merge_request`
   (`mr:rebase`); these tools fetch the merge request metadata to evaluate labels.
-  `list_merge_requests` does **not** evaluate labels (the list API returns none) and
-  fails closed when an `mr:read` tag filter is active.
+  `list_merge_requests` enforces an active `mr:read` filter client-side from the
+  labels returned by the list endpoint: non-matching or unknown-label MRs are omitted
+  and counted in `omitted`.
 - `rebase_merge_request` is a write operation: it triggers an **asynchronous** rebase
   (the outcome appears later on the merge request) and requires push access to the
   source branch. The token must have that access; the server fetches MR metadata for

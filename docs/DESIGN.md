@@ -1,8 +1,16 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.8** (`.noai` protects repository-content operations)
+Status: **Draft v0.9** (`list_merge_requests` enforces label filters client-side)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.8
+
+- **Z1** The GitLab merge-request **list** endpoint returns `labels`. The provider
+  now maps them and sets `LabelsKnown`, so `list_merge_requests` enforces an active
+  `mr:read` tag filter **client-side** per MR instead of failing closed. MRs whose
+  labels are unknown (field absent/null) are still omitted (fail-closed) and counted
+  in the new `omitted` field.
 
 ## Changelog vs. v0.7
 
@@ -417,22 +425,24 @@ output.
 |-----------------------------|--------------|-----------------------------|
 | `list_configured_rules`     | none         | — (from config)             |
 | `list_repositories`         | `repo:list`² | `ListRepositories`          |
-| `list_merge_requests`       | `mr:read`    | `ListMergeRequests`         |
+| `list_merge_requests`       | `mr:read`¹   | `ListMergeRequests`         |
 | `get_merge_request`         | `mr:read`¹   | `GetMergeRequest`           |
 | `list_merge_request_notes`  | `mr:read`¹   | `ListMergeRequestNotes`     |
 | `add_merge_request_note`    | `mr:comment`¹| `AddMergeRequestNote`       |
 | `rebase_merge_request`      | `mr:rebase`³ | `RebaseMergeRequest`        |
 | `read_file`                 | `repo:read`² | `ReadFile`                  |
 
-¹ **Tag filters** (§5) are evaluated against the fetched merge request.
+¹ **Tag filters** (§5) are evaluated against merge request labels.
 `get_merge_request` and `list_merge_request_notes` enforce an active `mr:read`
 filter; `add_merge_request_note` enforces an active `mr:comment` filter. These tools
 perform a policy-only pre-check (`Guard.AuthorizeRepoCapability`), fetch the merge
 request metadata, then call `Guard.AuthorizeWithTags` with the MR labels. For
 `add_merge_request_note` the metadata fetch is an internal authorization input: if it
-fails, the post is denied (fail-closed). `list_merge_requests` does **not** evaluate
-labels (the list API returns none) and therefore **fails closed** whenever an
-`mr:read` tag filter is active.
+fails, the post is denied (fail-closed). `list_merge_requests` enforces an active
+`mr:read` filter **client-side**: the GitLab list endpoint returns `labels`, so each
+returned MR is evaluated with its own labels (`Guard.EvaluateWithTags`). MRs that do
+not match are skipped and counted in `omitted`; MRs whose labels are unknown
+(`LabelsKnown=false`) are omitted (fail-closed) and also counted.
 
 ² **Repo topic filters** are evaluated against project topics. `read_file` fetches
 the repository's topics (`GetRepositoryTopics`) only when an active `repo:read`
@@ -521,9 +531,10 @@ Tool arguments are validated with explicit bounds:
   topics are cached or returned in tool output (the server's JSON output structs
   deliberately omit them). When tag information cannot be determined for an active
   filter, the decision fails closed (`tag information unavailable`); a repo topic
-  fetch error fails closed. `list_merge_requests` cannot evaluate labels and fails
-  closed under an active `mr:read` filter. A `repo:list` topic filter also applies to
-  static config repositories so it cannot be bypassed by listing them literally.
+  fetch error fails closed. `list_merge_requests` evaluates labels from the list
+  endpoint per MR (client-side) and omits non-matching or unknown-label MRs. A
+  `repo:list` topic filter also applies to static config repositories so it cannot be
+  bypassed by listing them literally.
 - **`list_configured_rules` exposes the policy** (patterns and effects) to the
   caller. This is intentional in the single-trusted-agent model and reveals no
   secrets; revisit if per-client identities are ever added.
@@ -618,8 +629,10 @@ Tool arguments are validated with explicit bounds:
 12. Tag filters: a matching label allows, an excluded/missing label denies, unknown
     labels fail closed; `get_merge_request` and `list_merge_request_notes` enforce
     `mr:read` filters, `add_merge_request_note` enforces `mr:comment` filters and
-    denies when the metadata fetch fails, `list_merge_requests` fails closed under an
-    active `mr:read` filter, and `list_configured_rules` exposes the filters.
+    denies when the metadata fetch fails, `list_merge_requests` enforces `mr:read`
+    filters client-side from list-endpoint labels (`require: [renovate]` returns the
+    renovate MRs; excluded and unknown-label MRs are omitted and counted), and
+    `list_configured_rules` exposes the filters.
 13. Repo topic filters: `read_file` allows a matching topic and denies a
     missing/excluded topic or a topic-fetch error, and makes no topic call when no
     filter is active; `list_repositories` filters both static and discovered
@@ -700,10 +713,9 @@ Makefile                        build/test/lint targets
 2. **Tag scope** (superseded by v0.5): v0.4 restricted filters to MR capabilities;
    v0.5 extends them to repo capabilities (project topics). Filters on `deny` rules
    remain rejected at config load.
-3. **Enforcement**: `get_merge_request`, `list_merge_request_notes` and
-   `add_merge_request_note` evaluate tags after fetching the MR. `list_merge_requests`
-   cannot (list API returns no labels) and fails closed under an active `mr:read`
-   filter. Unknown labels fail closed everywhere.
+3. **Enforcement** (superseded by v0.9): v0.4 assumed the list API omitted labels and
+   made `list_merge_requests` fail closed. v0.9 maps list-endpoint labels and enforces
+   the filter client-side. Unknown labels fail closed everywhere.
 4. **Tags are never returned**: labels are an authorization input only and are never
    included in tool output.
 
@@ -752,3 +764,12 @@ Makefile                        build/test/lint targets
    operations.
 2. **Forward-looking**: `repo:write` has no tool yet; the guard already enforces
    the marker for it so a future write tool inherits the protection automatically.
+
+## 21. Resolved Questions (v0.9)
+
+1. **`list_merge_requests` labels**: the GitLab list endpoint returns `labels`, so
+   the provider maps them and sets `LabelsKnown`. `list_merge_requests` evaluates an
+   active `mr:read` filter client-side per MR and no longer fails closed. It reports
+   `omitted` for MRs that matched a rule but were filtered out or had unknown labels.
+2. **Fail-closed on unknown labels**: a MR whose `labels` field is absent or `null`
+   has `LabelsKnown=false`; under an active filter it is omitted (and counted).

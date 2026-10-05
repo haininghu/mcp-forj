@@ -353,3 +353,27 @@ func TestRebaseMergeRequestHTTPError(t *testing.T) {
 		t.Errorf("error leaks raw HTTP detail: %v", err)
 	}
 }
+
+func TestListMergeRequestsMapsLabels(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"iid": 1, "title": "renovate", "labels": []string{"renovate"}},
+			{"iid": 2, "title": "plain"},
+		})
+	}))
+
+	mrs, err := c.ListMergeRequests(context.Background(), "team/app", provider.ListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListMergeRequests: %v", err)
+	}
+	if len(mrs) != 2 {
+		t.Fatalf("len = %d, want 2", len(mrs))
+	}
+	if !mrs[0].LabelsKnown || !reflect.DeepEqual(mrs[0].Labels, []string{"renovate"}) {
+		t.Errorf("mrs[0] labels = %v (known=%v), want [renovate] known", mrs[0].Labels, mrs[0].LabelsKnown)
+	}
+	if mrs[1].LabelsKnown || mrs[1].Labels != nil {
+		t.Errorf("mrs[1] labels = %v (known=%v), want unknown when the field is absent", mrs[1].Labels, mrs[1].LabelsKnown)
+	}
+}

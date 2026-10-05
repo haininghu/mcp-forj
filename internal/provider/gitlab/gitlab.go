@@ -140,7 +140,7 @@ func (c *Client) GetMergeRequest(ctx context.Context, repo string, number int64)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := mapDetailedMergeRequest(mr)
+	out := mapBasicMergeRequest(&mr.BasicMergeRequest)
 	return &out, nil
 }
 
@@ -224,6 +224,10 @@ func decodeFile(file *gitlab.File) ([]byte, error) {
 	return []byte(file.Content), nil
 }
 
+// mapBasicMergeRequest maps a GitLab merge request (list or detail) to the
+// provider type. GitLab returns `labels` on both endpoints; LabelsKnown is true
+// only when the field is present (JSON `[]` yields a non-nil empty slice, while
+// `null`/absent yields nil), so unknown labels still fail closed.
 func mapBasicMergeRequest(m *gitlab.BasicMergeRequest) provider.MergeRequest {
 	out := provider.MergeRequest{
 		Number:       m.IID,
@@ -233,20 +237,12 @@ func mapBasicMergeRequest(m *gitlab.BasicMergeRequest) provider.MergeRequest {
 		SourceBranch: m.SourceBranch,
 		TargetBranch: m.TargetBranch,
 		WebURL:       m.WebURL,
+		Labels:       append([]string(nil), m.Labels...),
+		LabelsKnown:  m.Labels != nil,
 	}
 	if m.Author != nil {
 		out.Author = m.Author.Username
 	}
-	return out
-}
-
-// mapDetailedMergeRequest maps a full GitLab merge request, including labels.
-// The list endpoint does not populate labels, so only this path sets
-// LabelsKnown.
-func mapDetailedMergeRequest(m *gitlab.MergeRequest) provider.MergeRequest {
-	out := mapBasicMergeRequest(&m.BasicMergeRequest)
-	out.Labels = append([]string(nil), m.Labels...)
-	out.LabelsKnown = true
 	return out
 }
 
