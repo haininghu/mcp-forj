@@ -8,8 +8,9 @@ Access is **deny-by-default** and configured per provider and repository. Reposi
 marker file cannot have their contents read or written; merge-request operations and repository listing
 follow their own capabilities.
 
-See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design and
+See [`AGENTS.md`](AGENTS.md) for contributor/agent instructions and
 [`configs/config.example.yaml`](configs/config.example.yaml) for a documented configuration.
+Architecture decisions, bug analyses and per-tool specs live under [`ai/`](ai/README.md).
 
 ## Status
 
@@ -201,6 +202,14 @@ the server sends `HEAD` (default branch) when no ref is given.
 - No caching: labels, topics and markers are fetched on every operation.
 - `mr:diff` is not `.noai`-protected; diffs are repository content but follow their own capability.
 - `repo:write`/`mr:write` are reserved; only the capabilities listed above have tools.
+
+## Docs
+
+- [`AGENTS.md`](AGENTS.md) — repo map, commands, conventions and authorization invariants.
+- [`ai/README.md`](ai/README.md) — index of the agent documentation.
+- [`ai/adr/`](ai/adr/) — architecture decision records (start at `0001`).
+- [`ai/bug-analysis/`](ai/bug-analysis/) — symptom -> root cause -> fix -> lesson.
+- [`ai/method-specs/`](ai/method-specs/) — specifications of every MCP tool.
 
 ## License
 
