@@ -503,6 +503,38 @@ providers:
 	}
 }
 
+func TestCapabilityGrantRepoFilterAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              require: [ai-ok]
+          - repo:list:
+              exclude: [confidential]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected a repo capability filter: %v", err)
+	}
+	got := cfg.Providers[0].Rules[0].Capabilities
+	if len(got) != 2 {
+		t.Fatalf("capabilities = %+v", got)
+	}
+	if got[0].Name != "repo:read" || len(got[0].Require) != 1 || got[0].Require[0] != "ai-ok" {
+		t.Errorf("grant[0] = %+v", got[0])
+	}
+	if got[1].Name != "repo:list" || len(got[1].Exclude) != 1 || got[1].Exclude[0] != "confidential" {
+		t.Errorf("grant[1] = %+v", got[1])
+	}
+}
+
 func TestCapabilityGrantNullValue(t *testing.T) {
 	yaml := `
 providers:
@@ -633,23 +665,6 @@ providers:
         capabilities: [mr:read, mr:read]
 `,
 			wantErr: "duplicate capability",
-		},
-		{
-			name: "filter on repo capability",
-			yaml: `
-providers:
-  - name: p
-    type: gitlab
-    base_url: https://example.com
-    token: T
-    rules:
-      - repositories: ["a/b"]
-        effect: allow
-        capabilities:
-          - repo:list:
-              require: [x]
-`,
-			wantErr: "not supported yet",
 		},
 		{
 			name: "filter on deny rule",

@@ -87,6 +87,18 @@ func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string
 	return g.checkMarker(ctx, providerName, repo)
 }
 
+// HasTagFilter reports whether the first matching rule grants capability c for
+// repo with an active tag filter. It is policy-only (no marker check) and is
+// used to decide whether tag information must be fetched before authorizing.
+// It returns ErrUnknownProvider when the provider has no policy.
+func (g *Guard) HasTagFilter(providerName, repo string, c Capability) (bool, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.HasTagFilter(repo, c), nil
+}
+
 // AuthorizeRepoCapability is a policy-only pre-check that ignores tag filters
 // and the .noai marker. It succeeds when the first matching rule allows the
 // capability (regardless of any active tag filter) and is used before a
@@ -166,6 +178,20 @@ func (g *Guard) Evaluate(providerName, repo string, c Capability) (Decision, err
 		return Decision{}, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
 	}
 	decision := p.Evaluate(repo, c)
+	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
+	return decision, nil
+}
+
+// EvaluateWithTags performs a policy-only evaluation with the observed tags. It
+// performs no .noai marker check and returns ErrUnknownProvider when the
+// provider has no policy. Every decision is logged.
+func (g *Guard) EvaluateWithTags(providerName, repo string, c Capability, tags TagSet) (Decision, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		g.logDecision(providerName, repo, c, "deny", "unknown provider")
+		return Decision{}, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	decision := p.EvaluateWithTags(repo, c, tags)
 	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
 	return decision, nil
 }

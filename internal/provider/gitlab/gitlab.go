@@ -87,9 +87,11 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 		}
 		for _, project := range projects {
 			out = append(out, provider.Repository{
-				Provider: c.name,
-				Path:     project.PathWithNamespace,
-				WebURL:   project.WebURL,
+				Provider:    c.name,
+				Path:        project.PathWithNamespace,
+				WebURL:      project.WebURL,
+				Topics:      append([]string(nil), project.Topics...),
+				TopicsKnown: true,
 			})
 			if len(out) >= limit {
 				return out, nil
@@ -99,6 +101,16 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 			return out, nil
 		}
 	}
+}
+
+// GetRepositoryTopics implements provider.Provider. It returns the project's
+// topics, which the policy engine matches against repository tag filters.
+func (c *Client) GetRepositoryTopics(ctx context.Context, repo string) ([]string, error) {
+	project, _, err := c.api.Projects.GetProject(repo, nil, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return append([]string(nil), project.Topics...), nil
 }
 
 // ListMergeRequests implements provider.Provider.

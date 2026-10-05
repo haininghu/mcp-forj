@@ -21,6 +21,12 @@ type Repository struct {
 	Path string
 	// WebURL is the human-facing repository URL.
 	WebURL string
+	// Topics are the tags attached to the repository. They are only meaningful
+	// when TopicsKnown is true.
+	Topics []string
+	// TopicsKnown reports whether Topics could be determined. When false, any
+	// active repository tag filter fails closed.
+	TopicsKnown bool
 }
 
 // MergeRequest is a provider-neutral merge request.
@@ -88,6 +94,8 @@ type Provider interface {
 
 	// ListRepositories enumerates repositories the token is a member of.
 	ListRepositories(ctx context.Context, opts RepoListOptions) ([]Repository, error)
+	// GetRepositoryTopics returns the topics (tags) of a repository.
+	GetRepositoryTopics(ctx context.Context, repo string) ([]string, error)
 	// ListMergeRequests lists merge requests for a repository.
 	ListMergeRequests(ctx context.Context, repo string, opts ListOptions) ([]MergeRequest, error)
 	// GetMergeRequest fetches a single merge request by number.

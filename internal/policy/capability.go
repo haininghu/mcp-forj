@@ -52,14 +52,3 @@ func IsKnownCapability(s string) bool {
 	}
 	return false
 }
-
-// IsMRCapability reports whether c is a merge-request capability. Only these
-// capabilities may carry a tag filter.
-func IsMRCapability(c Capability) bool {
-	switch c {
-	case CapMRRead, CapMRDiff, CapMRComment, CapMRWrite:
-		return true
-	default:
-		return false
-	}
-}

@@ -29,9 +29,10 @@ providers:
         effect: allow
         capabilities:
           - mr:read
-          # A capability may carry a tag filter (GitLab labels). The merge
-          # request must have ALL `require` labels and NONE of the `exclude`
-          # labels. Tag filters are only supported for MR capabilities.
+          # A capability may carry a tag filter. For MR capabilities the tags
+          # are GitLab labels; for repo capabilities they are project topics.
+          # The subject must have ALL `require` tags and NONE of the `exclude`
+          # tags. Matching is exact and case-sensitive.
           - mr:comment:
               require: [ai-reviewed]
               exclude: [do-not-touch]
@@ -43,13 +44,17 @@ providers:
         capabilities:
           - mr:read
 
-      # Discover and read the archived repositories, but do not comment or write.
-      # `list_repositories` returns only repositories matching this pattern.
+      # Discover and read archived repositories whose project has the `ai-ok`
+      # topic. The repo:list filter also applies to literal repositories listed
+      # in this rule; without an active filter they are returned without any
+      # provider call. Topics are matched exactly (no caching).
       - repositories:
+          - "team/ai-service"
           - "archive/**"
         effect: allow
         capabilities:
-          - repo:list
+          - repo:list:
+              require: [ai-ok]
           - mr:read
 
       # Explicit denial (overrides anything broader that might follow).

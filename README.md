@@ -73,8 +73,9 @@ repository may appear in a listing; the marker still blocks every operation on i
 
 ### Tag filters
 
-An MR capability may optionally carry a tag filter (GitLab MR labels), written as a
-single-key mapping in the `capabilities` list:
+Any capability may optionally carry a tag filter, written as a single-key mapping in
+the `capabilities` list. For MR capabilities the tags are GitLab MR **labels**; for
+repo capabilities they are project **topics**:
 
 ```yaml
 capabilities:
@@ -82,22 +83,30 @@ capabilities:
   - mr:comment:
       require: [ai-reviewed]      # MR must have ALL of these labels
       exclude: [do-not-touch]     # MR must have NONE of these labels
+  - repo:list:
+      require: [ai-ok]            # project must have this topic
+  - repo:read:
+      exclude: [confidential]     # project must not have this topic
 ```
 
-Tags are matched by exact, case-sensitive equality. A missing label evaluation (for
-example, labels could not be fetched) fails closed.
+Tags are matched by exact, case-sensitive equality. Whenever tag information cannot
+be determined for an active filter, the decision fails closed.
 
-v1 limitations:
+v2 limitations:
 
-- Tag filters are supported only for MR capabilities (`mr:read`, `mr:diff`,
-  `mr:comment`, `mr:write`). Filters on `repo:*` capabilities are rejected at config
-  load.
-- Filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
-  `mr:read`) and `add_merge_request_note` (`mr:comment`). These tools fetch the merge
-  request metadata to evaluate labels.
-- `list_merge_requests` does **not** evaluate labels (the list API returns none), so
-  it fails closed when an `mr:read` tag filter is active.
-- No repository-topic filters, no caching, and no glob/regex matching.
+- MR filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
+  `mr:read`) and `add_merge_request_note` (`mr:comment`); these tools fetch the merge
+  request metadata to evaluate labels. `list_merge_requests` does **not** evaluate
+  labels (the list API returns none) and fails closed when an `mr:read` tag filter is
+  active.
+- Repo filters are enforced on `read_file` (`repo:read`) and `list_repositories`
+  (`repo:list`) using project topics. A `repo:read` filter fetches topics before
+  reading. A `repo:list` filter also applies to repositories listed literally in the
+  config; when a literal repo has an active `repo:list` filter its topics are fetched
+  and it is omitted on error or non-match. Literal repos with **no** active filter
+  are returned without any provider call. `repo:write` has no tool; filters there are
+  accepted but inert.
+- No caching and no glob/regex matching; topics come from `ListProjects`.
 
 The `token` field accepts either a literal secret or `${NAME}` references expanded
 from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is

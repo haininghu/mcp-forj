@@ -327,9 +327,6 @@ func (c *Config) Validate() error {
 				if len(require) == 0 && len(exclude) == 0 {
 					continue
 				}
-				if !policy.IsMRCapability(policy.Capability(grant.Name)) {
-					return fmt.Errorf("config: provider %q rule %d: tag filters are not supported yet for capability %q", p.Name, j, grant.Name)
-				}
 				if rule.Effect == string(policy.EffectDeny) {
 					return fmt.Errorf("config: provider %q rule %d: tag filters are not allowed on deny rules", p.Name, j)
 				}

@@ -1,8 +1,21 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.4** (adds tag-scoped MR capabilities)
+Status: **Draft v0.5** (adds tag-scoped repo capabilities via project topics)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing)
+
+## Changelog vs. v0.4
+
+- **V1** Tag filters are now accepted on **any** known capability. For repo
+  capabilities the filter matches GitLab project **topics** (for MR capabilities it
+  still matches MR labels).
+- **V2** Added `Repository.Topics`/`TopicsKnown` (tri-state) and the provider
+  `GetRepositoryTopics` operation; `ListRepositories` populates topics.
+- **V3** `read_file` (`repo:read`) and `list_repositories` (`repo:list`) now enforce
+  repo topic filters, exact and case-sensitive, fail-closed on unknown topics.
+- **V4** Active `repo:list` topic filters also apply to repositories listed literally
+  in the configuration; if no such filter is active, literal repositories are still
+  returned with no provider call. `repo:write` filters are accepted but inert.
 
 ## Changelog vs. v0.3
 
@@ -161,9 +174,10 @@ viewing MRs and is accepted; it is not the same as granting repository read acce
 **Independence:** `mr:comment` does not imply `mr:read`. Posting a note does not
 require reading the merge request, so a repository may grant comment-only access.
 
-### Tag-scoped capabilities (v0.4)
+### Tag-scoped capabilities (v0.5)
 
-An MR capability may optionally carry a **tag filter** (GitLab MR labels). In the
+Any capability may optionally carry a **tag filter**. For MR capabilities the tags
+are GitLab MR **labels**; for repo capabilities they are project **topics**. In the
 configuration the filter is merged into the `capabilities` list as a compact
 single-key mapping:
 
@@ -173,17 +187,22 @@ capabilities:
   - mr:comment:
       require: [ai-reviewed]      # MR must have ALL of these labels
       exclude: [do-not-touch]     # MR must have NONE of these labels
+  - repo:list:
+      require: [ai-ok]            # project must have this topic
+  - repo:read:
+      exclude: [confidential]     # project must not have this topic
 ```
 
 - Matching is **exact and case-sensitive**; there is no glob/regex support.
-- Filters are only supported for MR capabilities (`mr:read`, `mr:diff`,
-  `mr:comment`, `mr:write`). A filter on a `repo:*` capability is rejected at config
-  load as "not supported yet", and a filter on a `deny` rule is rejected.
+- Filters are accepted on any known capability, but a filter on a `deny` rule is
+  rejected at config load. `repo:write` filters are accepted but inert (no tool).
 - A tag may not appear in both `require` and `exclude`; tags must be non-empty after
   trimming; a capability may not be listed twice in the same rule.
 - Tags are an **authorization input only**: they are never cached and never returned
   in tool output. When tag information cannot be determined for an active filter,
   the decision fails closed.
+- Because a `repo:list` filter would otherwise be bypassed by literal configuration
+  entries, it also applies to **static** repositories; see §8.
 
 ## 6. Configuration
 
@@ -216,9 +235,14 @@ providers:
       - repositories: ["team/*"]
         effect: allow
         capabilities: [mr:read]
-      - repositories: ["archive/**"]
+      - repositories: ["team/ai-service", "archive/**"]
         effect: allow
-        capabilities: [repo:list, mr:read]
+        # Repo filters match project topics; the repo:list filter also applies
+        # to the literal "team/ai-service" entry.
+        capabilities:
+          - repo:list:
+              require: [ai-ok]
+          - mr:read
       - repositories: ["legacy/**"]
         effect: deny
 ```
@@ -279,9 +303,11 @@ privileged internal call and is not exposed as a capability.
 
 ```go
 type Repository struct {
-    Provider string // provider name from config
-    Path     string // canonical namespace/project
-    WebURL   string
+    Provider    string // provider name from config
+    Path        string // canonical namespace/project
+    WebURL      string
+    Topics      []string // GitLab project topics
+    TopicsKnown bool     // false = topics unavailable -> fail closed
 }
 
 type MergeRequest struct {
@@ -293,6 +319,8 @@ type MergeRequest struct {
     SourceBranch string
     TargetBranch string
     WebURL       string
+    Labels       []string // GitLab MR labels
+    LabelsKnown  bool     // false = labels unavailable -> fail closed
 }
 
 type Note struct {
@@ -312,6 +340,7 @@ type Provider interface {
     Type() string
 
     ListRepositories(ctx context.Context, opts RepoListOptions) ([]Repository, error)
+    GetRepositoryTopics(ctx context.Context, repo string) ([]string, error)
     ListMergeRequests(ctx context.Context, repo string, opts ListOptions) ([]MergeRequest, error)
     GetMergeRequest(ctx context.Context, repo string, number int64) (*MergeRequest, error)
     ListMergeRequestNotes(ctx context.Context, repo string, number int64) ([]Note, error)
@@ -333,17 +362,23 @@ a member) and **paginated**: the GitLab implementation maps `Limit` to `PerPage`
 exhausted. If more repositories exist than the limit allows, the server reports
 `truncated: true`. A single page is never silently treated as complete.
 
+The GitLab implementation maps each project's `topics` into `Repository.Topics` and
+sets `TopicsKnown = true`. `GetRepositoryTopics` fetches a single project (via the
+project endpoint) and returns its `topics`; errors map to `ErrNotFound`/a safe
+provider error. Topics are an authorization input and are never returned in tool
+output.
+
 ## 8. MCP Tools (first iteration)
 
 | Tool                        | Capability   | Provider operation          |
 |-----------------------------|--------------|-----------------------------|
 | `list_configured_rules`     | none         | — (from config)             |
-| `list_repositories`         | `repo:list`  | `ListRepositories`          |
+| `list_repositories`         | `repo:list`² | `ListRepositories`          |
 | `list_merge_requests`       | `mr:read`    | `ListMergeRequests`         |
 | `get_merge_request`         | `mr:read`¹   | `GetMergeRequest`           |
 | `list_merge_request_notes`  | `mr:read`¹   | `ListMergeRequestNotes`     |
 | `add_merge_request_note`    | `mr:comment`¹| `AddMergeRequestNote`       |
-| `read_file`                 | `repo:read`  | `ReadFile`                  |
+| `read_file`                 | `repo:read`² | `ReadFile`                  |
 
 ¹ **Tag filters** (§5) are evaluated against the fetched merge request.
 `get_merge_request` and `list_merge_request_notes` enforce an active `mr:read`
@@ -354,6 +389,13 @@ request metadata, then call `Guard.AuthorizeWithTags` with the MR labels. For
 fails, the post is denied (fail-closed). `list_merge_requests` does **not** evaluate
 labels (the list API returns none) and therefore **fails closed** whenever an
 `mr:read` tag filter is active.
+
+² **Repo topic filters** are evaluated against project topics. `read_file` fetches
+the repository's topics (`GetRepositoryTopics`) only when an active `repo:read`
+filter is configured, then evaluates them; a topic-fetch error denies the read
+(fail-closed). `list_repositories` applies an active `repo:list` filter to both
+static and discovered repositories (see below). `repo:write` has no tool, so filters
+on it are accepted but inert.
 
 `list_configured_rules` is config-only (no remote call, no secrets) and returns each
 configured rule with its **configured** capabilities, including any tag filters as
@@ -368,23 +410,28 @@ granted:
 - Input: `provider` (required; must be a registered provider), `search` (optional
   provider-side search term), `limit` (optional).
 - **Static repositories**: concrete paths listed literally in the configuration are
-  always returned, in first-appearance order and deduplicated, provided the first
-  matching rule allows them (a `deny` rule hides them). This requires no `repo:list`
-  capability, no provider API call and no `.noai` check. Static entries have no
-  `web_url`.
+  returned, in first-appearance order and deduplicated, provided the first matching
+  rule allows them (a `deny` rule hides them). **Conditional guarantee:** if the
+  matched allow rule carries an active `repo:list` topic filter, the repository's
+  topics are fetched and evaluated; a fetch error or a non-match omits it and
+  increments `omitted` (fail-closed). If **no** `repo:list` topic filter is active for
+  that path, the repository is returned with **no provider API call** (and no
+  capability or `.noai` check). Static entries have no `web_url`.
 - **Dynamic discovery**: if at least one allow-rule grants `repo:list`
   (`Guard.AuthorizeList`), the server issues one `ListRepositories` call with the
   caller's `search` (or none) and filters candidates client-side using the
-  policy-only `Guard.Evaluate(..., repo:list)`. If `repo:list` is not granted, the
-  call still succeeds and returns only the static repositories (possibly none); it is
-  **not** an error. There is no all-providers mode: `provider` is mandatory.
+  policy-only `Guard.EvaluateWithTags(..., repo:list, {topics})`. If `repo:list` is
+  not granted, the call still succeeds and returns only the static repositories
+  (possibly none); it is **not** an error. There is no all-providers mode: `provider`
+  is mandatory.
 - **`.noai` does not affect listing.** Listing never checks the marker, so a `.noai`
   repository (static or discovered) still appears. `.noai` only blocks operations via
   `Guard.Authorize`.
-- The `omitted` counter counts **only** discovered candidates that matched a rule but
-  were not allowed for `repo:list` (e.g. a `deny` rule or a rule that lacks the
-  capability). Candidates that match no rule at all are simply filtered out and are
-  **not** counted. Static repositories never contribute to `omitted`.
+- The `omitted` counter counts candidates that matched a rule but were not allowed or
+  could not be evaluated: discovered candidates filtered out by the policy (a `deny`
+  rule, a missing `repo:list` capability, a failed/unknown topic filter), and static
+  repositories omitted by an active `repo:list` topic filter. Candidates that match no
+  rule at all are simply filtered out and are **not** counted.
 - Results are deduplicated by provider+path (static wins). `limit` bounds only the
   number of **discovered** repositories; static repositories are always returned and
   may push the total above `limit`. The server requests `limit+1` candidates and
@@ -411,11 +458,13 @@ Tool arguments are validated with explicit bounds:
   reflects configured visibility; the marker still blocks every attempt to operate on
   that repository.
 - **Tags are an authorization input only.** Tag filters (§5) are evaluated against
-  merge request labels fetched per operation; labels are never cached and never
-  returned in tool output (the server's JSON output structs deliberately omit them).
-  When labels cannot be determined for an active filter, the decision fails closed
-  (`tag information unavailable`). `list_merge_requests` cannot evaluate labels and
-  fails closed under an active `mr:read` filter.
+  merge request labels or project topics fetched per operation; neither labels nor
+  topics are cached or returned in tool output (the server's JSON output structs
+  deliberately omit them). When tag information cannot be determined for an active
+  filter, the decision fails closed (`tag information unavailable`); a repo topic
+  fetch error fails closed. `list_merge_requests` cannot evaluate labels and fails
+  closed under an active `mr:read` filter. A `repo:list` topic filter also applies to
+  static config repositories so it cannot be bypassed by listing them literally.
 - **`list_configured_rules` exposes the policy** (patterns and effects) to the
   caller. This is intentional in the single-trusted-agent model and reveals no
   secrets; revisit if per-client identities are ever added.
@@ -451,21 +500,23 @@ Tool arguments are validated with explicit bounds:
   cfg)` / `Secret.String()` never contains the resolved value. Capability-grant
   parsing: scalar form, compact mapping form (require/exclude), null value, and
   rejection of unknown filter keys, more than one capability key, a tag in both
-  lists, empty tags, duplicate capabilities, filters on `repo:*`, and filters on
-  `deny` rules.
+  lists, empty tags, duplicate capabilities, filters on `deny` rules, and acceptance
+  of filters on repo capabilities.
 - `internal/policy`: rule precedence, `*` vs `**` glob matching, default deny,
   capability subset, deny override, `EvaluateWithTags` (require-all, exclude-any,
-  fail-closed on unknown tags, zero filter unaffected), `CapabilityGranted`
-  semantics, and `GrantsAnywhere` with filters.
+  fail-closed on unknown tags, zero filter unaffected, repo capabilities),
+  `CapabilityGranted` semantics, `HasTagFilter` (true only for a matched allow grant
+  with a non-zero filter), and `GrantsAnywhere` with filters.
 - `internal/policy/noai`: marker present/absent, provider error (always deny).
 - `internal/server`: end-to-end tool calls against a **fake provider** using the
   SDK's in-memory transports; assert allow, capability denial, `.noai` denial, repo
-  listing filtering, argument validation, and tag enforcement (allowed for a matching
-  label, denied for an excluded label, denied when labels are unknown, denied when an
-  active `mr:read` filter blocks `list_merge_requests`, and a metadata-fetch error
-  denying a note).
-- `internal/provider/gitlab`: mapping logic plus an `httptest`-based client test;
-  `GetMergeRequest` maps labels and sets `LabelsKnown`.
+  listing filtering, argument validation, MR label enforcement, and repo topic
+  enforcement (`read_file` allowed/denied on topics, topic-fetch error denies, no
+  topic call without a filter; `list_repositories` static and discovered filtering,
+  omitted counting, and `.noai` still denying `read_file` when topics pass).
+- `internal/provider/gitlab`: mapping logic plus `httptest`-based client tests;
+  `GetMergeRequest` maps labels (and sets `LabelsKnown`), `ListRepositories` maps
+  topics (and sets `TopicsKnown`), and `GetRepositoryTopics` returns topics / maps 404.
 
 ### Security-critical tests (mandatory)
 
@@ -499,6 +550,12 @@ Tool arguments are validated with explicit bounds:
     `mr:read` filters, `add_merge_request_note` enforces `mr:comment` filters and
     denies when the metadata fetch fails, `list_merge_requests` fails closed under an
     active `mr:read` filter, and `list_configured_rules` exposes the filters.
+13. Repo topic filters: `read_file` allows a matching topic and denies a
+    missing/excluded topic or a topic-fetch error, and makes no topic call when no
+    filter is active; `list_repositories` filters both static and discovered
+    repositories by topic (a static repo with an active filter is omitted on error or
+    non-match and counted in `omitted`; a static repo with no filter is returned with
+    no call), and `.noai` still denies `read_file` when the topic filter passes.
 
 ## 11. Dependencies
 
@@ -566,11 +623,27 @@ Makefile                        build/test/lint targets
 1. **Tag syntax**: filters are merged into the `capabilities` list as a compact
    single-key mapping (`mr:comment: {require: [...], exclude: [...]}`). Scalars remain
    valid. Tag equality is exact and case-sensitive.
-2. **Tag scope**: only MR capabilities may carry filters; `repo:*` filters and
-   filters on `deny` rules are rejected at config load.
+2. **Tag scope** (superseded by v0.5): v0.4 restricted filters to MR capabilities;
+   v0.5 extends them to repo capabilities (project topics). Filters on `deny` rules
+   remain rejected at config load.
 3. **Enforcement**: `get_merge_request`, `list_merge_request_notes` and
    `add_merge_request_note` evaluate tags after fetching the MR. `list_merge_requests`
    cannot (list API returns no labels) and fails closed under an active `mr:read`
    filter. Unknown labels fail closed everywhere.
 4. **Tags are never returned**: labels are an authorization input only and are never
    included in tool output.
+
+## 17. Resolved Questions (v0.5)
+
+1. **Repo filters**: tag filters are allowed on any known capability. For repo
+   capabilities they match GitLab project **topics**; matching is exact and
+   case-sensitive. `repo:write` filters are accepted but inert.
+2. **Topic source**: `ListRepositories` populates `Repository.Topics`/`TopicsKnown`
+   from `ListProjects`; a single repository's topics come from `GetRepositoryTopics`
+   (project endpoint). Topics are never cached or returned.
+3. **Static guarantee**: an active `repo:list` topic filter also applies to static
+   config repositories (topics fetched, omitted on error/non-match and counted in
+   `omitted`). Without an active filter, static repositories are returned with no
+   provider call.
+4. **Fail-closed**: unknown topics (`TopicsKnown=false`) or a topic-fetch error deny
+   `read_file` / omit the repository from `list_repositories`.

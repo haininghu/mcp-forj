@@ -158,19 +158,6 @@ func TestKnownCapabilities(t *testing.T) {
 	}
 }
 
-func TestIsMRCapability(t *testing.T) {
-	for _, c := range []Capability{CapMRRead, CapMRDiff, CapMRComment, CapMRWrite} {
-		if !IsMRCapability(c) {
-			t.Errorf("IsMRCapability(%s) = false, want true", c)
-		}
-	}
-	for _, c := range []Capability{CapRepoList, CapRepoRead, CapRepoWrite} {
-		if IsMRCapability(c) {
-			t.Errorf("IsMRCapability(%s) = true, want false", c)
-		}
-	}
-}
-
 func TestClassify(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
@@ -232,6 +219,49 @@ func TestGrantsAnywhere(t *testing.T) {
 	}
 	if p.GrantsAnywhere(CapMRRead) {
 		t.Error("GrantsAnywhere(mr:read) = true, want false")
+	}
+}
+
+func TestHasTagFilter(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/filtered"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: TagFilter{Require: []string{"ai-ok"}}},
+		}},
+		{Repositories: []string{"team/plain"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+	})
+
+	if !p.HasTagFilter("team/filtered", CapRepoRead) {
+		t.Error("HasTagFilter(filtered repo, filtered capability) = false, want true")
+	}
+	if p.HasTagFilter("team/filtered", CapRepoList) {
+		t.Error("HasTagFilter(filtered repo, missing capability) = true, want false")
+	}
+	if p.HasTagFilter("team/plain", CapRepoRead) {
+		t.Error("HasTagFilter(plain grant) = true, want false")
+	}
+	if p.HasTagFilter("team/secret", CapRepoRead) {
+		t.Error("HasTagFilter(deny rule) = true, want false")
+	}
+	if p.HasTagFilter("other/repo", CapRepoRead) {
+		t.Error("HasTagFilter(no match) = true, want false")
+	}
+}
+
+func TestEvaluateWithTagsRepoCapability(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: TagFilter{Require: []string{"ai-ok"}, Exclude: []string{"confidential"}}},
+		}},
+	})
+	if d := p.EvaluateWithTags("team/app", CapRepoRead, TagSet{Known: true, Values: []string{"ai-ok"}}); !d.Allowed {
+		t.Errorf("matching topics denied: %+v", d)
+	}
+	if d := p.EvaluateWithTags("team/app", CapRepoRead, TagSet{Known: true, Values: []string{"ai-ok", "confidential"}}); d.Allowed {
+		t.Errorf("excluded topic allowed: %+v", d)
+	}
+	if d := p.EvaluateWithTags("team/app", CapRepoRead, TagSet{}); d.Allowed {
+		t.Errorf("unknown topics allowed an active filter: %+v", d)
 	}
 }
 

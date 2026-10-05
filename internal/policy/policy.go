@@ -239,6 +239,27 @@ func (p *Policy) GrantsAnywhere(c Capability) bool {
 	return false
 }
 
+// HasTagFilter reports whether the first matching rule is an allow rule that
+// grants capability c with a non-zero tag filter. It is false for a deny rule,
+// no matching rule, or a missing/unfiltered capability. It is used to decide
+// whether tag information must be fetched before evaluating the capability.
+func (p *Policy) HasTagFilter(repo string, c Capability) bool {
+	for _, rule := range p.rules {
+		if !ruleMatches(rule, repo) {
+			continue
+		}
+		if rule.Effect != EffectAllow {
+			return false
+		}
+		filter, ok := rule.Capabilities[c]
+		if !ok {
+			return false
+		}
+		return !filter.IsZero()
+	}
+	return false
+}
+
 // Rules returns a deep copy of the compiled rules for introspection.
 func (p *Policy) Rules() []Rule {
 	out := make([]Rule, len(p.rules))

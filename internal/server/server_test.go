@@ -30,6 +30,9 @@ type fakeProvider struct {
 	notes           []provider.Note
 	added           []string
 	listReposCalls  int
+	topics          map[string][]string
+	topicsErr       map[string]error
+	topicsCalls     int
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -41,6 +44,17 @@ func (f *fakeProvider) ListRepositories(_ context.Context, opts provider.RepoLis
 		return nil, f.providerErr
 	}
 	return applyLimit(f.repos, opts.Limit), nil
+}
+
+func (f *fakeProvider) GetRepositoryTopics(_ context.Context, repo string) ([]string, error) {
+	f.topicsCalls++
+	if err, ok := f.topicsErr[repo]; ok {
+		return nil, err
+	}
+	if topics, ok := f.topics[repo]; ok {
+		return topics, nil
+	}
+	return nil, nil
 }
 
 func (f *fakeProvider) ListMergeRequests(_ context.Context, _ string, opts provider.ListOptions) ([]provider.MergeRequest, error) {
@@ -1078,5 +1092,164 @@ func TestLabelsNeverReturned(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func repoReadTopicRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapRepoRead,
+			Filter: policy.TagFilter{Require: []string{"ai-ok"}, Exclude: []string{"confidential"}},
+		}},
+	}}
+}
+
+func repoListTopicRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapRepoList,
+			Filter: policy.TagFilter{Require: []string{"ai-ok"}},
+		}},
+	}}
+}
+
+func readFileArgs() map[string]any {
+	return map[string]any{"provider": "fake", "repo": "team/app", "path": "README.md"}
+}
+
+func TestReadFileRepoReadTopicFilter(t *testing.T) {
+	tests := []struct {
+		name      string
+		topics    map[string][]string
+		topicsErr map[string]error
+		wantError bool
+	}{
+		{"matching topic", map[string][]string{"team/app": {"ai-ok"}}, nil, false},
+		{"missing required topic", map[string][]string{"team/app": {"other"}}, nil, true},
+		{"excluded topic present", map[string][]string{"team/app": {"ai-ok", "confidential"}}, nil, true},
+		{"topic fetch error", nil, map[string]error{"team/app": errors.New("boom")}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake()
+			fake.topics = tt.topics
+			fake.topicsErr = tt.topicsErr
+			env := newTestEnv(t, repoReadTopicRules(), fake)
+
+			res := env.call(t, "read_file", readFileArgs())
+			if res.IsError != tt.wantError {
+				t.Fatalf("isError = %v, want %v: %s", res.IsError, tt.wantError, resultText(t, res))
+			}
+		})
+	}
+}
+
+func TestReadFileNoRepoFilterNoTopicCall(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	res := env.call(t, "read_file", readFileArgs())
+	if res.IsError {
+		t.Fatalf("read_file denied: %s", resultText(t, res))
+	}
+	if fake.topicsCalls != 0 {
+		t.Errorf("GetRepositoryTopics called %d times, want 0 when no filter is active", fake.topicsCalls)
+	}
+}
+
+func TestNoAIDeniesReadFileWhenTopicFilterPasses(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	fake.topics = map[string][]string{"team/app": {"ai-ok"}}
+	env := newTestEnv(t, repoReadTopicRules(), fake)
+
+	res := env.call(t, "read_file", readFileArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("read_file result = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	}
+}
+
+func TestListRepositoriesStaticTopicFilter(t *testing.T) {
+	tests := []struct {
+		name        string
+		topics      map[string][]string
+		topicsErr   map[string]error
+		wantCount   int
+		wantOmitted int
+	}{
+		{"matching topic included", map[string][]string{"team/app": {"ai-ok"}}, nil, 1, 0},
+		{"missing topic omitted", map[string][]string{"team/app": {"other"}}, nil, 0, 1},
+		{"topic error omitted", nil, map[string]error{"team/app": errors.New("boom")}, 0, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake()
+			fake.topics = tt.topics
+			fake.topicsErr = tt.topicsErr
+			env := newTestEnv(t, repoListTopicRules(), fake)
+
+			res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+			if res.IsError {
+				t.Fatalf("list_repositories: %s", resultText(t, res))
+			}
+			out := repoJSON(t, res)
+			if len(out.Repositories) != tt.wantCount {
+				t.Errorf("repositories = %v, want %d", out.Repositories, tt.wantCount)
+			}
+			if out.Omitted != tt.wantOmitted {
+				t.Errorf("omitted = %d, want %d", out.Omitted, tt.wantOmitted)
+			}
+		})
+	}
+}
+
+func TestListRepositoriesStaticNoFilterNoTopicCall(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("repo:list"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/app" {
+		t.Fatalf("repositories = %v, want [team/app]", out.Repositories)
+	}
+	if fake.topicsCalls != 0 {
+		t.Errorf("GetRepositoryTopics called %d times, want 0 when no repo:list filter is active", fake.topicsCalls)
+	}
+}
+
+func TestListRepositoriesDiscoveredTopicFilter(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/good", Topics: []string{"ai-ok"}, TopicsKnown: true},
+		{Provider: "fake", Path: "archive/bad", Topics: []string{"other"}, TopicsKnown: true},
+		{Provider: "fake", Path: "archive/unknown", TopicsKnown: false},
+	}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"archive/**"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapRepoList,
+			Filter: policy.TagFilter{Require: []string{"ai-ok"}},
+		}},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/good" {
+		t.Fatalf("repositories = %v, want [archive/good]", out.Repositories)
+	}
+	if out.Omitted != 2 {
+		t.Errorf("omitted = %d, want 2 (non-matching + unknown topics)", out.Omitted)
 	}
 }

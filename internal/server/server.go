@@ -240,11 +240,35 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		seen      = make(map[string]bool, len(static))
 	)
 
-	// Repositories listed literally in the configuration are always returned
-	// (subject to deny rules); no capability, provider call or marker check.
-	// They are not subject to limit: only discovery is bounded.
+	// Repositories listed literally in the configuration are returned (subject
+	// to deny rules) with no capability, provider call or marker check. The one
+	// exception is an active repo:list tag filter: it must also apply to static
+	// repositories, otherwise the filter is trivially bypassed. In that case the
+	// topics are fetched and evaluated, and a fetch error or non-match omits the
+	// repository (fail-closed). They are not subject to the result limit: only
+	// discovery is bounded.
 	for _, repoPath := range static {
 		seen[name+"\x00"+repoPath] = true
+
+		hasFilter, err := s.guard.HasTagFilter(name, repoPath, policy.CapRepoList)
+		if err != nil {
+			return nil, nil, fmt.Errorf("unknown provider %q", name)
+		}
+		if hasFilter {
+			tags, topicErr := fetchTopics(ctx, p, repoPath)
+			if topicErr != nil {
+				omitted++
+				continue
+			}
+			decision, err := s.guard.EvaluateWithTags(name, repoPath, policy.CapRepoList, tags)
+			if err != nil {
+				return nil, nil, fmt.Errorf("unknown provider %q", name)
+			}
+			if !decision.Allowed {
+				omitted++
+				continue
+			}
+		}
 		collected = append(collected, repositoryJSON{Provider: name, Path: repoPath})
 	}
 
@@ -269,7 +293,10 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 			}
 			seen[key] = true
 
-			decision, err := s.guard.Evaluate(name, repo.Path, policy.CapRepoList)
+			decision, err := s.guard.EvaluateWithTags(name, repo.Path, policy.CapRepoList, policy.TagSet{
+				Known:  repo.TopicsKnown,
+				Values: repo.Topics,
+			})
 			if err != nil {
 				return nil, nil, fmt.Errorf("unknown provider %q", name)
 			}
@@ -426,14 +453,39 @@ func tagSetFromMR(mr provider.MergeRequest) policy.TagSet {
 	return policy.TagSet{Known: mr.LabelsKnown, Values: mr.Labels}
 }
 
+// fetchTopics fetches a repository's topics and returns a known tag set. A
+// fetch failure is reported as an error so the caller can fail closed.
+func fetchTopics(ctx context.Context, p provider.Provider, repo string) (policy.TagSet, error) {
+	topics, err := p.GetRepositoryTopics(ctx, repo)
+	if err != nil {
+		return policy.TagSet{}, fmt.Errorf("could not determine topics for repository %q; access denied", repo)
+	}
+	return policy.TagSet{Known: true, Values: topics}, nil
+}
+
 func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFileInput) (*mcp.CallToolResult, any, error) {
 	cleaned, err := validatePath(in.Path)
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveAuthorized(ctx, in.Provider, in.Repo, policy.CapRepoRead)
+	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapRepoRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	tags := policy.TagSet{}
+	if hasFilter, err := s.guard.HasTagFilter(in.Provider, in.Repo, policy.CapRepoRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	} else if hasFilter {
+		tags, err = fetchTopics(ctx, p, in.Repo)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapRepoRead, tags); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	data, err := p.ReadFile(ctx, in.Repo, cleaned, in.Ref)
 	if err != nil {

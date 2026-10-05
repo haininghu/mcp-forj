@@ -263,3 +263,61 @@ func TestReadFilePlainText(t *testing.T) {
 		t.Errorf("ReadFile = %q, want plain", data)
 	}
 }
+
+func TestListRepositoriesMapsTopics(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"id": 1, "path_with_namespace": "team/app", "web_url": "https://x/team/app", "topics": []string{"ai-ok", "backend"}},
+			{"id": 2, "path_with_namespace": "team/plain", "web_url": "https://x/team/plain"},
+		})
+	}))
+
+	repos, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("len = %d, want 2", len(repos))
+	}
+	if !repos[0].TopicsKnown || !reflect.DeepEqual(repos[0].Topics, []string{"ai-ok", "backend"}) {
+		t.Errorf("repo[0] topics = %v (known=%v)", repos[0].Topics, repos[0].TopicsKnown)
+	}
+	if !repos[1].TopicsKnown || len(repos[1].Topics) != 0 {
+		t.Errorf("repo[1] topics = %v (known=%v), want empty known set", repos[1].Topics, repos[1].TopicsKnown)
+	}
+}
+
+func TestGetRepositoryTopicsHTTP(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/projects/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":                  1,
+			"path_with_namespace": "team/app",
+			"web_url":             "https://x/team/app",
+			"topics":              []string{"ai-ok", "backend"},
+		})
+	}))
+
+	topics, err := c.GetRepositoryTopics(context.Background(), "team/app")
+	if err != nil {
+		t.Fatalf("GetRepositoryTopics: %v", err)
+	}
+	if !reflect.DeepEqual(topics, []string{"ai-ok", "backend"}) {
+		t.Errorf("topics = %v, want [ai-ok backend]", topics)
+	}
+}
+
+func TestGetRepositoryTopicsNotFound(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	_, err := c.GetRepositoryTopics(context.Background(), "team/app")
+	if err != provider.ErrNotFound {
+		t.Fatalf("error = %v, want provider.ErrNotFound", err)
+	}
+}
