@@ -1,8 +1,16 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.11** (repository discovery scope, prefix search, higher cap)
+Status: **Draft v0.12** (`search_namespaces` for prefix search)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.11
+
+- **AC1** GitLab project search matches only `path`/`name`/`description`, not
+  ancestor namespaces, so a derived prefix like `devops/platform` matched nothing.
+  When a search term is present, the provider now also sets
+  `search_namespaces=true`, so full namespace paths match (like the UI). The
+  parameter is omitted when there is no search term.
 
 ## Changelog vs. v0.10
 
@@ -443,6 +451,12 @@ member), while `membership` restricts to projects the token's user is a member o
 The GitLab implementation sets `membership=false` for `accessible` and
 `membership=true` for `membership`.
 
+When `Search` is set, the implementation also sends `search_namespaces=true`.
+GitLab's `search` matches only project `path`, `name`, or `description`; the extra
+flag includes ancestor namespaces, so a prefix such as `devops/platform` finds the
+projects under that namespace (matching what the UI does). Without a search term the
+flag is omitted. See §8 for how prefixes are derived.
+
 The GitLab implementation maps each project's `topics` into `Repository.Topics` and
 sets `TopicsKnown = true`. `GetRepositoryTopics` fetches a single project (via the
 project endpoint) and returns its `topics`; errors map to `ErrNotFound`/a safe
@@ -525,9 +539,12 @@ granted:
   candidates client-side using the policy-only
   `Guard.EvaluateWithTags(..., repo:list, {topics})`. An explicit `search` is used
   verbatim; when it is omitted, **search prefixes are derived** from the `repo:list`
-  rule patterns (`Guard.ListSearchPrefixes`), one call per prefix (`archive/**` →
-  `archive`), so glob patterns find their namespaces instead of relying on a broad,
-  truncated window. With no derivable prefix a single unfiltered call is made. If
+  rule patterns (`Guard.ListSearchPrefixes`), one call per prefix (`devops/platform/**`
+  → `devops/platform`), so glob patterns find their namespaces instead of relying on
+  a broad, truncated window. Each search also sets `search_namespaces=true` so the
+  full namespace path matches (GitLab otherwise searches only project
+  `path`/`name`/`description`). With no derivable prefix a single unfiltered call is
+  made. If
   `repo:list` is not granted, the call still succeeds and returns only the static
   repositories (possibly none); it is **not** an error. There is no all-providers
   mode: `provider` is mandatory.
@@ -850,3 +867,10 @@ Makefile                        build/test/lint targets
    Explicit `search` is a verbatim passthrough.
 3. **Cap**: repository discovery is capped at 1000 (default 100), separate from the
    100 cap for MRs and notes; `limit` bounds only discovered repositories.
+
+## 24. Resolved Questions (v0.12)
+
+1. **Namespace search**: prefix search sets `search_namespaces=true` alongside
+   `search`, so ancestor namespaces are matched (e.g. `devops/platform` finds
+   projects under that namespace, like the GitLab UI). The flag is omitted when no
+   search term is provided.

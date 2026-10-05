@@ -281,11 +281,11 @@ func TestGrantsAnywhereWithFilter(t *testing.T) {
 
 func TestListSearchPrefixes(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"archive/**", "team/*", "foo/bar", "**", "x/*", "archive/**"}, Effect: "allow", Capabilities: grants(CapRepoList)},
+		{Repositories: []string{"archive/**", "team/*", "foo/bar", "devops/platform/**", "**", "x/*", "archive/**"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 		{Repositories: []string{"other/**"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
 	got := p.ListSearchPrefixes(CapRepoList)
-	want := []string{"archive", "foo/bar", "team", "x"}
+	want := []string{"archive", "devops/platform", "foo/bar", "team", "x"}
 	if len(got) != len(want) {
 		t.Fatalf("ListSearchPrefixes = %v, want %v", got, want)
 	}

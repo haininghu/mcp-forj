@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
@@ -466,17 +467,40 @@ func TestListRepositoriesProjectScope(t *testing.T) {
 }
 
 func TestListRepositoriesSearchPassthrough(t *testing.T) {
-	var got string
+	var gotSearch, gotNamespaces string
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got = r.URL.Query().Get("search")
+		gotSearch = r.URL.Query().Get("search")
+		gotNamespaces = r.URL.Query().Get("search_namespaces")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]map[string]any{})
 	}))
 
-	if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "archive", Limit: 10}); err != nil {
+	if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "devops/platform", Limit: 10}); err != nil {
 		t.Fatalf("ListRepositories: %v", err)
 	}
-	if got != "archive" {
-		t.Errorf("search = %q, want archive", got)
+	if gotSearch != "devops/platform" {
+		t.Errorf("search = %q, want devops/platform", gotSearch)
+	}
+	if gotNamespaces != "true" {
+		t.Errorf("search_namespaces = %q, want true", gotNamespaces)
+	}
+}
+
+func TestListRepositoriesNoSearchOmitsNamespaces(t *testing.T) {
+	var values url.Values
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		values = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	}))
+
+	if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Limit: 10}); err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if values.Has("search") {
+		t.Errorf("search = %q, want absent", values.Get("search"))
+	}
+	if values.Has("search_namespaces") {
+		t.Errorf("search_namespaces = %q, want absent when no search term is given", values.Get("search_namespaces"))
 	}
 }

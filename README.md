@@ -81,8 +81,10 @@ config repositories — their topics are fetched and they may be omitted (counte
 returned with no provider API call. The `limit` argument bounds only the discovered
 repositories (default 100, capped at 1000); static repositories are always returned
 and may push the total above `limit`. When `search` is omitted, search prefixes are
-derived from the `repo:list` rule patterns (e.g. `archive/**` → `archive`), so glob
-patterns find their namespaces; an explicit `search` is passed through verbatim.
+derived from the `repo:list` rule patterns (e.g. `devops/platform/**` →
+`devops/platform`), so glob patterns find their namespaces; search requests set
+`search_namespaces=true` so full namespace paths match (GitLab otherwise searches only
+project path/name/description). An explicit `search` is passed through verbatim.
 Discovery scope is controlled by the provider's `project_scope`: `accessible`
 (default, all projects the token can see) or `membership`. Listing does not check the
 `.noai` marker, so a `.noai` repository may appear in a listing; the marker only

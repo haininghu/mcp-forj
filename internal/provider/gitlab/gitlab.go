@@ -85,7 +85,12 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 		}
 		if opts.Search != "" {
 			search := opts.Search
+			// GitLab searches path/name/description only; search_namespaces
+			// additionally matches ancestor namespaces, so a full namespace
+			// prefix such as "devops/platform" finds its projects (like the UI).
+			includeNamespaces := true
 			listOpts.Search = &search
+			listOpts.SearchNamespaces = &includeNamespaces
 		}
 		projects, resp, err := c.api.Projects.ListProjects(listOpts, gitlab.WithContext(ctx))
 		if err != nil {
