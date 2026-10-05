@@ -9,7 +9,7 @@ import (
 // Factory constructs a Provider from its configuration.
 type Factory func(cfg config.ProviderConfig) (Provider, error)
 
-// factories is populated by provider implementations via RegisterFactory. This
+// factories are populated by provider implementations via RegisterFactory. This
 // indirection lets this package expose New without importing the concrete
 // provider packages, which themselves import provider (avoiding an import
 // cycle).

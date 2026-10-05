@@ -365,10 +365,7 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		}
 
 		for _, term := range terms {
-			remaining := limit - discoveredCount
-			if remaining < 0 {
-				remaining = 0
-			}
+			remaining := max(limit-discoveredCount, 0)
 			repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: term, Limit: remaining + 1})
 			if err != nil {
 				return nil, nil, mapProviderError(err, "repository listing needs the Project: Read permission (and the group/project in the token scope)")
@@ -439,7 +436,7 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRRead); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit + 1})
@@ -482,7 +479,7 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRRead); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
@@ -506,7 +503,7 @@ func (s *Server) getMergeRequestDiff(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRDiff); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRDiff); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
@@ -570,7 +567,7 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRRead); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
@@ -611,7 +608,7 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRComment); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRComment); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	// The merge request metadata is an internal authorization input. If it
@@ -643,7 +640,7 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapRebase); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapRebase); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
@@ -697,7 +694,7 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapRepoRead); err != nil {
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapRepoRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	// Topics are needed only when the matched grant has an active tag

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -198,12 +199,12 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 				return Decision{CapabilityGranted: true, Matched: true, Reason: "tag information unavailable"}
 			}
 			for _, required := range filter.Require {
-				if !containsTag(tags.Values, required) {
+				if !slices.Contains(tags.Values, required) {
 					return Decision{CapabilityGranted: true, Matched: true, Reason: "tag requirement not met"}
 				}
 			}
 			for _, excluded := range filter.Exclude {
-				if containsTag(tags.Values, excluded) {
+				if slices.Contains(tags.Values, excluded) {
 					return Decision{CapabilityGranted: true, Matched: true, Reason: "excluded tag present"}
 				}
 			}
@@ -250,15 +251,6 @@ func validatePathPatterns(patterns []string) error {
 		}
 	}
 	return nil
-}
-
-func containsTag(tags []string, tag string) bool {
-	for _, t := range tags {
-		if t == tag {
-			return true
-		}
-	}
-	return false
 }
 
 // Classify returns the effect of the first rule matching repo. matched is false

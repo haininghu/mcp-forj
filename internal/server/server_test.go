@@ -712,7 +712,7 @@ func TestListRepositoriesDedupesStaticAndDynamic(t *testing.T) {
 func TestListRepositoriesTruncation(t *testing.T) {
 	fake := newFake()
 	fake.repos = nil
-	for i := 0; i < maxListResults+5; i++ {
+	for i := range maxListResults + 5 {
 		fake.repos = append(fake.repos, provider.Repository{Provider: "fake", Path: "archive/r" + string(rune('a'+i%26)) + string(rune('0'+i/26))})
 	}
 	env := newTestEnv(t, listReposRules("archive/**"), fake)
@@ -851,7 +851,7 @@ func TestListRepositoriesSchemaRequiresProvider(t *testing.T) {
 func TestListMergeRequestsTruncation(t *testing.T) {
 	fake := newFake()
 	fake.mrs = nil
-	for i := 0; i < maxListResults+5; i++ {
+	for i := range maxListResults + 5 {
 		fake.mrs = append(fake.mrs, provider.MergeRequest{Number: int64(i + 1), Title: "mr"})
 	}
 	env := newTestEnv(t, allowRules("mr:read"), fake)
@@ -875,7 +875,7 @@ func TestListMergeRequestsTruncation(t *testing.T) {
 func TestListMergeRequestNotesTruncation(t *testing.T) {
 	fake := newFake()
 	fake.notes = nil
-	for i := 0; i < maxListResults+5; i++ {
+	for i := range maxListResults + 5 {
 		fake.notes = append(fake.notes, provider.Note{ID: int64(i + 1), Body: "note"})
 	}
 	env := newTestEnv(t, allowRules("mr:read"), fake)
@@ -1676,7 +1676,7 @@ func TestListRepositoriesExplicitSearchUsedVerbatim(t *testing.T) {
 func TestListRepositoriesRaisedLimit(t *testing.T) {
 	fake := newFake()
 	fake.repos = nil
-	for i := 0; i < 150; i++ {
+	for i := range 150 {
 		fake.repos = append(fake.repos, provider.Repository{
 			Provider: "fake",
 			Path:     fmt.Sprintf("archive/r%03d", i),
@@ -1906,7 +1906,7 @@ func TestGetMergeRequestDiffTruncation(t *testing.T) {
 	t.Run("total budget truncation", func(t *testing.T) {
 		fake := newFake()
 		chunk := strings.Repeat("y", 64<<10)
-		for i := 0; i < 10; i++ {
+		for range 10 {
 			fake.diffs = append(fake.diffs, provider.DiffFile{OldPath: "f", NewPath: "f", Diff: chunk})
 		}
 		env := newTestEnv(t, allowRules("mr:diff"), fake)

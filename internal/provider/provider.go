@@ -44,8 +44,7 @@ func (e *HTTPError) Unwrap() error {
 
 // HTTPStatus returns the HTTP status carried by err, or 0 when none is present.
 func HTTPStatus(err error) int {
-	var httpErr *HTTPError
-	if errors.As(err, &httpErr) {
+	if httpErr, ok := errors.AsType[*HTTPError](err); ok {
 		return httpErr.Status
 	}
 	return 0

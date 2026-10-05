@@ -230,19 +230,18 @@ func TestAuthorizeRepoCapability(t *testing.T) {
 		}},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
-	ctx := context.Background()
 
 	// Ignores the tag filter and the marker, but requires the capability.
-	if err := g.AuthorizeRepoCapability(ctx, "fake", "team/app", CapMRComment); err != nil {
+	if err := g.AuthorizeRepoCapability("fake", "team/app", CapMRComment); err != nil {
 		t.Fatalf("AuthorizeRepoCapability = %v, want nil", err)
 	}
-	if err := g.AuthorizeRepoCapability(ctx, "fake", "team/app", CapMRRead); !errors.Is(err, ErrDenied) {
+	if err := g.AuthorizeRepoCapability("fake", "team/app", CapMRRead); !errors.Is(err, ErrDenied) {
 		t.Fatalf("AuthorizeRepoCapability(unGranted) = %v, want ErrDenied", err)
 	}
-	if err := g.AuthorizeRepoCapability(ctx, "fake", "other/repo", CapMRComment); !errors.Is(err, ErrUnknownRepository) {
+	if err := g.AuthorizeRepoCapability("fake", "other/repo", CapMRComment); !errors.Is(err, ErrUnknownRepository) {
 		t.Fatalf("AuthorizeRepoCapability(unknown repo) = %v, want ErrUnknownRepository", err)
 	}
-	if err := g.AuthorizeRepoCapability(ctx, "missing", "team/app", CapMRComment); !errors.Is(err, ErrUnknownProvider) {
+	if err := g.AuthorizeRepoCapability("missing", "team/app", CapMRComment); !errors.Is(err, ErrUnknownProvider) {
 		t.Fatalf("AuthorizeRepoCapability(missing provider) = %v, want ErrUnknownProvider", err)
 	}
 }

@@ -42,17 +42,17 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 
 ## Tools
 
-| Tool                       | Required capability | Description                             |
-|----------------------------|---------------------|-----------------------------------------|
-| `list_configured_rules`    | –                   | List configured rules and capabilities. |
-| `list_repositories`        | – (`repo:list`¹)    | List configured repos, plus discovered ones.|
-| `list_merge_requests`      | `mr:read`           | List merge requests.                    |
-| `get_merge_request`        | `mr:read`           | Fetch one merge request.                |
-| `list_merge_request_notes` | `mr:read`           | List comments on a merge request.       |
-| `get_merge_request_diff`   | `mr:diff`           | Fetch the file diffs of a merge request.|
-| `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.             |
-| `rebase_merge_request`     | `mr:rebase`         | Trigger an asynchronous MR rebase.      |
-| `read_file`                | `repo:read`         | Read a repository file.                 |
+| Tool                       | Required capability | Description                                  |
+|----------------------------|---------------------|----------------------------------------------|
+| `list_configured_rules`    | –                   | List configured rules and capabilities.      |
+| `list_repositories`        | – (`repo:list`¹)    | List configured repos, plus discovered ones. |
+| `list_merge_requests`      | `mr:read`           | List merge requests.                         |
+| `get_merge_request`        | `mr:read`           | Fetch one merge request.                     |
+| `list_merge_request_notes` | `mr:read`           | List comments on a merge request.            |
+| `get_merge_request_diff`   | `mr:diff`           | Fetch the file diffs of a merge request.     |
+| `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.                  |
+| `rebase_merge_request`     | `mr:rebase`         | Trigger an asynchronous MR rebase.           |
+| `read_file`                | `repo:read`         | Read a repository file.                      |
 
 ## Configuration
 

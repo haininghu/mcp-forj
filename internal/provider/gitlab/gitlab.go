@@ -80,10 +80,7 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 	if limit <= 0 {
 		limit = 100
 	}
-	perPage := limit
-	if perPage > 100 {
-		perPage = 100
-	}
+	perPage := min(limit, 100)
 
 	if opts.Search != "" {
 		repos, err := c.listGroupProjects(ctx, opts.Search, perPage, limit)
@@ -106,7 +103,7 @@ func (c *Client) listGroupProjects(ctx context.Context, group string, perPage, l
 	out := make([]provider.Repository, 0, limit)
 	for page := int64(1); ; page++ {
 		listOpts := &gitlab.ListGroupProjectsOptions{
-			ListOptions:      gitlab.ListOptions{PerPage: int64(perPage), Page: page},
+			PerPage: int64(perPage), Page: page,
 			IncludeSubGroups: &includeSubGroups,
 		}
 		projects, resp, err := c.api.Groups.ListGroupProjects(group, listOpts, gitlab.WithContext(ctx))
@@ -134,8 +131,8 @@ func (c *Client) listProjects(ctx context.Context, search string, perPage, limit
 	out := make([]provider.Repository, 0, limit)
 	for page := int64(1); ; page++ {
 		listOpts := &gitlab.ListProjectsOptions{
-			ListOptions: gitlab.ListOptions{PerPage: int64(perPage), Page: page},
-			Membership:  &membership,
+			PerPage: int64(perPage), Page: page,
+			Membership: &membership,
 		}
 		if search != "" {
 			term := search
@@ -235,7 +232,7 @@ func (c *Client) ListMergeRequestDiffs(ctx context.Context, repo string, number 
 	out := make([]provider.DiffFile, 0, maxDiffFiles)
 	for page := int64(1); ; page++ {
 		opts := &gitlab.ListMergeRequestDiffsOptions{
-			ListOptions: gitlab.ListOptions{PerPage: 100, Page: page},
+			PerPage: 100, Page: page,
 		}
 		diffs, resp, err := c.api.MergeRequests.ListMergeRequestDiffs(repo, number, opts, gitlab.WithContext(ctx))
 		if err != nil {

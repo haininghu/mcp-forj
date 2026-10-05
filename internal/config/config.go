@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -361,10 +362,8 @@ func (c *Config) Validate() error {
 			if len(rule.Repositories) == 0 {
 				return fmt.Errorf("config: provider %q rule %d: repositories must not be empty", p.Name, j)
 			}
-			for _, pattern := range rule.Repositories {
-				if pattern == "" {
-					return fmt.Errorf("config: provider %q rule %d: empty repository pattern", p.Name, j)
-				}
+			if slices.Contains(rule.Repositories, "") {
+				return fmt.Errorf("config: provider %q rule %d: empty repository pattern", p.Name, j)
 			}
 			seenCaps := make(map[string]bool, len(rule.Capabilities))
 			for k := range rule.Capabilities {
@@ -405,18 +404,14 @@ func (c *Config) Validate() error {
 						return fmt.Errorf("config: provider %q rule %d: path filters are not supported yet for capability %q", p.Name, j, grant.Name)
 					}
 					for _, included := range include {
-						for _, excluded := range excludePaths {
-							if included == excluded {
-								return fmt.Errorf("config: provider %q rule %d: path %q appears in both paths.include and paths.exclude", p.Name, j, included)
-							}
+						if slices.Contains(excludePaths, included) {
+							return fmt.Errorf("config: provider %q rule %d: path %q appears in both paths.include and paths.exclude", p.Name, j, included)
 						}
 					}
 				}
 				for _, required := range require {
-					for _, excluded := range exclude {
-						if required == excluded {
-							return fmt.Errorf("config: provider %q rule %d: tag %q appears in both require and exclude", p.Name, j, required)
-						}
+					if slices.Contains(exclude, required) {
+						return fmt.Errorf("config: provider %q rule %d: tag %q appears in both require and exclude", p.Name, j, required)
 					}
 				}
 			}

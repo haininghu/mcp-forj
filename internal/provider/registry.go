@@ -1,5 +1,7 @@
 package provider
 
+import "maps"
+
 import "sort"
 
 // Registry holds providers keyed by their logical name.
@@ -36,8 +38,6 @@ func (r *Registry) Names() []string {
 // All returns a copy of the provider map.
 func (r *Registry) All() map[string]Provider {
 	out := make(map[string]Provider, len(r.providers))
-	for name, p := range r.providers {
-		out[name] = p
-	}
+	maps.Copy(out, r.providers)
 	return out
 }

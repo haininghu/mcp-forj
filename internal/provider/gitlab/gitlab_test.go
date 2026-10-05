@@ -85,7 +85,7 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 		Name:           "p",
 		Type:           "gitlab",
 		BaseURL:        srv.URL,
-		Token:          config.Secret("test-token"),
+		Token:          "test-token",
 		RequestTimeout: config.Duration(5 * time.Second),
 	})
 	if err != nil {
@@ -458,7 +458,7 @@ func newScopedTestClient(t *testing.T, handler http.Handler, scope string) *Clie
 		Name:           "p",
 		Type:           "gitlab",
 		BaseURL:        srv.URL,
-		Token:          config.Secret("test-token"),
+		Token:          "test-token",
 		RequestTimeout: config.Duration(5 * time.Second),
 		ProjectScope:   scope,
 	})

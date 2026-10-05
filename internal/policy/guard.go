@@ -128,7 +128,7 @@ func (g *Guard) HasTagConstraint(providerName, repo string, c Capability) (bool,
 // and the .noai marker. It succeeds when the first matching rule allows the
 // capability (regardless of any active tag filter) and is used before a
 // privileged metadata fetch whose result is needed to evaluate the tags.
-func (g *Guard) AuthorizeRepoCapability(ctx context.Context, providerName, repo string, c Capability) error {
+func (g *Guard) AuthorizeRepoCapability(providerName, repo string, c Capability) error {
 	p, ok := g.policies[providerName]
 	if !ok {
 		g.logDecision(providerName, repo, c, "deny", "unknown provider")
