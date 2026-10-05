@@ -311,10 +311,18 @@ effective and does not reveal `.noai` state.
 - Every candidate repository returned by the provider is filtered through the normal
   `Guard.Authorize(..., repo:list)` check. Repositories blocked by `.noai` are
   **excluded**. A marker-check failure omits only that repository (fail-closed per
-  repository) and increments an `omitted` counter that is reported in the result, so
-  a listing is never silently incomplete.
-- Results are deduplicated by provider+path and capped at the limit with a
-  `truncated` flag.
+  repository). The `omitted` counter counts **only** candidates that matched a rule
+  but were blocked (a `deny` rule, the `.noai` marker, or a marker-check failure);
+  candidates that match no rule at all are simply filtered out and are **not**
+  counted. `omitted` is reported in the result, so a listing is never silently
+  incomplete.
+- Results are deduplicated by provider+path and capped at the limit. `truncated` is
+  `true` when the result may be incomplete for either reason: the cap was hit, or the
+  provider fetch window was exhausted. The server requests `limit+1` candidates per
+  provider and stops paginating there, so receiving more than `limit` candidates is
+  itself reported as `truncated`, even when client-side filtering leaves the returned
+  list under the cap. A filtered-out candidate does not by itself suppress
+  `truncated`.
 
 Tool arguments are validated with explicit bounds:
 - `provider` must name a configured provider.

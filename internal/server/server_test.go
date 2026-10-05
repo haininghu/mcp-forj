@@ -570,6 +570,35 @@ func TestListRepositoriesTruncation(t *testing.T) {
 	}
 }
 
+func TestListRepositoriesTruncatedWhenFetchWindowExhausted(t *testing.T) {
+	fake := newFake()
+	// The provider returns limit+1 candidates, but most match no rule. Even
+	// though filtering leaves only one repository (under the cap), the fetch
+	// window was exhausted so the listing may be incomplete.
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "other/a"},
+		{Provider: "fake", Path: "other/b"},
+		{Provider: "fake", Path: "other/c"},
+		{Provider: "fake", Path: "archive/ok"},
+	}
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake", "limit": 3})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if !out.Truncated {
+		t.Error("truncated = false, want true when the provider fetch window was exhausted")
+	}
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
+		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	}
+	if out.Omitted != 0 {
+		t.Errorf("omitted = %d, want 0 (no-rule candidates are not counted)", out.Omitted)
+	}
+}
+
 func TestListRepositoriesProviderSelection(t *testing.T) {
 	eligible := newFake()
 	eligible.name = "eligible"

@@ -53,7 +53,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_repositories",
-		Description: "Discover repositories the token is a member of that match the configured patterns. Requires the repo:list capability.",
+		Description: "Discover repositories the token is a member of that match the configured patterns. Results are capped and filtered per repository; truncated=true means the list may be incomplete because the cap was reached or the provider fetch window was exhausted. Requires the repo:list capability.",
 	}, s.listRepositories)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -228,6 +228,12 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: limit + 1})
 		if err != nil {
 			return nil, nil, mapProviderError(err)
+		}
+		// The provider fetch window itself was exhausted: there may be more
+		// candidates that were never returned, so the listing is incomplete even
+		// if filtering happens to leave room under the cap.
+		if len(repos) > limit {
+			truncated = true
 		}
 		for _, repo := range repos {
 			key := name + "\x00" + repo.Path

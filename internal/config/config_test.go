@@ -1,10 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/hvo/mcp-forj/internal/policy"
 )
@@ -392,6 +395,36 @@ func TestTokenRedaction(t *testing.T) {
 	}
 	if cfg.Providers[0].Token.String() != "[REDACTED]" {
 		t.Errorf("Token.String() = %q, want [REDACTED]", cfg.Providers[0].Token.String())
+	}
+	if cfg.Providers[0].Token.GoString() != "[REDACTED]" {
+		t.Errorf("Token.GoString() = %q, want [REDACTED]", cfg.Providers[0].Token.GoString())
+	}
+
+	jsonBytes, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(jsonBytes), secret) {
+		t.Errorf("json.Marshal leaked secret: %s", jsonBytes)
+	}
+
+	yamlBytes, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("yaml.Marshal: %v", err)
+	}
+	if strings.Contains(string(yamlBytes), secret) {
+		t.Errorf("yaml.Marshal leaked secret: %s", yamlBytes)
+	}
+}
+
+func TestTokenEnvWhitespaceOnlyRejected(t *testing.T) {
+	t.Setenv("MCP_FORJ_TEST_BLANK", "   ")
+	_, err := Parse([]byte(tokenYAML("${MCP_FORJ_TEST_BLANK}")))
+	if err == nil {
+		t.Fatal("Parse accepted a whitespace-only environment reference")
+	}
+	if !strings.Contains(err.Error(), "MCP_FORJ_TEST_BLANK") {
+		t.Errorf("error = %q, want it to name the environment variable", err)
 	}
 }
 

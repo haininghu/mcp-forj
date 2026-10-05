@@ -94,6 +94,10 @@ func (s Secret) GoString() string { return "[REDACTED]" }
 // LogValue implements slog.LogValuer and always redacts the value.
 func (s Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
 
+// MarshalText implements encoding.TextMarshaler so encoding/json and
+// gopkg.in/yaml.v3 also redact the value.
+func (s Secret) MarshalText() ([]byte, error) { return []byte("[REDACTED]"), nil }
+
 // Duration is a time.Duration that unmarshals from a Go duration string such as
 // "30s".
 type Duration time.Duration
@@ -164,7 +168,7 @@ func resolveSecret(raw string) (Secret, error) {
 	if envRefPattern.MatchString(trimmed) {
 		name := trimmed[2 : len(trimmed)-1]
 		value := os.Getenv(name)
-		if value == "" {
+		if strings.TrimSpace(value) == "" {
 			return "", fmt.Errorf("token: environment variable %s is empty or unset", name)
 		}
 		return Secret(value), nil
