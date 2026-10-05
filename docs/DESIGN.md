@@ -1,8 +1,16 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.16** (`mr:diff` tool)
+Status: **Draft v0.17** (`.noai` marker-check diagnostics)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + diffs + repo listing + rebase)
+
+## Changelog vs. v0.16
+
+- **AH1** `Guard.checkMarker` no longer discards the underlying provider error; it
+  wraps it after `ErrMarkerCheck` (`errors.Is` still matches `ErrMarkerCheck`, and
+  the cause is reachable). The server now reports an actionable message when the
+  marker check failed with `provider.ErrForbidden` (token needs repository read
+  access and the project must be in scope), otherwise the generic marker message.
 
 ## Changelog vs. v0.15
 
@@ -448,6 +456,13 @@ privileged internal call and is not exposed as a capability.
 > merge-request access only will make the `.noai` check fail, which (by design)
 > denies **`read_file`** (fail-closed). Merge-request operations are unaffected.
 > Document this clearly for operators.
+>
+> The marker-check error now surfaces the cause instead of a blanket
+> "could not verify" message: if the provider returned 401/403 (fine-grained
+> **Repository: Read** missing, or a classic token without `read_api`/`api`, or the
+> project outside the token scope), the server reports a **forbidden** message that
+> names repository read access and project scope. Other causes keep the generic
+> marker message. The underlying provider error remains reachable via `errors.Is`.
 
 ## 7. Provider Interface
 
@@ -711,7 +726,9 @@ Tool arguments are validated with explicit bounds:
 - **Error hygiene**: provider errors are mapped to safe, status-based messages
   (401/403 forbidden, 400/405/409 invalid state, 404 not found); raw HTTP bodies are
   never leaked to the MCP client. Actionable diagnostics (e.g. a missing scope or
-  role) come from these status classes, not from response content.
+  role) come from these status classes, not from response content. In particular a
+  forbidden `.noai` marker check reports that the token needs repository read access
+  and the project must be in scope, while other marker-check failures stay generic.
 
 ## 10. Testing Strategy
 
@@ -819,6 +836,10 @@ Tool arguments are validated with explicit bounds:
 17. Diffs: `get_merge_request_diff` requires `mr:diff`, is subject to MR tag filters,
     is **not** `.noai`-protected, caps at 100 files / 128 KiB per file / 512 KiB
     total (with `truncated` flags), and never returns labels.
+18. Marker diagnostics: `checkMarker` wraps the underlying cause; `read_file` on a
+    `.noai` repo reports a forbidden cause (repository read access / scope) when the
+    checker returns `ErrForbidden`, and the generic marker message otherwise, still
+    failing closed.
 
 ## 11. Dependencies
 
@@ -1014,3 +1035,11 @@ Makefile                        build/test/lint targets
 2. **Diff limits**: at most 100 files, 128 KiB per file (marker appended), 512 KiB
    total budget after which collection stops with `truncated: true`; labels are never
    returned.
+
+## 29. Resolved Questions (v0.17)
+
+1. **Marker diagnostics**: `Guard.checkMarker` wraps the provider error after
+   `ErrMarkerCheck`, so `errors.Is(err, ErrMarkerCheck)` still holds and the cause is
+   reachable. The server maps a forbidden cause to an actionable message (token needs
+   repository read access; project must be in the token scope) and keeps the generic
+   marker message otherwise; the operation still fails closed either way.

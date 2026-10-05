@@ -756,6 +756,9 @@ func mapAuthError(err error, providerName, repo string) error {
 	case errors.Is(err, policy.ErrNoAI):
 		return fmt.Errorf("repository %q is marked .noai and is off limits", repo)
 	case errors.Is(err, policy.ErrMarkerCheck):
+		if errors.Is(err, provider.ErrForbidden) {
+			return fmt.Errorf("could not verify the .noai marker for repository %q: forbidden (the token needs repository read access and the project must be in the token scope); access denied", repo)
+		}
 		return fmt.Errorf("could not verify the .noai marker for repository %q; access denied", repo)
 	default:
 		return errors.New("authorization failed")

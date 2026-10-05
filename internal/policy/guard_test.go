@@ -57,10 +57,14 @@ func TestGuardDeniesWhenMarkerPresent(t *testing.T) {
 }
 
 func TestGuardFailsClosedOnCheckerError(t *testing.T) {
-	g, _ := testGuard(t, fakeChecker{err: errors.New("network down")})
+	boom := errors.New("network down")
+	g, _ := testGuard(t, fakeChecker{err: boom})
 	err := g.Authorize(context.Background(), "fake", "team/app", CapRepoRead)
 	if !errors.Is(err, ErrMarkerCheck) {
 		t.Fatalf("error = %v, want ErrMarkerCheck", err)
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("underlying checker error is not wrapped/reachable: %v", err)
 	}
 }
 

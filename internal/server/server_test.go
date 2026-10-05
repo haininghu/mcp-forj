@@ -1922,3 +1922,36 @@ func TestGetMergeRequestDiffTruncation(t *testing.T) {
 		}
 	})
 }
+
+func TestMarkerCheckForbiddenDiagnostic(t *testing.T) {
+	fake := newFake()
+	fake.markerErrByRepo = map[string]error{"team/app": fmt.Errorf("gitlab: %w", provider.ErrForbidden)}
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	res := env.call(t, "read_file", readFileArgs())
+	if !res.IsError {
+		t.Fatal("read_file succeeded despite a forbidden marker check")
+	}
+	text := strings.ToLower(resultText(t, res))
+	if !strings.Contains(text, "forbidden") || !strings.Contains(text, "repository read access") {
+		t.Errorf("error = %q, want the forbidden repository-read hint", resultText(t, res))
+	}
+}
+
+func TestMarkerCheckGenericDiagnostic(t *testing.T) {
+	fake := newFake()
+	fake.markerErrByRepo = map[string]error{"team/app": errors.New("network down")}
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	res := env.call(t, "read_file", readFileArgs())
+	if !res.IsError {
+		t.Fatal("read_file succeeded despite a marker check error")
+	}
+	text := resultText(t, res)
+	if !strings.Contains(text, "could not verify the .noai marker") {
+		t.Errorf("error = %q, want the generic marker message", text)
+	}
+	if strings.Contains(strings.ToLower(text), "forbidden") {
+		t.Errorf("error = %q, unexpectedly mentions forbidden", text)
+	}
+}

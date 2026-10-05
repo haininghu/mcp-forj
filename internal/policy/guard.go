@@ -155,7 +155,7 @@ func (g *Guard) checkMarker(ctx context.Context, providerName, repo string) erro
 	exists, err := checker.FileExists(ctx, repo, g.markerFile, "")
 	if err != nil {
 		g.logger.Info("marker check", "provider", providerName, "repo", repo, "marker", g.markerFile, "result", "error")
-		return fmt.Errorf("%w: %s", ErrMarkerCheck, repo)
+		return fmt.Errorf("%w: %s: %w", ErrMarkerCheck, repo, err)
 	}
 	g.logger.Info("marker check", "provider", providerName, "repo", repo, "marker", g.markerFile, "exists", exists)
 	if exists {

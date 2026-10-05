@@ -151,8 +151,10 @@ The `token` field accepts either a literal secret or `${NAME}` references expand
 from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is
 never logged. It must be able to read repository files on the default branch so the
 `.noai` check works; otherwise repository-content operations are denied
-(fail-closed). Merge-request operations and repository listing are not affected by
-`.noai`.
+(fail-closed). A token lacking that read access (fine-grained Repository: Read, or a
+classic token without read_api/api, or a project outside scope) yields a "forbidden"
+marker-check message naming repository read access and scope. Merge-request
+operations and repository listing are not affected by `.noai`.
 
 ## License
 
