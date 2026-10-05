@@ -154,8 +154,10 @@ never logged. It must be able to read repository files on the default branch so 
 (fail-closed). A token lacking that read access (fine-grained Repository: Read, or a
 classic token without read_api/api, or a project outside scope) yields a "forbidden"
 marker-check message naming repository read access and scope, including the numeric
-HTTP status. Provider errors surface their HTTP status too. Merge-request operations
-and repository listing are not affected by `.noai`.
+HTTP status. Provider errors surface their HTTP status too, and a forbidden error
+names the resource permission the operation needs (for example MR comments need
+Work Item: Create, rebase needs Merge Request: Update). Merge-request operations and
+repository listing are not affected by `.noai`.
 
 ## License
 

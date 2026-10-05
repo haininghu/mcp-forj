@@ -371,7 +371,7 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 			}
 			repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: term, Limit: remaining + 1})
 			if err != nil {
-				return nil, nil, mapProviderError(err)
+				return nil, nil, mapProviderError(err, "repository listing needs the Project: Read permission (and the group/project in the token scope)")
 			}
 			newCandidates := 0
 			for _, repo := range repos {
@@ -444,7 +444,7 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit + 1})
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
 	}
 
 	// The provider fetch window itself was exhausted: there may be more
@@ -487,7 +487,7 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
 	}
 	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRRead, tagSetFromMR(*mr)); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
@@ -511,14 +511,14 @@ func (s *Server) getMergeRequestDiff(ctx context.Context, _ *mcp.CallToolRequest
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
 	}
 	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRDiff, tagSetFromMR(*mr)); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	files, err := p.ListMergeRequestDiffs(ctx, in.Repo, in.Number)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge request diffs needs the Merge Request: Read permission")
 	}
 	out, truncated := toDiffFiles(files)
 	return jsonResult(mergeRequestDiffOutput{Number: in.Number, Files: out, Truncated: truncated})
@@ -575,7 +575,7 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
 	}
 	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRRead, tagSetFromMR(*mr)); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
@@ -583,7 +583,7 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	limit := maxListResults
 	notes, err := p.ListMergeRequestNotes(ctx, in.Repo, in.Number, provider.ListOptions{Limit: limit + 1})
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge request notes needs the Work Item: Read permission")
 	}
 	truncated := false
 	if len(notes) > limit {
@@ -618,14 +618,14 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 	// cannot be fetched, the post is denied (fail-closed).
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
 	}
 	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRComment, tagSetFromMR(*mr)); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	note, err := p.AddMergeRequestNote(ctx, in.Repo, in.Number, in.Body)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "writing a merge request comment needs the Work Item: Create permission (and the project in scope)")
 	}
 	return jsonResult(toNoteJSON(*note))
 }
@@ -648,13 +648,13 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
 	}
 	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapRebase, tagSetFromMR(*mr)); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	if err := p.RebaseMergeRequest(ctx, in.Repo, in.Number); err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "rebasing needs the Merge Request: Update permission and a role allowed to push to the source branch")
 	}
 	return jsonResult(rebaseMergeRequestOutput{
 		Provider: in.Provider,
@@ -716,7 +716,7 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	}
 	data, err := p.ReadFile(ctx, in.Repo, cleaned, in.Ref)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, mapProviderError(err, "reading repository files needs the Repository: Read permission")
 	}
 	content := string(data)
 	truncated := false
@@ -766,13 +766,19 @@ func mapAuthError(err error, providerName, repo string) error {
 	}
 }
 
-func mapProviderError(err error) error {
+// mapProviderError maps a provider error to a safe message. hint, when
+// non-empty, describes the resource permission the failed operation needs and is
+// used for forbidden errors; response bodies and tokens are never surfaced.
+func mapProviderError(err error, hint string) error {
 	status := provider.HTTPStatus(err)
 	switch {
 	case errors.Is(err, provider.ErrNotFound):
 		return withStatus("not found", status)
 	case errors.Is(err, provider.ErrForbidden):
-		return withStatus("forbidden: the provider token lacks the required permission (write scope, merge-request Update permission, or sufficient project role)", status)
+		if hint != "" {
+			return withStatus("forbidden: "+hint, status)
+		}
+		return withStatus("forbidden: the provider token lacks the required permission for this operation", status)
 	case errors.Is(err, provider.ErrInvalidState):
 		return withStatus("the merge request is not in a rebaseable state", status)
 	default:

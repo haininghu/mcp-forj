@@ -1,8 +1,16 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.19** (fixed repository-file `ref` handling)
+Status: **Draft v0.20** (operation-specific forbidden messages)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + diffs + repo listing + rebase)
+
+## Changelog vs. v0.19
+
+- **AK1** `mapProviderError` takes an operation hint; forbidden errors now name the
+  resource permission the failed operation needs (e.g. MR comments need Work Item:
+  Create, rebase needs Merge Request: Update, read_file needs Repository: Read)
+  instead of a misleading generic list. The generic message is kept when no hint
+  applies, and the HTTP status is still appended.
 
 ## Changelog vs. v0.18
 
@@ -745,9 +753,14 @@ Tool arguments are validated with explicit bounds:
   HTTP status is surfaced** (`(HTTP <n>)`) via `provider.HTTPError`/`HTTPStatus`; raw
   HTTP bodies are never leaked to the MCP client. Actionable diagnostics (e.g. a
   missing scope or role) come from these status classes, not from response content.
-  In particular a forbidden `.noai` marker check reports that the token needs
-  repository read access and the project must be in scope (with the status code),
-  while other marker-check failures stay generic (still with the code when known).
+  Forbidden messages are **operation-specific**: each tool passes a hint naming the
+  resource permission it needs (e.g. MR comments → Work Item: Create; rebase → Merge
+  Request: Update; `read_file` → Repository: Read; MR reads/diffs → Merge Request:
+  Read; note reads → Work Item: Read; listing → Project: Read), and the generic
+  message is used when no hint applies. A forbidden `.noai` marker check reports that
+  the token needs repository read access and the project must be in scope (with the
+  status code); other marker-check failures stay generic (still with the code when
+  known).
 
 ## 10. Testing Strategy
 
@@ -1070,3 +1083,13 @@ Makefile                        build/test/lint targets
    `(HTTP <n>)` to provider-error and marker-check messages when known. `gitlab`
    404s (a plain sentinel) are surfaced as HTTP 404. Response bodies/tokens are never
    included.
+
+## 31. Resolved Questions (v0.20)
+
+1. **Operation-specific forbidden messages**: `mapProviderError(err, hint)` renders
+   `forbidden: <hint>` when a hint is supplied, otherwise the generic
+   `forbidden: the provider token lacks the required permission for this operation`,
+   always with the HTTP status when known. Hints name the resource permission per
+   tool: Work Item: Create (note writes), Work Item: Read (note reads), Merge
+   Request: Update (rebase), Merge Request: Read (MR reads/diffs), Repository: Read
+   (file reads), Project: Read (listing).

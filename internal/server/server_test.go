@@ -35,6 +35,7 @@ type fakeProvider struct {
 	diffCalls        int
 	diffErr          error
 	diffs            []provider.DiffFile
+	addNoteErr       error
 	listReposCalls   int
 	listRepoSearches []string
 	topics           map[string][]string
@@ -100,6 +101,9 @@ func applyLimit[T any](items []T, limit int) []T {
 }
 
 func (f *fakeProvider) AddMergeRequestNote(_ context.Context, _ string, _ int64, body string) (*provider.Note, error) {
+	if f.addNoteErr != nil {
+		return nil, f.addNoteErr
+	}
 	if f.providerErr != nil {
 		return nil, f.providerErr
 	}
@@ -1971,4 +1975,68 @@ func TestMarkerCheckGenericDiagnostic(t *testing.T) {
 	if strings.Contains(strings.ToLower(text), "forbidden") {
 		t.Errorf("error = %q, unexpectedly mentions forbidden", text)
 	}
+}
+
+func TestForbiddenHints(t *testing.T) {
+	forbidden := func() error {
+		return &provider.HTTPError{Status: 403, Err: provider.ErrForbidden}
+	}
+
+	t.Run("comment needs Work Item Create", func(t *testing.T) {
+		fake := newFake()
+		fake.addNoteErr = forbidden()
+		env := newTestEnv(t, allowRules("mr:comment"), fake)
+
+		res := env.call(t, "add_merge_request_note", map[string]any{
+			"provider": "fake", "repo": "team/app", "number": 1, "body": "hi",
+		})
+		if !res.IsError {
+			t.Fatal("expected a forbidden error")
+		}
+		text := resultText(t, res)
+		if !strings.Contains(text, "Work Item: Create") {
+			t.Errorf("error = %q, want the Work Item: Create hint", text)
+		}
+		if !strings.Contains(text, "HTTP 403") {
+			t.Errorf("error = %q, want the HTTP status", text)
+		}
+	})
+
+	t.Run("rebase needs Merge Request Update", func(t *testing.T) {
+		fake := newFake()
+		fake.rebaseErr = forbidden()
+		env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+		res := env.call(t, "rebase_merge_request", rebaseArgs())
+		if !res.IsError {
+			t.Fatal("expected a forbidden error")
+		}
+		if !strings.Contains(resultText(t, res), "Merge Request: Update") {
+			t.Errorf("error = %q, want the Merge Request: Update hint", resultText(t, res))
+		}
+	})
+
+	t.Run("read_file needs Repository Read", func(t *testing.T) {
+		fake := newFake()
+		fake.providerErr = forbidden()
+		env := newTestEnv(t, allowRules("repo:read"), fake)
+
+		res := env.call(t, "read_file", readFileArgs())
+		if !res.IsError {
+			t.Fatal("expected a forbidden error")
+		}
+		if !strings.Contains(resultText(t, res), "Repository: Read") {
+			t.Errorf("error = %q, want the Repository: Read hint", resultText(t, res))
+		}
+	})
+
+	t.Run("generic forbidden without a hint", func(t *testing.T) {
+		err := mapProviderError(forbidden(), "")
+		if !strings.Contains(err.Error(), "required permission for this operation") {
+			t.Errorf("error = %q, want the generic forbidden message", err)
+		}
+		if !strings.Contains(err.Error(), "HTTP 403") {
+			t.Errorf("error = %q, want the HTTP status", err)
+		}
+	})
 }
