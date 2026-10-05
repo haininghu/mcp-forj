@@ -1052,3 +1052,31 @@ func TestListConfiguredRulesExposesFilters(t *testing.T) {
 		t.Errorf("exclude = %v, want [do-not-touch]", cap.Exclude)
 	}
 }
+
+func TestLabelsNeverReturned(t *testing.T) {
+	fake := newFake()
+	setLabels(fake, true, "internal-only", "secret-label-value")
+	env := newTestEnv(t, allowRules("mr:read", "mr:comment"), fake)
+
+	calls := []struct {
+		name string
+		args map[string]any
+	}{
+		{"get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1}},
+		{"add_merge_request_note", map[string]any{"provider": "fake", "repo": "team/app", "number": 1, "body": "hi"}},
+	}
+	for _, c := range calls {
+		t.Run(c.name, func(t *testing.T) {
+			res := env.call(t, c.name, c.args)
+			if res.IsError {
+				t.Fatalf("%s: %s", c.name, resultText(t, res))
+			}
+			lower := strings.ToLower(resultText(t, res))
+			for _, forbidden := range []string{"labels", "labels_known", "label"} {
+				if strings.Contains(lower, forbidden) {
+					t.Errorf("%s output contains %q: %s", c.name, forbidden, resultText(t, res))
+				}
+			}
+		})
+	}
+}

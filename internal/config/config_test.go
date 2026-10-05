@@ -567,6 +567,24 @@ providers:
 			wantErr: "exactly one capability key",
 		},
 		{
+			name: "duplicate filter key",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:comment:
+              require: [a]
+              require: [b]
+`,
+			wantErr: "duplicate filter key",
+		},
+		{
 			name: "tag in both lists",
 			yaml: `
 providers:

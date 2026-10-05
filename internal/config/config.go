@@ -122,9 +122,14 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 			return fmt.Errorf("capability %q filter must be a mapping or null", name)
 		}
 		g.Name = name
+		seen := make(map[string]bool, len(filter.Content)/2)
 		for i := 0; i+1 < len(filter.Content); i += 2 {
 			key := filter.Content[i].Value
 			val := filter.Content[i+1]
+			if seen[key] {
+				return fmt.Errorf("capability %q: duplicate filter key %q", name, key)
+			}
+			seen[key] = true
 			switch key {
 			case "require":
 				if err := val.Decode(&g.Require); err != nil {
