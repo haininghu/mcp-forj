@@ -202,6 +202,18 @@ func (g *Guard) EvaluateWithTags(providerName, repo string, c Capability, tags T
 	return decision, nil
 }
 
+// ListSearchPrefixes returns the literal project search prefixes derived from
+// the provider's allow rules that grant capability c. It is used to seed
+// provider-side discovery. It returns ErrUnknownProvider when the provider has
+// no policy.
+func (g *Guard) ListSearchPrefixes(providerName string, c Capability) ([]string, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.ListSearchPrefixes(c), nil
+}
+
 // ConfiguredRule describes a rule as it appears in the configuration. It is
 // used by list_configured_rules and deliberately exposes only configured
 // capabilities, never effective access.

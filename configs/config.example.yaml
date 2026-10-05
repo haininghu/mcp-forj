@@ -23,6 +23,10 @@ providers:
     base_url: https://gitlab.example.com
     token: "${GITLAB_WORK_TOKEN}"
     request_timeout: 30s
+    # Which projects repository discovery may see:
+    #   accessible (default) - public/internal/group access plus member
+    #   membership           - only projects the token's user is a member of
+    project_scope: accessible
     # Access is deny-by-default; only the rules below grant anything.
     rules:
       # Inspect and comment on MRs, but do not read source or change anything.

@@ -260,6 +260,43 @@ func (p *Policy) HasTagFilter(repo string, c Capability) bool {
 	return false
 }
 
+// ListSearchPrefixes returns the literal project search prefixes derived from
+// every allow rule that grants capability c. A prefix is the part of a
+// repository pattern before its first glob metacharacter, with any trailing
+// slash trimmed; patterns that begin with a metacharacter (e.g. "**") yield no
+// prefix. Empty prefixes are skipped and the result is deduplicated and sorted.
+func (p *Policy) ListSearchPrefixes(c Capability) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, rule := range p.rules {
+		if rule.Effect != EffectAllow {
+			continue
+		}
+		if _, ok := rule.Capabilities[c]; !ok {
+			continue
+		}
+		for _, pattern := range rule.Repositories {
+			prefix := literalPrefix(pattern)
+			if prefix == "" || seen[prefix] {
+				continue
+			}
+			seen[prefix] = true
+			out = append(out, prefix)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// literalPrefix returns the substring of pattern before its first glob
+// metacharacter, with any trailing slash trimmed.
+func literalPrefix(pattern string) string {
+	if i := strings.IndexAny(pattern, `*?[{\`); i >= 0 {
+		pattern = pattern[:i]
+	}
+	return strings.TrimSuffix(pattern, "/")
+}
+
 // Rules returns a deep copy of the compiled rules for introspection.
 func (p *Policy) Rules() []Rule {
 	out := make([]Rule, len(p.rules))

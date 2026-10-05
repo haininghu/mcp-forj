@@ -100,8 +100,8 @@ func TestListRepositoriesPagination(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		if got := r.URL.Query().Get("membership"); got != "true" {
-			t.Errorf("membership = %q, want true", got)
+		if got := r.URL.Query().Get("membership"); got != "false" {
+			t.Errorf("membership = %q, want false (default accessible scope)", got)
 		}
 		searches = append(searches, r.URL.Query().Get("search"))
 		page := r.URL.Query().Get("page")
@@ -415,5 +415,68 @@ func TestListMergeRequestsMapsLabels(t *testing.T) {
 	}
 	if mrs[1].LabelsKnown || mrs[1].Labels != nil {
 		t.Errorf("mrs[1] labels = %v (known=%v), want unknown when the field is absent", mrs[1].Labels, mrs[1].LabelsKnown)
+	}
+}
+
+func newScopedTestClient(t *testing.T, handler http.Handler, scope string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	c, err := New(config.ProviderConfig{
+		Name:           "p",
+		Type:           "gitlab",
+		BaseURL:        srv.URL,
+		Token:          config.Secret("test-token"),
+		RequestTimeout: config.Duration(5 * time.Second),
+		ProjectScope:   scope,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return c
+}
+
+func TestListRepositoriesProjectScope(t *testing.T) {
+	tests := []struct {
+		name  string
+		scope string
+		want  string
+	}{
+		{"accessible", "accessible", "false"},
+		{"membership", "membership", "true"},
+		{"empty defaults to accessible", "", "false"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			c := newScopedTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.URL.Query().Get("membership")
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode([]map[string]any{})
+			}), tt.scope)
+
+			if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Limit: 10}); err != nil {
+				t.Fatalf("ListRepositories: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("membership = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListRepositoriesSearchPassthrough(t *testing.T) {
+	var got string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.URL.Query().Get("search")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{})
+	}))
+
+	if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "archive", Limit: 10}); err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if got != "archive" {
+		t.Errorf("search = %q, want archive", got)
 	}
 }

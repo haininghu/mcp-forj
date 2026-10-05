@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -22,7 +23,8 @@ import (
 const (
 	maxFileBytes    = 1 << 20 // 1 MiB
 	maxTextBytes    = 64 << 10
-	maxListResults  = 100
+	maxListResults  = 100  // MRs and notes
+	maxRepoResults  = 1000 // repository discovery cap
 	truncatedMarker = "\n[truncated]"
 )
 
@@ -93,8 +95,8 @@ type listConfiguredRulesInput struct{}
 
 type listRepositoriesInput struct {
 	Provider string `json:"provider" jsonschema:"logical provider name"`
-	Search   string `json:"search,omitempty" jsonschema:"optional provider-side search term"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of discovered repositories (capped at 100); configured repositories are always returned"`
+	Search   string `json:"search,omitempty" jsonschema:"optional provider-side search term; when omitted, search prefixes are derived from the repo:list rules"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of discovered repositories (capped at 1000); configured repositories are always returned"`
 }
 
 type listMergeRequestsInput struct {
@@ -238,8 +240,11 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 
 func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, in listRepositoriesInput) (*mcp.CallToolResult, any, error) {
 	limit := in.Limit
-	if limit <= 0 || limit > maxListResults {
+	if limit <= 0 {
 		limit = maxListResults
+	}
+	if limit > maxRepoResults {
+		limit = maxRepoResults
 	}
 
 	name := in.Provider
@@ -297,51 +302,82 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 	}
 
 	// Dynamic discovery through the provider API requires repo:list. Without it
-	// the listing simply contains the static repositories (possibly none).
+	// the listing simply contains the static repositories (possibly none). The
+	// caller's search is a passthrough; when omitted, provider-side prefixes are
+	// derived from the repo:list rules so glob patterns (e.g. "archive/**")
+	// actually find their namespaces instead of relying on an unfiltered window.
 	if s.guard.AuthorizeList(name) == nil {
-		dynamicLimit := limit
-		repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: dynamicLimit + 1})
-		if err != nil {
-			return nil, nil, mapProviderError(err)
-		}
-		// The provider fetch window itself was exhausted: there may be more
-		// candidates that were never returned, so the listing is incomplete even
-		// if filtering happens to leave room under the cap.
-		if len(repos) > dynamicLimit {
-			truncated = true
-		}
-		for _, repo := range repos {
-			key := name + "\x00" + repo.Path
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-
-			decision, err := s.guard.EvaluateWithTags(name, repo.Path, policy.CapRepoList, policy.TagSet{
-				Known:  repo.TopicsKnown,
-				Values: repo.Topics,
-			})
+		terms := []string{in.Search}
+		if in.Search == "" {
+			prefixes, err := s.guard.ListSearchPrefixes(name, policy.CapRepoList)
 			if err != nil {
 				return nil, nil, fmt.Errorf("unknown provider %q", name)
 			}
-			if !decision.Allowed {
-				if decision.Matched {
-					omitted++
+			terms = prefixes
+			if len(terms) == 0 {
+				terms = []string{""}
+			}
+		}
+
+		for _, term := range terms {
+			remaining := limit - discoveredCount
+			if remaining < 0 {
+				remaining = 0
+			}
+			repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: term, Limit: remaining + 1})
+			if err != nil {
+				return nil, nil, mapProviderError(err)
+			}
+			newCandidates := 0
+			for _, repo := range repos {
+				key := name + "\x00" + repo.Path
+				if seen[key] {
+					continue
 				}
-				continue
+				seen[key] = true
+				newCandidates++
+
+				decision, err := s.guard.EvaluateWithTags(name, repo.Path, policy.CapRepoList, policy.TagSet{
+					Known:  repo.TopicsKnown,
+					Values: repo.Topics,
+				})
+				if err != nil {
+					return nil, nil, fmt.Errorf("unknown provider %q", name)
+				}
+				if !decision.Allowed {
+					if decision.Matched {
+						omitted++
+					}
+					continue
+				}
+				if discoveredCount >= limit {
+					truncated = true
+					continue
+				}
+				collected = append(collected, repositoryJSON{
+					Provider: name,
+					Path:     repo.Path,
+					WebURL:   repo.WebURL,
+				})
+				discoveredCount++
 			}
-			if discoveredCount >= limit {
+			// The provider fetch window itself was exhausted: this call offered
+			// more distinct candidates than the remaining capacity, so there may
+			// be more that were never returned. Duplicates across prefix searches
+			// do not count.
+			if newCandidates > remaining {
 				truncated = true
-				continue
 			}
-			collected = append(collected, repositoryJSON{
-				Provider: name,
-				Path:     repo.Path,
-				WebURL:   repo.WebURL,
-			})
-			discoveredCount++
 		}
 	}
+
+	// Deterministic output: sort by provider then path (static entries included).
+	sort.SliceStable(collected, func(i, j int) bool {
+		if collected[i].Provider != collected[j].Provider {
+			return collected[i].Provider < collected[j].Provider
+		}
+		return collected[i].Path < collected[j].Path
+	})
 
 	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
 }

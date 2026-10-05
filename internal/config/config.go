@@ -24,6 +24,7 @@ const (
 	defaultLogLevel       = "info"
 	defaultMarkerFile     = ".noai"
 	defaultRequestTimeout = 30 * time.Second
+	defaultProjectScope   = "accessible"
 )
 
 // Config is the root configuration.
@@ -63,6 +64,10 @@ type ProviderConfig struct {
 	Token Secret `yaml:"token"`
 	// RequestTimeout bounds each provider request.
 	RequestTimeout Duration `yaml:"request_timeout"`
+	// ProjectScope selects which projects repository discovery may see:
+	// "accessible" (default; public/internal/group access plus member) or
+	// "membership" (only projects the token's user is a member of).
+	ProjectScope string `yaml:"project_scope"`
 	// Rules are the access rules, evaluated in order.
 	Rules []RuleConfig `yaml:"rules"`
 }
@@ -290,6 +295,11 @@ func (c *Config) Validate() error {
 		if p.Token.Value() == "" {
 			return fmt.Errorf("config: provider %q: token is required", p.Name)
 		}
+		switch p.ProjectScope {
+		case "accessible", "membership":
+		default:
+			return fmt.Errorf("config: provider %q: project_scope must be %q or %q", p.Name, "accessible", "membership")
+		}
 
 		for j, rule := range p.Rules {
 			if rule.Effect != string(policy.EffectAllow) && rule.Effect != string(policy.EffectDeny) {
@@ -378,6 +388,9 @@ func (c *Config) applyDefaults() {
 	for i := range c.Providers {
 		if c.Providers[i].RequestTimeout == 0 {
 			c.Providers[i].RequestTimeout = Duration(defaultRequestTimeout)
+		}
+		if c.Providers[i].ProjectScope == "" {
+			c.Providers[i].ProjectScope = defaultProjectScope
 		}
 	}
 }

@@ -79,10 +79,15 @@ carries an active `repo:list` topic filter, that filter also applies to the lite
 config repositories — their topics are fetched and they may be omitted (counted in
 `omitted`) on error or non-match. Without such a filter, literal repositories are
 returned with no provider API call. The `limit` argument bounds only the discovered
-repositories; static repositories are always returned and may push the total above
-`limit`. Listing does not check the `.noai` marker, so a `.noai` repository may appear
-in a listing; the marker only blocks repository-content operations (read/write),
-not merge-request operations or listing.
+repositories (default 100, capped at 1000); static repositories are always returned
+and may push the total above `limit`. When `search` is omitted, search prefixes are
+derived from the `repo:list` rule patterns (e.g. `archive/**` → `archive`), so glob
+patterns find their namespaces; an explicit `search` is passed through verbatim.
+Discovery scope is controlled by the provider's `project_scope`: `accessible`
+(default, all projects the token can see) or `membership`. Listing does not check the
+`.noai` marker, so a `.noai` repository may appear in a listing; the marker only
+blocks repository-content operations (read/write), not merge-request operations or
+listing.
 
 ### Tag filters
 

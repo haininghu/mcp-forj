@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -18,23 +19,24 @@ import (
 )
 
 type fakeProvider struct {
-	name            string
-	marker          bool
-	markerErr       error
-	markerByRepo    map[string]bool
-	markerErrByRepo map[string]error
-	providerErr     error
-	files           map[string][]byte
-	repos           []provider.Repository
-	mrs             []provider.MergeRequest
-	notes           []provider.Note
-	added           []string
-	rebaseCalls     int
-	rebaseErr       error
-	listReposCalls  int
-	topics          map[string][]string
-	topicsErr       map[string]error
-	topicsCalls     int
+	name             string
+	marker           bool
+	markerErr        error
+	markerByRepo     map[string]bool
+	markerErrByRepo  map[string]error
+	providerErr      error
+	files            map[string][]byte
+	repos            []provider.Repository
+	mrs              []provider.MergeRequest
+	notes            []provider.Note
+	added            []string
+	rebaseCalls      int
+	rebaseErr        error
+	listReposCalls   int
+	listRepoSearches []string
+	topics           map[string][]string
+	topicsErr        map[string]error
+	topicsCalls      int
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -42,6 +44,7 @@ func (f *fakeProvider) Type() string { return "fake" }
 
 func (f *fakeProvider) ListRepositories(_ context.Context, opts provider.RepoListOptions) ([]provider.Repository, error) {
 	f.listReposCalls++
+	f.listRepoSearches = append(f.listRepoSearches, opts.Search)
 	if f.providerErr != nil {
 		return nil, f.providerErr
 	}
@@ -1398,8 +1401,9 @@ func TestListRepositoriesStaticDoesNotCountTowardLimit(t *testing.T) {
 	if len(out.Repositories) != 2 {
 		t.Fatalf("repositories = %v, want static team/app + discovered archive/a", out.Repositories)
 	}
-	if out.Repositories[0].Path != "team/app" || out.Repositories[1].Path != "archive/a" {
-		t.Errorf("repositories = %v, want [team/app archive/a]", out.Repositories)
+	// Output is sorted by provider then path.
+	if out.Repositories[0].Path != "archive/a" || out.Repositories[1].Path != "team/app" {
+		t.Errorf("repositories = %v, want sorted [archive/a team/app]", out.Repositories)
 	}
 	if out.Truncated {
 		t.Error("truncated = true, want false: static entries must not count toward the discovered cap")
@@ -1613,5 +1617,74 @@ func TestGetMergeRequestExposesRebaseStatus(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(resultText(t, res)), "label") {
 		t.Errorf("labels leaked in output: %s", resultText(t, res))
+	}
+}
+
+func TestListRepositoriesDerivesSearchPrefixes(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/a"},
+		{Provider: "fake", Path: "team/b"},
+	}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"archive/**", "team/*"},
+		Effect:       "allow",
+		Capabilities: grants("repo:list"),
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	want := []string{"archive", "team"}
+	if len(fake.listRepoSearches) != len(want) {
+		t.Fatalf("searches = %v, want %v", fake.listRepoSearches, want)
+	}
+	for i := range want {
+		if fake.listRepoSearches[i] != want[i] {
+			t.Fatalf("searches = %v, want %v", fake.listRepoSearches, want)
+		}
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 2 {
+		t.Fatalf("repositories = %v, want archive/a and team/b", out.Repositories)
+	}
+}
+
+func TestListRepositoriesExplicitSearchUsedVerbatim(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake", "search": "custom"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	if len(fake.listRepoSearches) != 1 || fake.listRepoSearches[0] != "custom" {
+		t.Fatalf("searches = %v, want [custom]", fake.listRepoSearches)
+	}
+}
+
+func TestListRepositoriesRaisedLimit(t *testing.T) {
+	fake := newFake()
+	fake.repos = nil
+	for i := 0; i < 150; i++ {
+		fake.repos = append(fake.repos, provider.Repository{
+			Provider: "fake",
+			Path:     fmt.Sprintf("archive/r%03d", i),
+		})
+	}
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake", "limit": 200})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 150 {
+		t.Fatalf("repositories = %d, want 150 (above the old 100 cap)", len(out.Repositories))
+	}
+	if out.Truncated {
+		t.Error("truncated = true, want false")
 	}
 }

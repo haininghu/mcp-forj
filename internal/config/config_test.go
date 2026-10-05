@@ -765,3 +765,53 @@ providers:
 		t.Errorf("filtered mr:rebase grant = %+v", filtered)
 	}
 }
+
+func TestProjectScope(t *testing.T) {
+	tests := []struct {
+		name    string
+		scope   string
+		want    string
+		wantErr bool
+	}{
+		{"default accessible", "", "accessible", false},
+		{"explicit accessible", "accessible", "accessible", false},
+		{"membership", "membership", "membership", false},
+		{"invalid", "public", "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scopeLine := ""
+			if tt.scope != "" {
+				scopeLine = "    project_scope: " + tt.scope + "\n"
+			}
+			yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+` + scopeLine + `
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+			cfg, err := Parse([]byte(yaml))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("Parse accepted an invalid project_scope")
+				}
+				if !strings.Contains(err.Error(), "project_scope") {
+					t.Errorf("error = %q, want mention of project_scope", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := cfg.Providers[0].ProjectScope; got != tt.want {
+				t.Errorf("project_scope = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

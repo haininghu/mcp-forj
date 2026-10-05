@@ -1,8 +1,22 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.10** (status-based provider errors; MR rebase status exposed)
+Status: **Draft v0.11** (repository discovery scope, prefix search, higher cap)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.10
+
+- **AB1** Added `project_scope` (`accessible` default, or `membership`) to provider
+  config. GitLab discovery no longer hardcodes `membership=true`, so all projects
+  the token can access are found by default.
+- **AB2** When `search` is omitted, `list_repositories` derives provider-side search
+  prefixes from the `repo:list` rule patterns (the literal part before the first
+  glob metacharacter), so `archive/**` now finds `archive/*` projects instead of
+  relying on a broad, truncated window. Explicit `search` remains a verbatim
+  passthrough.
+- **AB3** Repository discovery is capped at `maxRepoResults = 1000` (default 100),
+  separate from the 100 cap for MRs/notes. Static config repositories remain
+  uncapped.
 
 ## Changelog vs. v0.9
 
@@ -418,11 +432,16 @@ to implement `Provider` and register a case. `number` is provider-neutral on
 purpose: GitLab uses a project-scoped `iid`, GitHub a global PR number, Forjo a
 global index; each provider maps its native identifier.
 
-`ListRepositories` is **membership-scoped** (only repositories the token can see as
-a member) and **paginated**: the GitLab implementation maps `Limit` to `PerPage`
-(default 100) and follows pages until `Limit` is reached or the provider is
-exhausted. If more repositories exist than the limit allows, the server reports
+`ListRepositories` is **paginated**: the GitLab implementation maps `Limit` to
+`PerPage` (default 100) and follows pages until `Limit` is reached or the provider
+is exhausted. If more repositories exist than the limit allows, the server reports
 `truncated: true`. A single page is never silently treated as complete.
+
+Its scope is controlled by the provider's `project_scope` option: `accessible`
+(default) lists every project the token can see (public/internal/group access plus
+member), while `membership` restricts to projects the token's user is a member of.
+The GitLab implementation sets `membership=false` for `accessible` and
+`membership=true` for `membership`.
 
 The GitLab implementation maps each project's `topics` into `Repository.Topics` and
 sets `TopicsKnown = true`. `GetRepositoryTopics` fetches a single project (via the
@@ -492,7 +511,7 @@ effective and does not reveal `.noai` state.
 granted:
 
 - Input: `provider` (required; must be a registered provider), `search` (optional
-  provider-side search term), `limit` (optional).
+  provider-side search term), `limit` (optional; default 100, capped at **1000**).
 - **Static repositories**: concrete paths listed literally in the configuration are
   returned, in first-appearance order and deduplicated, provided the first matching
   rule allows them (a `deny` rule hides them). **Conditional guarantee:** if the
@@ -502,12 +521,16 @@ granted:
   that path, the repository is returned with **no provider API call** (and no
   capability or `.noai` check). Static entries have no `web_url`.
 - **Dynamic discovery**: if at least one allow-rule grants `repo:list`
-  (`Guard.AuthorizeList`), the server issues one `ListRepositories` call with the
-  caller's `search` (or none) and filters candidates client-side using the
-  policy-only `Guard.EvaluateWithTags(..., repo:list, {topics})`. If `repo:list` is
-  not granted, the call still succeeds and returns only the static repositories
-  (possibly none); it is **not** an error. There is no all-providers mode: `provider`
-  is mandatory.
+  (`Guard.AuthorizeList`), the server issues `ListRepositories` calls and filters
+  candidates client-side using the policy-only
+  `Guard.EvaluateWithTags(..., repo:list, {topics})`. An explicit `search` is used
+  verbatim; when it is omitted, **search prefixes are derived** from the `repo:list`
+  rule patterns (`Guard.ListSearchPrefixes`), one call per prefix (`archive/**` →
+  `archive`), so glob patterns find their namespaces instead of relying on a broad,
+  truncated window. With no derivable prefix a single unfiltered call is made. If
+  `repo:list` is not granted, the call still succeeds and returns only the static
+  repositories (possibly none); it is **not** an error. There is no all-providers
+  mode: `provider` is mandatory.
 - **`.noai` does not affect listing.** Listing never checks the marker, so a `.noai`
   repository (static or discovered) still appears. `.noai` only blocks operations via
   `Guard.Authorize`.
@@ -516,13 +539,15 @@ granted:
   rule, a missing `repo:list` capability, a failed/unknown topic filter), and static
   repositories omitted by an active `repo:list` topic filter. Candidates that match no
   rule at all are simply filtered out and are **not** counted.
-- Results are deduplicated by provider+path (static wins). `limit` bounds only the
-  number of **discovered** repositories; static repositories are always returned and
-  may push the total above `limit`. The server requests `limit+1` candidates and
-  stops paginating there, so receiving more than `limit` candidates is itself
-  reported as `truncated`, as is dropping an allowed candidate because the dynamic
-  cap was reached. `truncated` therefore means the discovered result may be
-  incomplete; a filtered-out candidate does not by itself suppress `truncated`.
+- Results are deduplicated by provider+path (static wins) and sorted by provider
+  then path for deterministic output. `limit` bounds only the number of **discovered**
+  repositories (default 100, capped at 1000); static repositories are always returned
+  and may push the total above `limit`. Each call requests `remaining+1` candidates,
+  and `truncated` is set when a call offers more distinct candidates than the
+  remaining capacity (duplicates across prefix searches do not count) or when an
+  allowed candidate is dropped because the discovered cap was reached. `truncated`
+  therefore means the discovered result may be incomplete; a filtered-out candidate
+  does not by itself suppress `truncated`.
 
 Tool arguments are validated with explicit bounds:
 - `provider` must name a configured provider.
@@ -812,3 +837,16 @@ Makefile                        build/test/lint targets
 2. **Rebase status**: `get_merge_request` exposes `rebase_in_progress`,
    `merge_error`, `has_conflicts` and `detailed_merge_status`, so callers can see
    the asynchronous rebase outcome. Labels remain an authorization input only.
+
+## 23. Resolved Questions (v0.11)
+
+1. **Project scope**: `project_scope` selects `accessible` (default; all projects
+   the token can see) or `membership` (only member projects). GitLab discovery
+   passes the corresponding `membership` query flag; the previous hardcoded
+   `membership=true` is gone, so accessible projects are no longer missed.
+2. **Prefix search**: when `search` is omitted, prefixes are derived from the
+   `repo:list` rule patterns (literal part before the first glob metacharacter),
+   deduplicated and sorted; one `ListRepositories` call is made per prefix.
+   Explicit `search` is a verbatim passthrough.
+3. **Cap**: repository discovery is capped at 1000 (default 100), separate from the
+   100 cap for MRs and notes; `limit` bounds only discovered repositories.

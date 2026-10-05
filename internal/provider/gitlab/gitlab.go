@@ -28,8 +28,9 @@ func init() {
 
 // Client is a GitLab-backed provider.Provider.
 type Client struct {
-	name string
-	api  *gitlab.Client
+	name           string
+	api            *gitlab.Client
+	membershipOnly bool
 }
 
 // New creates a GitLab client from cfg. The token is read from cfg.Token,
@@ -48,7 +49,11 @@ func New(cfg config.ProviderConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gitlab: create client: %w", err)
 	}
-	return &Client{name: cfg.Name, api: api}, nil
+	return &Client{
+		name:           cfg.Name,
+		api:            api,
+		membershipOnly: cfg.ProjectScope == "membership",
+	}, nil
 }
 
 // Name implements provider.Provider.
@@ -57,9 +62,10 @@ func (c *Client) Name() string { return c.name }
 // Type implements provider.Provider.
 func (c *Client) Type() string { return providerType }
 
-// ListRepositories implements provider.Provider. It lists repositories the
-// token is a member of, following pages until the limit is reached or the
-// provider is exhausted.
+// ListRepositories implements provider.Provider. It lists projects visible to
+// the token (all accessible projects by default, or only membership projects
+// when project_scope is "membership"), following pages until the limit is
+// reached or the provider is exhausted.
 func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOptions) ([]provider.Repository, error) {
 	limit := opts.Limit
 	if limit <= 0 {
@@ -69,7 +75,7 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 	if perPage > 100 {
 		perPage = 100
 	}
-	membership := true
+	membership := c.membershipOnly
 
 	out := make([]provider.Repository, 0, limit)
 	for page := int64(1); ; page++ {
