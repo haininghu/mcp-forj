@@ -157,9 +157,11 @@ remaining capabilities are defined but unused so the config vocabulary is stable
 
 `repo:list` is granted per pattern and gates **only dynamic discovery** through the
 provider API. Concrete repository paths listed literally in the configuration (no
-glob metacharacters) are always returned by `list_repositories` regardless of
-`repo:list` (a `deny` rule still hides them), because they are already known
-statically. For glob patterns the provider is queried and each candidate is admitted
+glob metacharacters) are returned by `list_repositories` regardless of `repo:list` (a
+`deny` rule still hides them), because they are already known statically. **Exception
+(see §8):** if the matched allow rule carries an active `repo:list` topic filter, that
+filter also applies to these literal repositories, so they are topic-checked and may
+be omitted. For glob patterns the provider is queried and each candidate is admitted
 only if the first matching rule grants `repo:list` for that repository, so a grant on
 `legacy/**` lets an agent discover the repositories under `legacy/` without exposing
 anything else.

@@ -234,10 +234,11 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 	}
 
 	var (
-		collected []repositoryJSON
-		omitted   int
-		truncated bool
-		seen      = make(map[string]bool, len(static))
+		collected       []repositoryJSON
+		omitted         int
+		truncated       bool
+		discoveredCount int
+		seen            = make(map[string]bool, len(static))
 	)
 
 	// Repositories listed literally in the configuration are returned (subject
@@ -306,7 +307,7 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 				}
 				continue
 			}
-			if len(collected) >= limit {
+			if discoveredCount >= limit {
 				truncated = true
 				continue
 			}
@@ -315,6 +316,7 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 				Path:     repo.Path,
 				WebURL:   repo.WebURL,
 			})
+			discoveredCount++
 		}
 	}
 

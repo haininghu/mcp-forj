@@ -1144,6 +1144,9 @@ func TestReadFileRepoReadTopicFilter(t *testing.T) {
 			if res.IsError != tt.wantError {
 				t.Fatalf("isError = %v, want %v: %s", res.IsError, tt.wantError, resultText(t, res))
 			}
+			if fake.topicsCalls != 1 {
+				t.Errorf("GetRepositoryTopics called %d times, want exactly 1", fake.topicsCalls)
+			}
 		})
 	}
 }
@@ -1203,6 +1206,9 @@ func TestListRepositoriesStaticTopicFilter(t *testing.T) {
 			if out.Omitted != tt.wantOmitted {
 				t.Errorf("omitted = %d, want %d", out.Omitted, tt.wantOmitted)
 			}
+			if fake.topicsCalls != 1 {
+				t.Errorf("GetRepositoryTopics called %d times, want exactly 1", fake.topicsCalls)
+			}
 		})
 	}
 }
@@ -1251,5 +1257,71 @@ func TestListRepositoriesDiscoveredTopicFilter(t *testing.T) {
 	}
 	if out.Omitted != 2 {
 		t.Errorf("omitted = %d, want 2 (non-matching + unknown topics)", out.Omitted)
+	}
+}
+
+func TestListRepositoriesStaticDoesNotCountTowardLimit(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{{Provider: "fake", Path: "archive/a", WebURL: "https://x/archive/a"}}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app", "archive/**"},
+		Effect:       "allow",
+		Capabilities: grants("repo:list"),
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake", "limit": 1})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 2 {
+		t.Fatalf("repositories = %v, want static team/app + discovered archive/a", out.Repositories)
+	}
+	if out.Repositories[0].Path != "team/app" || out.Repositories[1].Path != "archive/a" {
+		t.Errorf("repositories = %v, want [team/app archive/a]", out.Repositories)
+	}
+	if out.Truncated {
+		t.Error("truncated = true, want false: static entries must not count toward the discovered cap")
+	}
+}
+
+func TestTopicsNeverReturned(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{{
+		Provider:    "fake",
+		Path:        "archive/a",
+		WebURL:      "https://x/archive/a",
+		Topics:      []string{"ai-ok", "secret-topic"},
+		TopicsKnown: true,
+	}}
+	fake.topics = map[string][]string{"team/app": {"ai-ok"}}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app", "archive/**"},
+		Effect:       "allow",
+		Capabilities: grants("repo:read", "repo:list"),
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	calls := []struct {
+		name string
+		args map[string]any
+	}{
+		{"list_repositories", map[string]any{"provider": "fake"}},
+		{"read_file", readFileArgs()},
+	}
+	for _, c := range calls {
+		t.Run(c.name, func(t *testing.T) {
+			res := env.call(t, c.name, c.args)
+			if res.IsError {
+				t.Fatalf("%s: %s", c.name, resultText(t, res))
+			}
+			lower := strings.ToLower(resultText(t, res))
+			for _, forbidden := range []string{"topics", "topics_known"} {
+				if strings.Contains(lower, forbidden) {
+					t.Errorf("%s output contains %q: %s", c.name, forbidden, resultText(t, res))
+				}
+			}
+		})
 	}
 }

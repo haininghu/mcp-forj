@@ -63,13 +63,18 @@ See `configs/config.example.yaml`. Capabilities:
 - `mr:write` – reserved.
 - `repo:write` – reserved.
 
-¹ `list_repositories` always returns concrete repositories listed literally in the
+¹ `list_repositories` returns concrete repositories listed literally in the
 configuration (unless a `deny` rule hides them) and needs no capability for that.
 The `repo:list` capability additionally allows discovery of repositories matching
 glob patterns through the provider API; without it only the configured repositories
-are returned and the call still succeeds. The `limit` argument bounds only the
-discovered repositories. Listing does not check the `.noai` marker, so a `.noai`
-repository may appear in a listing; the marker still blocks every operation on it.
+are returned and the call still succeeds. Exception: if the matched allow rule
+carries an active `repo:list` topic filter, that filter also applies to the literal
+config repositories — their topics are fetched and they may be omitted (counted in
+`omitted`) on error or non-match. Without such a filter, literal repositories are
+returned with no provider API call. The `limit` argument bounds only the discovered
+repositories; static repositories are always returned and may push the total above
+`limit`. Listing does not check the `.noai` marker, so a `.noai` repository may appear
+in a listing; the marker still blocks every operation on it.
 
 ### Tag filters
 
@@ -92,7 +97,7 @@ capabilities:
 Tags are matched by exact, case-sensitive equality. Whenever tag information cannot
 be determined for an active filter, the decision fails closed.
 
-v2 limitations:
+Limitations:
 
 - MR filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
   `mr:read`) and `add_merge_request_note` (`mr:comment`); these tools fetch the merge

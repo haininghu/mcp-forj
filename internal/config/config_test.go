@@ -696,3 +696,27 @@ providers:
 		})
 	}
 }
+
+func TestCapabilityGrantRepoWriteFilterAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:write:
+              require: [ai-ok]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected a repo:write filter: %v", err)
+	}
+	grant := cfg.Providers[0].Rules[0].Capabilities[0]
+	if grant.Name != "repo:write" || len(grant.Require) != 1 || grant.Require[0] != "ai-ok" {
+		t.Fatalf("grant = %+v, want repo:write with require [ai-ok]", grant)
+	}
+}
