@@ -946,7 +946,7 @@ func filteredReadRules() []policy.RuleSpec {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapMRRead,
-			Filter: policy.TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
 		}},
 	}}
 }
@@ -957,7 +957,7 @@ func filteredCommentRules() []policy.RuleSpec {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapMRComment,
-			Filter: policy.TagFilter{Require: []string{"ai-reviewed"}},
+			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}},
 		}},
 	}}
 }
@@ -1066,7 +1066,7 @@ func readFilterRules(require, exclude []string) []policy.RuleSpec {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapMRRead,
-			Filter: policy.TagFilter{Require: require, Exclude: exclude},
+			Filter: policy.CapabilityFilter{Require: require, Exclude: exclude},
 		}},
 	}}
 }
@@ -1224,7 +1224,7 @@ func repoReadTopicRules() []policy.RuleSpec {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapRepoRead,
-			Filter: policy.TagFilter{Require: []string{"ai-ok"}, Exclude: []string{"confidential"}},
+			Filter: policy.CapabilityFilter{Require: []string{"ai-ok"}, Exclude: []string{"confidential"}},
 		}},
 	}}
 }
@@ -1235,7 +1235,7 @@ func repoListTopicRules() []policy.RuleSpec {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapRepoList,
-			Filter: policy.TagFilter{Require: []string{"ai-ok"}},
+			Filter: policy.CapabilityFilter{Require: []string{"ai-ok"}},
 		}},
 	}}
 }
@@ -1365,7 +1365,7 @@ func TestListRepositoriesDiscoveredTopicFilter(t *testing.T) {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapRepoList,
-			Filter: policy.TagFilter{Require: []string{"ai-ok"}},
+			Filter: policy.CapabilityFilter{Require: []string{"ai-ok"}},
 		}},
 	}}
 	env := newTestEnv(t, rules, fake)
@@ -1456,7 +1456,7 @@ func filteredRebaseRules() []policy.RuleSpec {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapRebase,
-			Filter: policy.TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
 		}},
 	}}
 }
@@ -1686,5 +1686,78 @@ func TestListRepositoriesRaisedLimit(t *testing.T) {
 	}
 	if out.Truncated {
 		t.Error("truncated = true, want false")
+	}
+}
+
+func TestReadFilePathFilter(t *testing.T) {
+	tests := []struct {
+		name      string
+		filter    policy.CapabilityFilter
+		path      string
+		topics    map[string][]string
+		wantError bool
+	}{
+		{"allowed path", policy.CapabilityFilter{AllowPaths: []string{"docs/**"}}, "docs/README.md", nil, false},
+		{"path not allowed", policy.CapabilityFilter{AllowPaths: []string{"docs/**"}}, "src/main.go", nil, true},
+		{"denied path", policy.CapabilityFilter{DenyPaths: []string{"**/.env"}}, "sub/.env", nil, true},
+		{"deny wins over allow", policy.CapabilityFilter{AllowPaths: []string{"src/**"}, DenyPaths: []string{"src/secret/**"}}, "src/secret/x", nil, true},
+		{"tags and path pass", policy.CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, "docs/README.md", map[string][]string{"team/app": {"ai-ok"}}, false},
+		{"tags fail", policy.CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, "docs/README.md", map[string][]string{"team/app": {"other"}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake()
+			fake.files["docs/README.md"] = []byte("docs")
+			fake.files["src/main.go"] = []byte("src")
+			fake.files["src/secret/x"] = []byte("secret")
+			fake.files["sub/.env"] = []byte("env")
+			fake.topics = tt.topics
+			rules := []policy.RuleSpec{{
+				Repositories: []string{"team/app"},
+				Effect:       "allow",
+				Capabilities: []policy.CapabilityGrant{{Name: policy.CapRepoRead, Filter: tt.filter}},
+			}}
+			env := newTestEnv(t, rules, fake)
+
+			res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": tt.path})
+			if res.IsError != tt.wantError {
+				t.Fatalf("isError = %v, want %v: %s", res.IsError, tt.wantError, resultText(t, res))
+			}
+			wantTopics := len(tt.filter.Require) > 0 || len(tt.filter.Exclude) > 0
+			if !wantTopics && fake.topicsCalls != 0 {
+				t.Errorf("GetRepositoryTopics called %d times, want 0 for a path-only filter", fake.topicsCalls)
+			}
+		})
+	}
+}
+
+func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapRepoRead,
+			Filter: policy.CapabilityFilter{AllowPaths: []string{"docs/**"}, DenyPaths: []string{"**/.env"}},
+		}},
+	}}
+	env := newTestEnv(t, rules, newFake())
+
+	res := env.call(t, "list_configured_rules", map[string]any{})
+	if res.IsError {
+		t.Fatalf("list_configured_rules: %s", resultText(t, res))
+	}
+	var out listConfiguredRulesOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Repositories) != 1 || len(out.Repositories[0].ConfiguredCapabilities) != 1 {
+		t.Fatalf("configured rules = %+v", out)
+	}
+	cap := out.Repositories[0].ConfiguredCapabilities[0]
+	if len(cap.AllowPaths) != 1 || cap.AllowPaths[0] != "docs/**" {
+		t.Errorf("allow_paths = %v, want [docs/**]", cap.AllowPaths)
+	}
+	if len(cap.DenyPaths) != 1 || cap.DenyPaths[0] != "**/.env" {
+		t.Errorf("deny_paths = %v, want [**/.env]", cap.DenyPaths)
 	}
 }

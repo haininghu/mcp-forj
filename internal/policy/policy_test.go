@@ -68,7 +68,7 @@ func TestEvaluateWithTags(t *testing.T) {
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
 			{Name: CapMRRead},
-			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}}},
+			{Name: CapMRComment, Filter: CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}}},
 		}},
 	})
 
@@ -106,12 +106,12 @@ func TestEvaluateWithTags(t *testing.T) {
 func TestRulesReturnsCopy(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapMRRead, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+			{Name: CapMRRead, Filter: CapabilityFilter{Require: []string{"ai-reviewed"}}},
 		}},
 	})
 	rules := p.Rules()
 	rules[0].Repositories[0] = "mutated"
-	rules[0].Capabilities[CapMRRead] = TagFilter{Require: []string{"mutated"}}
+	rules[0].Capabilities[CapMRRead] = CapabilityFilter{Require: []string{"mutated"}}
 
 	again := p.Rules()
 	if again[0].Repositories[0] != "team/*" {
@@ -222,36 +222,79 @@ func TestGrantsAnywhere(t *testing.T) {
 	}
 }
 
-func TestHasTagFilter(t *testing.T) {
+func TestHasFilter(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
 		{Repositories: []string{"team/filtered"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapRepoRead, Filter: TagFilter{Require: []string{"ai-ok"}}},
+			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}}},
+		}},
+		{Repositories: []string{"team/paths"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{AllowPaths: []string{"docs/**"}}},
 		}},
 		{Repositories: []string{"team/plain"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
 	})
 
-	if !p.HasTagFilter("team/filtered", CapRepoRead) {
-		t.Error("HasTagFilter(filtered repo, filtered capability) = false, want true")
+	if !p.HasFilter("team/filtered", CapRepoRead) {
+		t.Error("HasFilter(filtered repo, tag filter) = false, want true")
 	}
-	if p.HasTagFilter("team/filtered", CapRepoList) {
-		t.Error("HasTagFilter(filtered repo, missing capability) = true, want false")
+	if !p.HasFilter("team/paths", CapRepoRead) {
+		t.Error("HasFilter(filtered repo, path filter) = false, want true")
 	}
-	if p.HasTagFilter("team/plain", CapRepoRead) {
-		t.Error("HasTagFilter(plain grant) = true, want false")
+	if p.HasFilter("team/filtered", CapRepoList) {
+		t.Error("HasFilter(filtered repo, missing capability) = true, want false")
 	}
-	if p.HasTagFilter("team/secret", CapRepoRead) {
-		t.Error("HasTagFilter(deny rule) = true, want false")
+	if p.HasFilter("team/plain", CapRepoRead) {
+		t.Error("HasFilter(plain grant) = true, want false")
 	}
-	if p.HasTagFilter("other/repo", CapRepoRead) {
-		t.Error("HasTagFilter(no match) = true, want false")
+	if p.HasFilter("team/secret", CapRepoRead) {
+		t.Error("HasFilter(deny rule) = true, want false")
+	}
+	if p.HasFilter("other/repo", CapRepoRead) {
+		t.Error("HasFilter(no match) = true, want false")
+	}
+}
+
+func TestEvaluateResource(t *testing.T) {
+	mk := func(f CapabilityFilter) *Policy {
+		return mustBuild(t, []RuleSpec{{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []CapabilityGrant{{Name: CapRepoRead, Filter: f}},
+		}})
+	}
+	tests := []struct {
+		name        string
+		filter      CapabilityFilter
+		tags        TagSet
+		path        string
+		wantAllowed bool
+		wantReason  string
+	}{
+		{"allow match", CapabilityFilter{AllowPaths: []string{"docs/**"}}, TagSet{}, "docs/a.md", true, "capability granted"},
+		{"allow non-match", CapabilityFilter{AllowPaths: []string{"docs/**"}}, TagSet{}, "src/a.go", false, "path not allowed"},
+		{"deny match", CapabilityFilter{DenyPaths: []string{"**/.env"}}, TagSet{}, "sub/.env", false, "path excluded"},
+		{"deny-only other path allowed", CapabilityFilter{DenyPaths: []string{"**/.env"}}, TagSet{}, "src/a.go", true, "capability granted"},
+		{"deny wins over allow", CapabilityFilter{AllowPaths: []string{"src/**"}, DenyPaths: []string{"src/secret/**"}}, TagSet{}, "src/secret/x", false, "path excluded"},
+		{"empty path fails closed", CapabilityFilter{AllowPaths: []string{"docs/**"}}, TagSet{}, "", false, "path required"},
+		{"no filter allows", CapabilityFilter{}, TagSet{}, "anything", true, "capability granted"},
+		{"tags and path both pass", CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, TagSet{Known: true, Values: []string{"ai-ok"}}, "docs/a.md", true, "capability granted"},
+		{"tags fail", CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, TagSet{Known: true, Values: []string{"other"}}, "docs/a.md", false, "tag requirement not met"},
+		{"unknown tags fail before path", CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, TagSet{}, "docs/a.md", false, "tag information unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := mk(tt.filter).EvaluateResource("team/app", CapRepoRead, tt.tags, tt.path)
+			if d.Allowed != tt.wantAllowed || d.Reason != tt.wantReason {
+				t.Errorf("EvaluateResource = %+v, want Allowed=%v Reason=%q", d, tt.wantAllowed, tt.wantReason)
+			}
+		})
 	}
 }
 
 func TestEvaluateWithTagsRepoCapability(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapRepoRead, Filter: TagFilter{Require: []string{"ai-ok"}, Exclude: []string{"confidential"}}},
+			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}, Exclude: []string{"confidential"}}},
 		}},
 	})
 	if d := p.EvaluateWithTags("team/app", CapRepoRead, TagSet{Known: true, Values: []string{"ai-ok"}}); !d.Allowed {
@@ -268,7 +311,7 @@ func TestEvaluateWithTagsRepoCapability(t *testing.T) {
 func TestGrantsAnywhereWithFilter(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapMRRead, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+			{Name: CapMRRead, Filter: CapabilityFilter{Require: []string{"ai-reviewed"}}},
 		}},
 	})
 	if !p.GrantsAnywhere(CapMRRead) {

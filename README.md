@@ -93,11 +93,12 @@ Discovery scope is controlled by the provider's `project_scope`: `accessible`
 blocks repository-content operations (read/write), not merge-request operations or
 listing.
 
-### Tag filters
+### Capability filters
 
-Any capability may optionally carry a tag filter, written as a single-key mapping in
-the `capabilities` list. For MR capabilities the tags are GitLab MR **labels**; for
-repo capabilities they are project **topics**:
+Any capability may optionally carry a filter, written as a single-key mapping in the
+`capabilities` list. For MR capabilities the tags are GitLab MR **labels**; for repo
+capabilities they are project **topics**. `repo:read`/`repo:write` may also carry
+**path globs** matched against the repository-relative file path:
 
 ```yaml
 capabilities:
@@ -109,10 +110,15 @@ capabilities:
       require: [ai-ok]            # project must have this topic
   - repo:read:
       exclude: [confidential]     # project must not have this topic
+      allow_paths: ["docs/**", "*.md"]        # path must match one
+      deny_paths:  ["**/.env", "**/secrets/**"]  # path must match none
 ```
 
-Tags are matched by exact, case-sensitive equality. Whenever tag information cannot
-be determined for an active filter, the decision fails closed.
+Tags are matched by exact, case-sensitive equality. Path globs are doublestar and
+case-sensitive (`*.md` is root-level only; `**/*.md` is any depth). An empty
+`allow_paths` allows all paths; `deny_paths` wins over `allow_paths`; an active path
+filter with an empty path fails closed. Tags and paths combine (both must pass).
+Whenever required information cannot be determined, the decision fails closed.
 
 Limitations:
 

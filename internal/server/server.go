@@ -139,9 +139,11 @@ type readFileInput struct {
 }
 
 type configuredCapability struct {
-	Name    string   `json:"name"`
-	Require []string `json:"require,omitempty"`
-	Exclude []string `json:"exclude,omitempty"`
+	Name       string   `json:"name"`
+	Require    []string `json:"require,omitempty"`
+	Exclude    []string `json:"exclude,omitempty"`
+	AllowPaths []string `json:"allow_paths,omitempty"`
+	DenyPaths  []string `json:"deny_paths,omitempty"`
 }
 
 type configuredRepository struct {
@@ -223,9 +225,11 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 		caps := make([]configuredCapability, len(rule.Capabilities))
 		for i, grant := range rule.Capabilities {
 			caps[i] = configuredCapability{
-				Name:    string(grant.Name),
-				Require: grant.Filter.Require,
-				Exclude: grant.Filter.Exclude,
+				Name:       string(grant.Name),
+				Require:    grant.Filter.Require,
+				Exclude:    grant.Filter.Exclude,
+				AllowPaths: grant.Filter.AllowPaths,
+				DenyPaths:  grant.Filter.DenyPaths,
 			}
 		}
 		repos = append(repos, configuredRepository{
@@ -279,7 +283,7 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 	for _, repoPath := range static {
 		seen[name+"\x00"+repoPath] = true
 
-		hasFilter, err := s.guard.HasTagFilter(name, repoPath, policy.CapRepoList)
+		hasFilter, err := s.guard.HasFilter(name, repoPath, policy.CapRepoList)
 		if err != nil {
 			return nil, nil, fmt.Errorf("unknown provider %q", name)
 		}
@@ -588,16 +592,18 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapRepoRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
+	// Topics are needed only when the matched grant has an active tag
+	// constraint; a path-only filter does not require a provider call.
 	tags := policy.TagSet{}
-	if hasFilter, err := s.guard.HasTagFilter(in.Provider, in.Repo, policy.CapRepoRead); err != nil {
+	if hasTags, err := s.guard.HasTagConstraint(in.Provider, in.Repo, policy.CapRepoRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
-	} else if hasFilter {
+	} else if hasTags {
 		tags, err = fetchTopics(ctx, p, in.Repo)
 		if err != nil {
 			return nil, nil, err
 		}
 	}
-	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapRepoRead, tags); err != nil {
+	if err := s.guard.AuthorizeResource(ctx, in.Provider, in.Repo, policy.CapRepoRead, tags, cleaned); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	data, err := p.ReadFile(ctx, in.Repo, cleaned, in.Ref)

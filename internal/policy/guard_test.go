@@ -153,7 +153,7 @@ func TestGuardStaticRepositoriesAndEvaluate(t *testing.T) {
 func TestAuthorizeWithTags(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}}},
+			{Name: CapMRComment, Filter: CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}}},
 		}},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{}}, ".noai", nil)
@@ -176,7 +176,7 @@ func TestAuthorizeWithTags(t *testing.T) {
 func TestAuthorizeWithTagsMarkerStillApplies(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapRepoRead, Filter: TagFilter{Require: []string{"ai-ok"}}},
+			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}}},
 		}},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
@@ -222,7 +222,7 @@ func TestMarkerPresentDeniesRepoWrite(t *testing.T) {
 func TestAuthorizeRepoCapability(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+			{Name: CapMRComment, Filter: CapabilityFilter{Require: []string{"ai-reviewed"}}},
 		}},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)

@@ -65,6 +65,12 @@ providers:
         capabilities:
           - repo:list:
               require: [ai-ok]
+          # repo:read may also restrict which files are readable. Path globs
+          # (doublestar) match the repository-relative path; deny wins over
+          # allow, and an active path filter fails closed on an empty path.
+          - repo:read:
+              allow_paths: ["docs/**", "*.md"]
+              deny_paths: ["**/.env", "**/secrets/**"]
           - mr:read
 
       # Explicit denial (overrides anything broader that might follow). Deny

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 
 	"github.com/hvo/mcp-forj/internal/policy"
@@ -97,6 +98,10 @@ type CapabilityGrant struct {
 	Require []string
 	// Exclude lists tags the merge request must not carry.
 	Exclude []string
+	// AllowPaths lists path globs; when non-empty the file path must match one.
+	AllowPaths []string
+	// DenyPaths lists path globs; the file path must match none (deny wins).
+	DenyPaths []string
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler for the compact capability form.
@@ -143,6 +148,14 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 			case "exclude":
 				if err := val.Decode(&g.Exclude); err != nil {
 					return fmt.Errorf("capability %q: exclude: %w", name, err)
+				}
+			case "allow_paths":
+				if err := val.Decode(&g.AllowPaths); err != nil {
+					return fmt.Errorf("capability %q: allow_paths: %w", name, err)
+				}
+			case "deny_paths":
+				if err := val.Decode(&g.DenyPaths); err != nil {
+					return fmt.Errorf("capability %q: deny_paths: %w", name, err)
 				}
 			default:
 				return fmt.Errorf("capability %q: unknown filter key %q", name, key)
@@ -337,8 +350,30 @@ func (c *Config) Validate() error {
 				}
 				grant.Require, grant.Exclude = require, exclude
 
-				if len(require) == 0 && len(exclude) == 0 {
+				allowPaths, err := normalizePaths(p.Name, j, grant.Name, "allow_paths", grant.AllowPaths)
+				if err != nil {
+					return err
+				}
+				denyPaths, err := normalizePaths(p.Name, j, grant.Name, "deny_paths", grant.DenyPaths)
+				if err != nil {
+					return err
+				}
+				grant.AllowPaths, grant.DenyPaths = allowPaths, denyPaths
+
+				if len(require) == 0 && len(exclude) == 0 && len(allowPaths) == 0 && len(denyPaths) == 0 {
 					continue
+				}
+				if len(allowPaths) > 0 || len(denyPaths) > 0 {
+					if grant.Name != string(policy.CapRepoRead) && grant.Name != string(policy.CapRepoWrite) {
+						return fmt.Errorf("config: provider %q rule %d: path filters are not supported yet for capability %q", p.Name, j, grant.Name)
+					}
+					for _, allowed := range allowPaths {
+						for _, excluded := range denyPaths {
+							if allowed == excluded {
+								return fmt.Errorf("config: provider %q rule %d: path %q appears in both allow_paths and deny_paths", p.Name, j, allowed)
+							}
+						}
+					}
 				}
 				for _, required := range require {
 					for _, excluded := range exclude {
@@ -351,6 +386,21 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func normalizePaths(providerName string, ruleIndex int, capability, field string, patterns []string) ([]string, error) {
+	out := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			return nil, fmt.Errorf("config: provider %q rule %d: capability %q %s: path must not be empty", providerName, ruleIndex, capability, field)
+		}
+		if !doublestar.ValidatePattern(trimmed) {
+			return nil, fmt.Errorf("config: provider %q rule %d: capability %q %s: invalid path pattern %q", providerName, ruleIndex, capability, field, trimmed)
+		}
+		out = append(out, trimmed)
+	}
+	return out, nil
 }
 
 func normalizeTags(providerName string, ruleIndex int, capability, field string, tags []string) ([]string, error) {

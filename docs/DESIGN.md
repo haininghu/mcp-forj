@@ -1,8 +1,19 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.13** (group-first discovery for scoped tokens)
+Status: **Draft v0.14** (file-path filters for `repo:read`/`repo:write`)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.13
+
+- **AE1** Capability filters gain `allow_paths`/`deny_paths` (doublestar globs on
+  the repository-relative file path). `allow_paths` empty means all paths;
+  otherwise the path must match one; `deny_paths` must match none and **deny wins**.
+  An active path filter with an empty path fails closed. Path filters are only
+  valid on `repo:read`/`repo:write`. Tags and paths combine (both must pass).
+- **AE2** `TagFilter` was generalized to `CapabilityFilter`; `HasTagFilter` is now
+  `HasFilter`, and `read_file` authorizes via the new `Guard.AuthorizeResource`
+  (policy + `.noai`) using the already-validated cleaned path.
 
 ## Changelog vs. v0.12
 
@@ -258,12 +269,13 @@ viewing MRs and is accepted; it is not the same as granting repository read acce
 **Independence:** `mr:comment` does not imply `mr:read`. Posting a note does not
 require reading the merge request, so a repository may grant comment-only access.
 
-### Tag-scoped capabilities (v0.5)
+### Scoped capabilities (v0.5, path filters v0.14)
 
 Any capability may optionally carry a **tag filter**. For MR capabilities the tags
-are GitLab MR **labels**; for repo capabilities they are project **topics**. In the
-configuration the filter is merged into the `capabilities` list as a compact
-single-key mapping:
+are GitLab MR **labels**; for repo capabilities they are project **topics**.
+`repo:read`/`repo:write` may additionally carry **path filters** (`allow_paths`/
+`deny_paths`), doublestar globs matched against the repository-relative file path.
+The filter is merged into the `capabilities` list as a compact single-key mapping:
 
 ```yaml
 capabilities:
@@ -274,17 +286,29 @@ capabilities:
   - repo:list:
       require: [ai-ok]            # project must have this topic
   - repo:read:
-      exclude: [confidential]     # project must not have this topic
+      require: [ai-ok]            # project topic
+      exclude: [confidential]
+      allow_paths: ["docs/**", "*.md"]   # path must match one
+      deny_paths:  ["**/.env", "**/secrets/**"]  # path must match none
 ```
 
-- Matching is **exact and case-sensitive**; there is no glob/regex support.
-- Filters are accepted on any known capability, but a filter on a `deny` rule is
-  rejected at config load. `repo:write` filters are accepted but inert (no tool).
-- A tag may not appear in both `require` and `exclude`; tags must be non-empty after
-  trimming; a capability may not be listed twice in the same rule.
-- Tags are an **authorization input only**: they are never cached and never returned
-  in tool output. When tag information cannot be determined for an active filter,
-  the decision fails closed.
+- Tag matching is **exact and case-sensitive**; there is no glob/regex support for
+  tags. Path globs use doublestar: `*.md` matches root-level only, `**/*.md` at any
+  depth, and matching is case-sensitive.
+- `allow_paths` empty means all paths are allowed (subject to deny); non-empty means
+  the path must match at least one pattern. `deny_paths` must match none, and **deny
+  wins over allow**. An active path filter evaluated against an empty path fails
+  closed.
+- Tags and paths combine: **both** must pass.
+- Path filters are only valid on `repo:read`/`repo:write` (capabilities that address
+  a file path); filters on other capabilities are rejected at config load. Filters on
+  a `deny` rule are rejected (deny rules carry no capabilities).
+- A tag may not appear in both `require` and `exclude`; a path may not appear in both
+  `allow_paths` and `deny_paths`; entries must be non-empty after trimming; a
+  capability may not be listed twice in the same rule.
+- Tags and paths are **authorization inputs only**: never cached, never returned in
+  tool output. When tag information cannot be determined, or a path filter is active
+  with no path, the decision fails closed.
 - Because a `repo:list` filter would otherwise be bypassed by literal configuration
   entries, it also applies to **static** repositories; see §8.
 
@@ -326,15 +350,20 @@ providers:
         capabilities:
           - repo:list:
               require: [ai-ok]
+          - repo:read:
+              # Path filters (doublestar) apply to the file path in read_file.
+              allow_paths: ["docs/**", "*.md"]
+              deny_paths: ["**/.env", "**/secrets/**"]
           - mr:read
       - repositories: ["legacy/**"]
         effect: deny
 ```
 
 The `capabilities` entries accept two forms: a plain scalar (`mr:read`) or a
-single-key mapping whose value is `null`/omitted or a mapping with only the optional
-keys `require` and `exclude`. Unknown filter keys and mappings with more than one
-capability key are rejected. See §5 for the tag-filter rules.
+single-key mapping whose value is `null`/omitted or a mapping with the optional keys
+`require`, `exclude`, `allow_paths` and `deny_paths`. Unknown filter keys and
+mappings with more than one capability key are rejected. See §5 for the filter
+rules.
 
 ### Token handling
 
@@ -504,12 +533,15 @@ returned MR is evaluated with its own labels (`Guard.EvaluateWithTags`). MRs tha
 not match are skipped and counted in `omitted`; MRs whose labels are unknown
 (`LabelsKnown=false`) are omitted (fail-closed) and also counted.
 
-² **Repo topic filters** are evaluated against project topics. `read_file` fetches
-the repository's topics (`GetRepositoryTopics`) only when an active `repo:read`
-filter is configured, then evaluates them; a topic-fetch error denies the read
-(fail-closed). `list_repositories` applies an active `repo:list` filter to both
-static and discovered repositories (see below). `repo:write` has no tool, so filters
-on it are accepted but inert.
+² **Repo filters** combine project topics (tags) and, for `repo:read`/`repo:write`,
+**path globs** (`allow_paths`/`deny_paths`, doublestar, case-sensitive). `read_file`
+fetches topics only when the matched grant has an active tag constraint, then
+authorizes via `Guard.AuthorizeResource` with the already-validated cleaned path:
+tags and paths must both pass, **deny paths win over allow paths**, and an active
+path filter with an empty path fails closed. A topic-fetch error denies the read
+(fail-closed). `list_repositories` applies an active `repo:list` topic filter to both
+static and discovered repositories (see below). `repo:write` has no tool yet, so its
+filters (including paths) are accepted but inert.
 
 ³ **`rebase_merge_request`** is a **write** operation. It requires the `mr:rebase`
 capability and triggers an **asynchronous** GitLab rebase of the source branch onto
@@ -604,15 +636,16 @@ Tool arguments are validated with explicit bounds:
   the check fails. It does **not** affect `repo:list` or any merge-request capability
   (`mr:read`, `mr:comment`, `mr:rebase`); those work on `.noai` repositories when
   granted by policy. `IsMarkerProtected` is the single place that defines this.
-- **Tags are an authorization input only.** Tag filters (§5) are evaluated against
-  merge request labels or project topics fetched per operation; neither labels nor
-  topics are cached or returned in tool output (the server's JSON output structs
-  deliberately omit them). When tag information cannot be determined for an active
-  filter, the decision fails closed (`tag information unavailable`); a repo topic
-  fetch error fails closed. `list_merge_requests` evaluates labels from the list
-  endpoint per MR (client-side) and omits non-matching or unknown-label MRs. A
-  `repo:list` topic filter also applies to static config repositories so it cannot be
-  bypassed by listing them literally.
+- **Tags and paths are authorization inputs only.** Filters (§5) are evaluated
+  against merge request labels, project topics, or the file path per operation;
+  neither labels nor topics nor path decisions are cached or returned in output (the
+  server's JSON output structs omit labels/topics). When tag information cannot be
+  determined, the decision fails closed (`tag information unavailable`); a repo topic
+  fetch error fails closed; an active path filter with an empty path fails closed
+  (`path required`). Deny paths win over allow paths. `list_merge_requests` evaluates
+  labels from the list endpoint per MR (client-side) and omits non-matching or
+  unknown-label MRs. A `repo:list` topic filter also applies to static config
+  repositories so it cannot be bypassed by listing them literally.
 - **`list_configured_rules` exposes the policy** (patterns and effects) to the
   caller. This is intentional in the single-trusted-agent model and reveals no
   secrets; revisit if per-client identities are ever added.
@@ -648,26 +681,30 @@ Tool arguments are validated with explicit bounds:
   resolution, unset/empty `${VAR}` rejection, whitespace trimming, duplicate
   provider names, empty rules, and a redaction assertion that `fmt.Sprintf("%+v",
   cfg)` / `Secret.String()` never contains the resolved value. Capability-grant
-  parsing: scalar form, compact mapping form (require/exclude), null value, and
-  rejection of unknown filter keys, more than one capability key, a tag in both
-  lists, empty tags, duplicate capabilities, any capabilities on `deny` rules (plain
-  or filtered), acceptance of filters on repo capabilities, and acceptance of
+  parsing: scalar form, compact mapping form (require/exclude/allow_paths/deny_paths),
+  null value, and rejection of unknown filter keys, more than one capability key, a
+  tag or path in both lists, empty tags/paths, invalid globs, path filters on
+  non-`repo:*` capabilities, duplicate capabilities, any capabilities on `deny` rules
+  (plain or filtered), acceptance of filters on repo capabilities, and acceptance of
   `mr:rebase` (plain and filtered).
 - `internal/policy`: rule precedence, `*` vs `**` glob matching, default deny,
   capability subset, deny override, `EvaluateWithTags` (require-all, exclude-any,
   fail-closed on unknown tags, zero filter unaffected, repo capabilities),
-  `CapabilityGranted` semantics, `HasTagFilter` (true only for a matched allow grant
-  with a non-zero filter), and `GrantsAnywhere` with filters.
+  `EvaluateResource` (allow/deny path, deny wins, fail-closed on empty path, tags and
+  paths combined), `CapabilityGranted` semantics, `HasFilter`/`HasTagConstraint`, and
+  `GrantsAnywhere` with filters.
 - `internal/policy/noai`: `.noai` present/absent and provider error deny the
   content capabilities `repo:read` and `repo:write` (fail-closed), while
   `repo:list` and `mr:read`/`mr:comment`/`mr:rebase` are unaffected.
 - `internal/server`: end-to-end tool calls against a **fake provider** using the
   SDK's in-memory transports; assert allow, capability denial, `.noai` denial of
   `read_file` only (MR tools succeed on `.noai` repos), repo listing filtering,
-  argument validation, MR label enforcement, repo topic enforcement (`read_file`
-  allowed/denied on topics, topic-fetch error denies, no topic call without a filter;
-  `list_repositories` static and discovered filtering, omitted counting, and `.noai`
-  still denying `read_file` when topics pass), rebase enforcement (allowed with
+  argument validation, MR label enforcement, repo topic and path enforcement
+  (`read_file` allowed/denied on topics and paths, deny-path wins, topic-fetch error
+  denies, no topic call for a path-only filter; `list_repositories` static and
+  discovered filtering, omitted counting, and `.noai` still denying `read_file` when
+  filters pass; `list_configured_rules` exposes path filters), rebase enforcement
+  (allowed with
   `mr:rebase`, denied without it, tag filter matching/excluded/unknown, metadata-fetch
   error denies with no rebase call, `ErrForbidden` yields an actionable message,
   rebase allowed on a `.noai` repo), and `get_merge_request` exposing
@@ -731,6 +768,10 @@ Tool arguments are validated with explicit bounds:
     `ErrInvalidState`, 404 → `ErrNotFound` (errors.Is, no raw bodies); the server
     returns actionable messages for these and `get_merge_request` exposes
     `rebase_in_progress`/`merge_error`/`has_conflicts`/`detailed_merge_status`.
+16. Path filters: `read_file` allows a path matching `allow_paths`, denies a path not
+    matched or matched by `deny_paths` (deny wins), fails closed when the filter is
+    active and the path is empty, requires both tag and path checks to pass, and still
+    honors `.noai`; `list_configured_rules` exposes `allow_paths`/`deny_paths`.
 
 ## 11. Dependencies
 
@@ -898,3 +939,14 @@ Makefile                        build/test/lint targets
    group-scoped tokens can discover their namespace (the User-boundary `/projects`
    search often returns 403). Non-group terms (404) fall back to `/projects` with
    `search_namespaces=true`. Discovery without a search term uses `/projects`.
+
+## 26. Resolved Questions (v0.14)
+
+1. **Path filters**: `repo:read`/`repo:write` grants may carry `allow_paths` and
+   `deny_paths` (doublestar, case-sensitive). `allow_paths` empty = all paths;
+   otherwise the path must match one; `deny_paths` must match none and deny wins.
+   An active path filter with an empty path fails closed. Path filters on other
+   capabilities are rejected at config load. Tags and paths combine (both must pass).
+2. **Generalized filter**: `TagFilter` became `CapabilityFilter` (Require, Exclude,
+   AllowPaths, DenyPaths); `HasTagFilter` became `HasFilter`, with
+   `HasTagConstraint` available so `read_file` fetches topics only for tag filters.

@@ -64,18 +64,26 @@ func (g *Guard) Authorize(ctx context.Context, providerName, repo string, c Capa
 }
 
 // AuthorizeWithTags checks whether capability c may be used on repo at
-// providerName with the observed tags. It evaluates the provider's policy
-// first and, only for marker-protected capabilities (see IsMarkerProtected),
-// then performs the .noai marker check. Every decision is logged; tokens and
-// request bodies are never logged.
+// providerName with the observed tags and no path. It is equivalent to
+// AuthorizeResource(..., tags, "").
 func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string, c Capability, tags TagSet) error {
+	return g.AuthorizeResource(ctx, providerName, repo, c, tags, "")
+}
+
+// AuthorizeResource checks whether capability c may be used on repo at
+// providerName with the observed tags and repository-relative path. It evaluates
+// the provider's policy first (tags and path constraints must both pass) and,
+// only for marker-protected capabilities (see IsMarkerProtected), then performs
+// the .noai marker check. Every decision is logged; tokens and request bodies
+// are never logged.
+func (g *Guard) AuthorizeResource(ctx context.Context, providerName, repo string, c Capability, tags TagSet, path string) error {
 	p, ok := g.policies[providerName]
 	if !ok {
 		g.logDecision(providerName, repo, c, "deny", "unknown provider")
 		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
 	}
 
-	decision := p.EvaluateWithTags(repo, c, tags)
+	decision := p.EvaluateResource(repo, c, tags, path)
 	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
 
 	if !decision.Matched {
@@ -85,7 +93,7 @@ func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string
 		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
 	}
 
-	// The .noai marker protects only repository file reads; every other
+	// The .noai marker protects only repository-content operations; every other
 	// granted capability works on .noai repositories.
 	if !IsMarkerProtected(c) {
 		return nil
@@ -93,16 +101,27 @@ func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string
 	return g.checkMarker(ctx, providerName, repo)
 }
 
-// HasTagFilter reports whether the first matching rule grants capability c for
-// repo with an active tag filter. It is policy-only (no marker check) and is
-// used to decide whether tag information must be fetched before authorizing.
-// It returns ErrUnknownProvider when the provider has no policy.
-func (g *Guard) HasTagFilter(providerName, repo string, c Capability) (bool, error) {
+// HasFilter reports whether the first matching rule grants capability c for repo
+// with an active filter (tags and/or paths). It is policy-only (no marker check)
+// and is used to decide whether tag information must be fetched before
+// authorizing. It returns ErrUnknownProvider when the provider has no policy.
+func (g *Guard) HasFilter(providerName, repo string, c Capability) (bool, error) {
 	p, ok := g.policies[providerName]
 	if !ok {
 		return false, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
 	}
-	return p.HasTagFilter(repo, c), nil
+	return p.HasFilter(repo, c), nil
+}
+
+// HasTagConstraint reports whether the first matching rule grants capability c
+// for repo with an active tag constraint (path-only filters do not count). It is
+// policy-only and returns ErrUnknownProvider when the provider has no policy.
+func (g *Guard) HasTagConstraint(providerName, repo string, c Capability) (bool, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.HasTagConstraint(repo, c), nil
 }
 
 // AuthorizeRepoCapability is a policy-only pre-check that ignores tag filters

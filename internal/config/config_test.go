@@ -815,3 +815,128 @@ providers:
 		})
 	}
 }
+
+func TestCapabilityGrantPathFilters(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              allow_paths: ["docs/**", "*.md"]
+              deny_paths: ["**/.env"]
+          - repo:write:
+              deny_paths: ["**/secrets/**"]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := cfg.Providers[0].Rules[0].Capabilities
+	if len(got) != 2 {
+		t.Fatalf("capabilities = %+v", got)
+	}
+	if got[0].Name != "repo:read" || len(got[0].AllowPaths) != 2 || got[0].AllowPaths[0] != "docs/**" {
+		t.Errorf("repo:read grant = %+v", got[0])
+	}
+	if len(got[0].DenyPaths) != 1 || got[0].DenyPaths[0] != "**/.env" {
+		t.Errorf("repo:read deny_paths = %v", got[0].DenyPaths)
+	}
+	if got[1].Name != "repo:write" || len(got[1].DenyPaths) != 1 || got[1].DenyPaths[0] != "**/secrets/**" {
+		t.Errorf("repo:write grant = %+v", got[1])
+	}
+}
+
+func TestCapabilityGrantPathFilterRejections(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "pattern in both lists",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              allow_paths: ["docs/**"]
+              deny_paths: ["docs/**"]
+`,
+			wantErr: "both allow_paths and deny_paths",
+		},
+		{
+			name: "invalid glob",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              allow_paths: ["a/["]
+`,
+			wantErr: "invalid path pattern",
+		},
+		{
+			name: "empty path",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              allow_paths: ["   "]
+`,
+			wantErr: "path must not be empty",
+		},
+		{
+			name: "path filter on mr capability",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:read:
+              allow_paths: ["docs/**"]
+`,
+			wantErr: "path filters are not supported yet",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("Parse succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}

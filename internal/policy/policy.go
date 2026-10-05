@@ -20,22 +20,29 @@ const (
 	EffectDeny Effect = "deny"
 )
 
-// TagFilter is a set of required and excluded tags (GitLab labels). Both lists
-// are matched by exact, case-sensitive equality.
-type TagFilter struct {
+// CapabilityFilter constrains a granted capability. Tags (Require/Exclude) are
+// matched by exact, case-sensitive equality; path globs (AllowPaths/DenyPaths)
+// are matched against a repository-relative file path with doublestar. An empty
+// list imposes no constraint of that kind.
+type CapabilityFilter struct {
 	// Require lists tags the subject must all carry.
 	Require []string
 	// Exclude lists tags the subject must not carry.
 	Exclude []string
+	// AllowPaths lists path globs; when non-empty the path must match one.
+	AllowPaths []string
+	// DenyPaths lists path globs; the path must match none (deny wins).
+	DenyPaths []string
 }
 
-// IsZero reports whether the filter imposes no tag requirements.
-func (f TagFilter) IsZero() bool {
-	return len(f.Require) == 0 && len(f.Exclude) == 0
+// IsZero reports whether the filter imposes no constraints.
+func (f CapabilityFilter) IsZero() bool {
+	return len(f.Require) == 0 && len(f.Exclude) == 0 &&
+		len(f.AllowPaths) == 0 && len(f.DenyPaths) == 0
 }
 
 // TagSet is an observed set of tags. Known=false means the tags could not be
-// determined, in which case an active filter fails closed.
+// determined, in which case an active tag filter fails closed.
 type TagSet struct {
 	// Known reports whether Values is authoritative.
 	Known bool
@@ -43,12 +50,12 @@ type TagSet struct {
 	Values []string
 }
 
-// CapabilityGrant is a capability together with its optional tag filter.
+// CapabilityGrant is a capability together with its optional filter.
 type CapabilityGrant struct {
 	// Name is the capability.
 	Name Capability
-	// Filter is the optional tag filter.
-	Filter TagFilter
+	// Filter is the optional capability filter.
+	Filter CapabilityFilter
 }
 
 // RuleSpec is the configuration-facing description of a rule. It is decoupled
@@ -69,9 +76,9 @@ type Rule struct {
 	Repositories []string
 	// Effect is the rule outcome.
 	Effect Effect
-	// Capabilities maps each granted capability to its tag filter (only
-	// meaningful for EffectAllow).
-	Capabilities map[Capability]TagFilter
+	// Capabilities maps each granted capability to its filter (only meaningful
+	// for EffectAllow).
+	Capabilities map[Capability]CapabilityFilter
 }
 
 // Policy is an ordered set of rules. Rules are evaluated first-match-wins.
@@ -115,10 +122,16 @@ func Build(specs []RuleSpec) (*Policy, error) {
 				return nil, fmt.Errorf("policy: rule %d: invalid pattern %q", i, pattern)
 			}
 		}
-		caps := make(map[Capability]TagFilter, len(spec.Capabilities))
+		caps := make(map[Capability]CapabilityFilter, len(spec.Capabilities))
 		for _, grant := range spec.Capabilities {
 			if !IsKnownCapability(string(grant.Name)) {
 				return nil, fmt.Errorf("policy: rule %d: unknown capability %q", i, grant.Name)
+			}
+			if err := validatePathPatterns(grant.Filter.AllowPaths); err != nil {
+				return nil, fmt.Errorf("policy: rule %d: capability %q allow_paths: %w", i, grant.Name, err)
+			}
+			if err := validatePathPatterns(grant.Filter.DenyPaths); err != nil {
+				return nil, fmt.Errorf("policy: rule %d: capability %q deny_paths: %w", i, grant.Name, err)
 			}
 			caps[grant.Name] = grant.Filter
 		}
@@ -131,17 +144,25 @@ func Build(specs []RuleSpec) (*Policy, error) {
 	return &Policy{rules: rules}, nil
 }
 
-// Evaluate returns the decision for repo and capability c with unknown tags.
-// It is equivalent to EvaluateWithTags(repo, c, TagSet{}).
+// Evaluate returns the decision for repo and capability c with unknown tags and
+// no path. It is equivalent to EvaluateResource(repo, c, TagSet{}, "").
 func (p *Policy) Evaluate(repo string, c Capability) Decision {
-	return p.EvaluateWithTags(repo, c, TagSet{})
+	return p.EvaluateResource(repo, c, TagSet{}, "")
 }
 
 // EvaluateWithTags returns the decision for repo, capability c and the observed
-// tags. The first rule whose pattern matches repo wins. An active tag filter
-// fails closed when the tags are not known. When no rule matches, access is
-// denied.
+// tags, with no path. It is equivalent to EvaluateResource(repo, c, tags, "").
 func (p *Policy) EvaluateWithTags(repo string, c Capability, tags TagSet) Decision {
+	return p.EvaluateResource(repo, c, tags, "")
+}
+
+// EvaluateResource returns the decision for repo, capability c, the observed
+// tags and the repository-relative path. The first rule whose pattern matches
+// repo wins. An active tag filter fails closed when the tags are not known; an
+// active path filter fails closed when the path is empty. Both tag and path
+// constraints must pass; a deny path wins over an allow path. When no rule
+// matches, access is denied.
+func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path string) Decision {
 	for _, rule := range p.rules {
 		if !ruleMatches(rule, repo) {
 			continue
@@ -159,22 +180,64 @@ func (p *Policy) EvaluateWithTags(repo string, c Capability, tags TagSet) Decisi
 		if filter.IsZero() {
 			return Decision{Allowed: true, CapabilityGranted: true, Matched: true, Reason: "capability granted"}
 		}
-		if !tags.Known {
-			return Decision{CapabilityGranted: true, Matched: true, Reason: "tag information unavailable"}
-		}
-		for _, required := range filter.Require {
-			if !containsTag(tags.Values, required) {
-				return Decision{CapabilityGranted: true, Matched: true, Reason: "tag requirement not met"}
+
+		if len(filter.Require) > 0 || len(filter.Exclude) > 0 {
+			if !tags.Known {
+				return Decision{CapabilityGranted: true, Matched: true, Reason: "tag information unavailable"}
+			}
+			for _, required := range filter.Require {
+				if !containsTag(tags.Values, required) {
+					return Decision{CapabilityGranted: true, Matched: true, Reason: "tag requirement not met"}
+				}
+			}
+			for _, excluded := range filter.Exclude {
+				if containsTag(tags.Values, excluded) {
+					return Decision{CapabilityGranted: true, Matched: true, Reason: "excluded tag present"}
+				}
 			}
 		}
-		for _, excluded := range filter.Exclude {
-			if containsTag(tags.Values, excluded) {
-				return Decision{CapabilityGranted: true, Matched: true, Reason: "excluded tag present"}
+
+		if len(filter.AllowPaths) > 0 || len(filter.DenyPaths) > 0 {
+			if path == "" {
+				return Decision{CapabilityGranted: true, Matched: true, Reason: "path required"}
+			}
+			// Deny wins over allow.
+			if matchesAnyPath(filter.DenyPaths, path) {
+				return Decision{CapabilityGranted: true, Matched: true, Reason: "path excluded"}
+			}
+			if len(filter.AllowPaths) > 0 && !matchesAnyPath(filter.AllowPaths, path) {
+				return Decision{CapabilityGranted: true, Matched: true, Reason: "path not allowed"}
 			}
 		}
+
 		return Decision{Allowed: true, CapabilityGranted: true, Matched: true, Reason: "capability granted"}
 	}
 	return Decision{Matched: false, Reason: "no matching rule"}
+}
+
+func matchesAnyPath(patterns []string, path string) bool {
+	for _, pattern := range patterns {
+		ok, err := doublestar.Match(pattern, path)
+		if err != nil {
+			continue
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func validatePathPatterns(patterns []string) error {
+	for _, pattern := range patterns {
+		if pattern == "" {
+			return fmt.Errorf("empty pattern")
+		}
+		if !doublestar.ValidatePattern(pattern) {
+			return fmt.Errorf("invalid pattern %q", pattern)
+		}
+	}
+	return nil
 }
 
 func containsTag(tags []string, tag string) bool {
@@ -239,11 +302,12 @@ func (p *Policy) GrantsAnywhere(c Capability) bool {
 	return false
 }
 
-// HasTagFilter reports whether the first matching rule is an allow rule that
-// grants capability c with a non-zero tag filter. It is false for a deny rule,
-// no matching rule, or a missing/unfiltered capability. It is used to decide
-// whether tag information must be fetched before evaluating the capability.
-func (p *Policy) HasTagFilter(repo string, c Capability) bool {
+// HasFilter reports whether the first matching rule is an allow rule that grants
+// capability c with a non-zero filter (tags and/or paths). It is false for a deny
+// rule, no matching rule, or a missing/unfiltered capability. It is used to
+// decide whether tag information must be fetched before evaluating the
+// capability.
+func (p *Policy) HasFilter(repo string, c Capability) bool {
 	for _, rule := range p.rules {
 		if !ruleMatches(rule, repo) {
 			continue
@@ -256,6 +320,27 @@ func (p *Policy) HasTagFilter(repo string, c Capability) bool {
 			return false
 		}
 		return !filter.IsZero()
+	}
+	return false
+}
+
+// HasTagConstraint reports whether the first matching rule is an allow rule that
+// grants capability c with an active tag constraint (Require/Exclude non-empty).
+// It is used to decide whether tag information must be fetched; a path-only
+// filter does not require it.
+func (p *Policy) HasTagConstraint(repo string, c Capability) bool {
+	for _, rule := range p.rules {
+		if !ruleMatches(rule, repo) {
+			continue
+		}
+		if rule.Effect != EffectAllow {
+			return false
+		}
+		filter, ok := rule.Capabilities[c]
+		if !ok {
+			return false
+		}
+		return len(filter.Require) > 0 || len(filter.Exclude) > 0
 	}
 	return false
 }
@@ -301,9 +386,9 @@ func literalPrefix(pattern string) string {
 func (p *Policy) Rules() []Rule {
 	out := make([]Rule, len(p.rules))
 	for i, rule := range p.rules {
-		caps := make(map[Capability]TagFilter, len(rule.Capabilities))
+		caps := make(map[Capability]CapabilityFilter, len(rule.Capabilities))
 		for c, filter := range rule.Capabilities {
-			caps[c] = cloneTagFilter(filter)
+			caps[c] = cloneFilter(filter)
 		}
 		out[i] = Rule{
 			Repositories: append([]string(nil), rule.Repositories...),
@@ -319,16 +404,18 @@ func (p *Policy) Rules() []Rule {
 func (r Rule) SortedCapabilities() []CapabilityGrant {
 	grants := make([]CapabilityGrant, 0, len(r.Capabilities))
 	for c, filter := range r.Capabilities {
-		grants = append(grants, CapabilityGrant{Name: c, Filter: cloneTagFilter(filter)})
+		grants = append(grants, CapabilityGrant{Name: c, Filter: cloneFilter(filter)})
 	}
 	sort.Slice(grants, func(i, j int) bool { return grants[i].Name < grants[j].Name })
 	return grants
 }
 
-func cloneTagFilter(f TagFilter) TagFilter {
-	return TagFilter{
-		Require: append([]string(nil), f.Require...),
-		Exclude: append([]string(nil), f.Exclude...),
+func cloneFilter(f CapabilityFilter) CapabilityFilter {
+	return CapabilityFilter{
+		Require:    append([]string(nil), f.Require...),
+		Exclude:    append([]string(nil), f.Exclude...),
+		AllowPaths: append([]string(nil), f.AllowPaths...),
+		DenyPaths:  append([]string(nil), f.DenyPaths...),
 	}
 }
 

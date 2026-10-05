@@ -60,9 +60,11 @@ func run() error {
 			for k, grant := range rule.Capabilities {
 				caps[k] = policy.CapabilityGrant{
 					Name: policy.Capability(grant.Name),
-					Filter: policy.TagFilter{
-						Require: grant.Require,
-						Exclude: grant.Exclude,
+					Filter: policy.CapabilityFilter{
+						Require:    grant.Require,
+						Exclude:    grant.Exclude,
+						AllowPaths: grant.AllowPaths,
+						DenyPaths:  grant.DenyPaths,
 					},
 				}
 			}
