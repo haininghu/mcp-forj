@@ -828,10 +828,13 @@ providers:
         effect: allow
         capabilities:
           - repo:read:
-              allow_paths: ["docs/**", "*.md"]
-              deny_paths: ["**/.env"]
+              require: [ai-ok]
+              paths:
+                include: ["docs/**", "*.md"]
+                exclude: ["**/.env"]
           - repo:write:
-              deny_paths: ["**/secrets/**"]
+              paths:
+                exclude: ["**/secrets/**"]
 `
 	cfg, err := Parse([]byte(yaml))
 	if err != nil {
@@ -841,13 +844,16 @@ providers:
 	if len(got) != 2 {
 		t.Fatalf("capabilities = %+v", got)
 	}
-	if got[0].Name != "repo:read" || len(got[0].AllowPaths) != 2 || got[0].AllowPaths[0] != "docs/**" {
+	if got[0].Name != "repo:read" || len(got[0].Paths.Include) != 2 || got[0].Paths.Include[0] != "docs/**" {
 		t.Errorf("repo:read grant = %+v", got[0])
 	}
-	if len(got[0].DenyPaths) != 1 || got[0].DenyPaths[0] != "**/.env" {
-		t.Errorf("repo:read deny_paths = %v", got[0].DenyPaths)
+	if len(got[0].Paths.Exclude) != 1 || got[0].Paths.Exclude[0] != "**/.env" {
+		t.Errorf("repo:read paths.exclude = %v", got[0].Paths.Exclude)
 	}
-	if got[1].Name != "repo:write" || len(got[1].DenyPaths) != 1 || got[1].DenyPaths[0] != "**/secrets/**" {
+	if len(got[0].Require) != 1 || got[0].Require[0] != "ai-ok" {
+		t.Errorf("repo:read require = %v", got[0].Require)
+	}
+	if got[1].Name != "repo:write" || len(got[1].Paths.Exclude) != 1 || got[1].Paths.Exclude[0] != "**/secrets/**" {
 		t.Errorf("repo:write grant = %+v", got[1])
 	}
 }
@@ -871,10 +877,11 @@ providers:
         effect: allow
         capabilities:
           - repo:read:
-              allow_paths: ["docs/**"]
-              deny_paths: ["docs/**"]
+              paths:
+                include: ["docs/**"]
+                exclude: ["docs/**"]
 `,
-			wantErr: "both allow_paths and deny_paths",
+			wantErr: "both paths.include and paths.exclude",
 		},
 		{
 			name: "invalid glob",
@@ -889,7 +896,8 @@ providers:
         effect: allow
         capabilities:
           - repo:read:
-              allow_paths: ["a/["]
+              paths:
+                include: ["a/["]
 `,
 			wantErr: "invalid path pattern",
 		},
@@ -906,12 +914,13 @@ providers:
         effect: allow
         capabilities:
           - repo:read:
-              allow_paths: ["   "]
+              paths:
+                include: ["   "]
 `,
 			wantErr: "path must not be empty",
 		},
 		{
-			name: "path filter on mr capability",
+			name: "path block on mr capability",
 			yaml: `
 providers:
   - name: p
@@ -923,9 +932,64 @@ providers:
         effect: allow
         capabilities:
           - mr:read:
-              allow_paths: ["docs/**"]
+              paths:
+                include: ["docs/**"]
 `,
 			wantErr: "path filters are not supported yet",
+		},
+		{
+			name: "unknown key inside paths",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              paths:
+                bogus: ["docs/**"]
+`,
+			wantErr: "unknown key",
+		},
+		{
+			name: "non-mapping paths",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              paths: ["docs/**"]
+`,
+			wantErr: "must be a mapping",
+		},
+		{
+			name: "duplicate key inside paths",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              paths:
+                include: ["docs/**"]
+                include: ["src/**"]
+`,
+			wantErr: "duplicate key",
 		},
 	}
 	for _, tt := range tests {

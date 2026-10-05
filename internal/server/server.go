@@ -138,12 +138,16 @@ type readFileInput struct {
 	Ref      string `json:"ref,omitempty" jsonschema:"optional git ref; defaults to the default branch"`
 }
 
+type configuredPathFilter struct {
+	Include []string `json:"include,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
 type configuredCapability struct {
-	Name       string   `json:"name"`
-	Require    []string `json:"require,omitempty"`
-	Exclude    []string `json:"exclude,omitempty"`
-	AllowPaths []string `json:"allow_paths,omitempty"`
-	DenyPaths  []string `json:"deny_paths,omitempty"`
+	Name    string                `json:"name"`
+	Require []string              `json:"require,omitempty"`
+	Exclude []string              `json:"exclude,omitempty"`
+	Paths   *configuredPathFilter `json:"paths,omitempty"`
 }
 
 type configuredRepository struct {
@@ -224,13 +228,18 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 	for _, rule := range rules {
 		caps := make([]configuredCapability, len(rule.Capabilities))
 		for i, grant := range rule.Capabilities {
-			caps[i] = configuredCapability{
-				Name:       string(grant.Name),
-				Require:    grant.Filter.Require,
-				Exclude:    grant.Filter.Exclude,
-				AllowPaths: grant.Filter.AllowPaths,
-				DenyPaths:  grant.Filter.DenyPaths,
+			cap := configuredCapability{
+				Name:    string(grant.Name),
+				Require: grant.Filter.Require,
+				Exclude: grant.Filter.Exclude,
 			}
+			if !grant.Filter.Paths.IsZero() {
+				cap.Paths = &configuredPathFilter{
+					Include: grant.Filter.Paths.Include,
+					Exclude: grant.Filter.Paths.Exclude,
+				}
+			}
+			caps[i] = cap
 		}
 		repos = append(repos, configuredRepository{
 			Provider:               rule.Provider,

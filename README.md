@@ -110,15 +110,16 @@ capabilities:
       require: [ai-ok]            # project must have this topic
   - repo:read:
       exclude: [confidential]     # project must not have this topic
-      allow_paths: ["docs/**", "*.md"]        # path must match one
-      deny_paths:  ["**/.env", "**/secrets/**"]  # path must match none
+      paths:                      # nested path filter (repo:read/repo:write)
+        include: ["docs/**", "*.md"]        # path must match one
+        exclude: ["**/.env", "**/secrets/**"]  # path must match none
 ```
 
 Tags are matched by exact, case-sensitive equality. Path globs are doublestar and
 case-sensitive (`*.md` is root-level only; `**/*.md` is any depth). An empty
-`allow_paths` allows all paths; `deny_paths` wins over `allow_paths`; an active path
-filter with an empty path fails closed. Tags and paths combine (both must pass).
-Whenever required information cannot be determined, the decision fails closed.
+`paths.include` allows all paths; `paths.exclude` wins over `paths.include`; an
+active path filter with an empty path fails closed. Tags and paths combine (both must
+pass). Whenever required information cannot be determined, the decision fails closed.
 
 Limitations:
 

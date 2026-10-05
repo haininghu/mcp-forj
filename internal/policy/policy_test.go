@@ -229,7 +229,7 @@ func TestHasFilter(t *testing.T) {
 			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}}},
 		}},
 		{Repositories: []string{"team/paths"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapRepoRead, Filter: CapabilityFilter{AllowPaths: []string{"docs/**"}}},
+			{Name: CapRepoRead, Filter: CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}},
 		}},
 		{Repositories: []string{"team/plain"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
 	})
@@ -270,16 +270,16 @@ func TestEvaluateResource(t *testing.T) {
 		wantAllowed bool
 		wantReason  string
 	}{
-		{"allow match", CapabilityFilter{AllowPaths: []string{"docs/**"}}, TagSet{}, "docs/a.md", true, "capability granted"},
-		{"allow non-match", CapabilityFilter{AllowPaths: []string{"docs/**"}}, TagSet{}, "src/a.go", false, "path not allowed"},
-		{"deny match", CapabilityFilter{DenyPaths: []string{"**/.env"}}, TagSet{}, "sub/.env", false, "path excluded"},
-		{"deny-only other path allowed", CapabilityFilter{DenyPaths: []string{"**/.env"}}, TagSet{}, "src/a.go", true, "capability granted"},
-		{"deny wins over allow", CapabilityFilter{AllowPaths: []string{"src/**"}, DenyPaths: []string{"src/secret/**"}}, TagSet{}, "src/secret/x", false, "path excluded"},
-		{"empty path fails closed", CapabilityFilter{AllowPaths: []string{"docs/**"}}, TagSet{}, "", false, "path required"},
+		{"allow match", CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}, TagSet{}, "docs/a.md", true, "capability granted"},
+		{"allow non-match", CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}, TagSet{}, "src/a.go", false, "path not allowed"},
+		{"exclude match", CapabilityFilter{Paths: PathFilter{Exclude: []string{"**/.env"}}}, TagSet{}, "sub/.env", false, "path excluded"},
+		{"exclude-only other path allowed", CapabilityFilter{Paths: PathFilter{Exclude: []string{"**/.env"}}}, TagSet{}, "src/a.go", true, "capability granted"},
+		{"exclude wins over include", CapabilityFilter{Paths: PathFilter{Include: []string{"src/**"}, Exclude: []string{"src/secret/**"}}}, TagSet{}, "src/secret/x", false, "path excluded"},
+		{"empty path fails closed", CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}, TagSet{}, "", false, "path required"},
 		{"no filter allows", CapabilityFilter{}, TagSet{}, "anything", true, "capability granted"},
-		{"tags and path both pass", CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, TagSet{Known: true, Values: []string{"ai-ok"}}, "docs/a.md", true, "capability granted"},
-		{"tags fail", CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, TagSet{Known: true, Values: []string{"other"}}, "docs/a.md", false, "tag requirement not met"},
-		{"unknown tags fail before path", CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, TagSet{}, "docs/a.md", false, "tag information unavailable"},
+		{"tags and path both pass", CapabilityFilter{Require: []string{"ai-ok"}, Paths: PathFilter{Include: []string{"docs/**"}}}, TagSet{Known: true, Values: []string{"ai-ok"}}, "docs/a.md", true, "capability granted"},
+		{"tags fail", CapabilityFilter{Require: []string{"ai-ok"}, Paths: PathFilter{Include: []string{"docs/**"}}}, TagSet{Known: true, Values: []string{"other"}}, "docs/a.md", false, "tag requirement not met"},
+		{"unknown tags fail before path", CapabilityFilter{Require: []string{"ai-ok"}, Paths: PathFilter{Include: []string{"docs/**"}}}, TagSet{}, "docs/a.md", false, "tag information unavailable"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -20,25 +20,37 @@ const (
 	EffectDeny Effect = "deny"
 )
 
+// PathFilter constrains the repository-relative file path with doublestar globs.
+// An empty Include allows all paths (subject to Exclude); Include wins nothing —
+// Exclude always wins over Include.
+type PathFilter struct {
+	// Include lists path globs; when non-empty the path must match one.
+	Include []string
+	// Exclude lists path globs; the path must match none (exclude wins).
+	Exclude []string
+}
+
+// IsZero reports whether the path filter imposes no constraints.
+func (f PathFilter) IsZero() bool {
+	return len(f.Include) == 0 && len(f.Exclude) == 0
+}
+
 // CapabilityFilter constrains a granted capability. Tags (Require/Exclude) are
-// matched by exact, case-sensitive equality; path globs (AllowPaths/DenyPaths)
-// are matched against a repository-relative file path with doublestar. An empty
-// list imposes no constraint of that kind.
+// matched by exact, case-sensitive equality; path globs (Paths) are matched
+// against a repository-relative file path with doublestar. An empty list imposes
+// no constraint of that kind.
 type CapabilityFilter struct {
 	// Require lists tags the subject must all carry.
 	Require []string
 	// Exclude lists tags the subject must not carry.
 	Exclude []string
-	// AllowPaths lists path globs; when non-empty the path must match one.
-	AllowPaths []string
-	// DenyPaths lists path globs; the path must match none (deny wins).
-	DenyPaths []string
+	// Paths constrains the repository-relative file path.
+	Paths PathFilter
 }
 
 // IsZero reports whether the filter imposes no constraints.
 func (f CapabilityFilter) IsZero() bool {
-	return len(f.Require) == 0 && len(f.Exclude) == 0 &&
-		len(f.AllowPaths) == 0 && len(f.DenyPaths) == 0
+	return len(f.Require) == 0 && len(f.Exclude) == 0 && f.Paths.IsZero()
 }
 
 // TagSet is an observed set of tags. Known=false means the tags could not be
@@ -127,11 +139,11 @@ func Build(specs []RuleSpec) (*Policy, error) {
 			if !IsKnownCapability(string(grant.Name)) {
 				return nil, fmt.Errorf("policy: rule %d: unknown capability %q", i, grant.Name)
 			}
-			if err := validatePathPatterns(grant.Filter.AllowPaths); err != nil {
-				return nil, fmt.Errorf("policy: rule %d: capability %q allow_paths: %w", i, grant.Name, err)
+			if err := validatePathPatterns(grant.Filter.Paths.Include); err != nil {
+				return nil, fmt.Errorf("policy: rule %d: capability %q paths.include: %w", i, grant.Name, err)
 			}
-			if err := validatePathPatterns(grant.Filter.DenyPaths); err != nil {
-				return nil, fmt.Errorf("policy: rule %d: capability %q deny_paths: %w", i, grant.Name, err)
+			if err := validatePathPatterns(grant.Filter.Paths.Exclude); err != nil {
+				return nil, fmt.Errorf("policy: rule %d: capability %q paths.exclude: %w", i, grant.Name, err)
 			}
 			caps[grant.Name] = grant.Filter
 		}
@@ -197,15 +209,15 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 			}
 		}
 
-		if len(filter.AllowPaths) > 0 || len(filter.DenyPaths) > 0 {
+		if !filter.Paths.IsZero() {
 			if path == "" {
 				return Decision{CapabilityGranted: true, Matched: true, Reason: "path required"}
 			}
-			// Deny wins over allow.
-			if matchesAnyPath(filter.DenyPaths, path) {
+			// Exclude wins over include.
+			if matchesAnyPath(filter.Paths.Exclude, path) {
 				return Decision{CapabilityGranted: true, Matched: true, Reason: "path excluded"}
 			}
-			if len(filter.AllowPaths) > 0 && !matchesAnyPath(filter.AllowPaths, path) {
+			if len(filter.Paths.Include) > 0 && !matchesAnyPath(filter.Paths.Include, path) {
 				return Decision{CapabilityGranted: true, Matched: true, Reason: "path not allowed"}
 			}
 		}
@@ -412,10 +424,12 @@ func (r Rule) SortedCapabilities() []CapabilityGrant {
 
 func cloneFilter(f CapabilityFilter) CapabilityFilter {
 	return CapabilityFilter{
-		Require:    append([]string(nil), f.Require...),
-		Exclude:    append([]string(nil), f.Exclude...),
-		AllowPaths: append([]string(nil), f.AllowPaths...),
-		DenyPaths:  append([]string(nil), f.DenyPaths...),
+		Require: append([]string(nil), f.Require...),
+		Exclude: append([]string(nil), f.Exclude...),
+		Paths: PathFilter{
+			Include: append([]string(nil), f.Paths.Include...),
+			Exclude: append([]string(nil), f.Paths.Exclude...),
+		},
 	}
 }
 

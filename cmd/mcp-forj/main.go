@@ -61,10 +61,12 @@ func run() error {
 				caps[k] = policy.CapabilityGrant{
 					Name: policy.Capability(grant.Name),
 					Filter: policy.CapabilityFilter{
-						Require:    grant.Require,
-						Exclude:    grant.Exclude,
-						AllowPaths: grant.AllowPaths,
-						DenyPaths:  grant.DenyPaths,
+						Require: grant.Require,
+						Exclude: grant.Exclude,
+						Paths: policy.PathFilter{
+							Include: grant.Paths.Include,
+							Exclude: grant.Paths.Exclude,
+						},
 					},
 				}
 			}

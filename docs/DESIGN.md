@@ -1,8 +1,17 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.14** (file-path filters for `repo:read`/`repo:write`)
+Status: **Draft v0.15** (nested `paths` filter block)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.14
+
+- **AF1** The flat `allow_paths`/`deny_paths` capability keys were replaced by a
+  nested `paths` block: `paths.include` / `paths.exclude`. Semantics are unchanged
+  (include empty = all; non-empty = must match one; exclude = must match none and
+  wins; an active path filter with an empty path fails closed). No aliases remain.
+- **AF2** `CapabilityFilter` now holds `Paths PathFilter{Include, Exclude}` and
+  `list_configured_rules` emits a nested `paths` object.
 
 ## Changelog vs. v0.13
 
@@ -273,9 +282,10 @@ require reading the merge request, so a repository may grant comment-only access
 
 Any capability may optionally carry a **tag filter**. For MR capabilities the tags
 are GitLab MR **labels**; for repo capabilities they are project **topics**.
-`repo:read`/`repo:write` may additionally carry **path filters** (`allow_paths`/
-`deny_paths`), doublestar globs matched against the repository-relative file path.
-The filter is merged into the `capabilities` list as a compact single-key mapping:
+`repo:read`/`repo:write` may additionally carry a nested **`paths`** block
+(`paths.include`/`paths.exclude`), doublestar globs matched against the
+repository-relative file path. The filter is merged into the `capabilities` list as
+a compact single-key mapping:
 
 ```yaml
 capabilities:
@@ -288,23 +298,24 @@ capabilities:
   - repo:read:
       require: [ai-ok]            # project topic
       exclude: [confidential]
-      allow_paths: ["docs/**", "*.md"]   # path must match one
-      deny_paths:  ["**/.env", "**/secrets/**"]  # path must match none
+      paths:                      # nested path filter
+        include: ["docs/**", "*.md"]        # path must match one
+        exclude: ["**/.env", "**/secrets/**"]  # path must match none
 ```
 
 - Tag matching is **exact and case-sensitive**; there is no glob/regex support for
   tags. Path globs use doublestar: `*.md` matches root-level only, `**/*.md` at any
   depth, and matching is case-sensitive.
-- `allow_paths` empty means all paths are allowed (subject to deny); non-empty means
-  the path must match at least one pattern. `deny_paths` must match none, and **deny
-  wins over allow**. An active path filter evaluated against an empty path fails
-  closed.
+- `paths.include` empty means all paths are allowed (subject to exclude); non-empty
+  means the path must match at least one pattern. `paths.exclude` must match none,
+  and **exclude wins over include**. An active path filter evaluated against an empty
+  path fails closed.
 - Tags and paths combine: **both** must pass.
 - Path filters are only valid on `repo:read`/`repo:write` (capabilities that address
-  a file path); filters on other capabilities are rejected at config load. Filters on
-  a `deny` rule are rejected (deny rules carry no capabilities).
+  a file path); a `paths` block on another capability is rejected at config load.
+  Filters on a `deny` rule are rejected (deny rules carry no capabilities).
 - A tag may not appear in both `require` and `exclude`; a path may not appear in both
-  `allow_paths` and `deny_paths`; entries must be non-empty after trimming; a
+  `paths.include` and `paths.exclude`; entries must be non-empty after trimming; a
   capability may not be listed twice in the same rule.
 - Tags and paths are **authorization inputs only**: never cached, never returned in
   tool output. When tag information cannot be determined, or a path filter is active
@@ -352,8 +363,9 @@ providers:
               require: [ai-ok]
           - repo:read:
               # Path filters (doublestar) apply to the file path in read_file.
-              allow_paths: ["docs/**", "*.md"]
-              deny_paths: ["**/.env", "**/secrets/**"]
+              paths:
+                include: ["docs/**", "*.md"]
+                exclude: ["**/.env", "**/secrets/**"]
           - mr:read
       - repositories: ["legacy/**"]
         effect: deny
@@ -361,9 +373,9 @@ providers:
 
 The `capabilities` entries accept two forms: a plain scalar (`mr:read`) or a
 single-key mapping whose value is `null`/omitted or a mapping with the optional keys
-`require`, `exclude`, `allow_paths` and `deny_paths`. Unknown filter keys and
-mappings with more than one capability key are rejected. See §5 for the filter
-rules.
+`require`, `exclude` and `paths` (the latter a mapping with `include`/`exclude`).
+Unknown filter keys and mappings with more than one capability key are rejected. See
+§5 for the filter rules.
 
 ### Token handling
 
@@ -534,7 +546,7 @@ not match are skipped and counted in `omitted`; MRs whose labels are unknown
 (`LabelsKnown=false`) are omitted (fail-closed) and also counted.
 
 ² **Repo filters** combine project topics (tags) and, for `repo:read`/`repo:write`,
-**path globs** (`allow_paths`/`deny_paths`, doublestar, case-sensitive). `read_file`
+**path globs** (nested `paths` block, doublestar, case-sensitive). `read_file`
 fetches topics only when the matched grant has an active tag constraint, then
 authorizes via `Guard.AuthorizeResource` with the already-validated cleaned path:
 tags and paths must both pass, **deny paths win over allow paths**, and an active
@@ -681,9 +693,10 @@ Tool arguments are validated with explicit bounds:
   resolution, unset/empty `${VAR}` rejection, whitespace trimming, duplicate
   provider names, empty rules, and a redaction assertion that `fmt.Sprintf("%+v",
   cfg)` / `Secret.String()` never contains the resolved value. Capability-grant
-  parsing: scalar form, compact mapping form (require/exclude/allow_paths/deny_paths),
-  null value, and rejection of unknown filter keys, more than one capability key, a
-  tag or path in both lists, empty tags/paths, invalid globs, path filters on
+  parsing: scalar form, compact mapping form (require/exclude/paths), nested `paths`
+  with include/exclude, null value, and rejection of unknown filter keys (including
+  inside `paths`), a non-mapping `paths`, duplicate keys, more than one capability
+  key, a tag or path in both lists, empty tags/paths, invalid globs, path filters on
   non-`repo:*` capabilities, duplicate capabilities, any capabilities on `deny` rules
   (plain or filtered), acceptance of filters on repo capabilities, and acceptance of
   `mr:rebase` (plain and filtered).
@@ -768,10 +781,10 @@ Tool arguments are validated with explicit bounds:
     `ErrInvalidState`, 404 → `ErrNotFound` (errors.Is, no raw bodies); the server
     returns actionable messages for these and `get_merge_request` exposes
     `rebase_in_progress`/`merge_error`/`has_conflicts`/`detailed_merge_status`.
-16. Path filters: `read_file` allows a path matching `allow_paths`, denies a path not
-    matched or matched by `deny_paths` (deny wins), fails closed when the filter is
-    active and the path is empty, requires both tag and path checks to pass, and still
-    honors `.noai`; `list_configured_rules` exposes `allow_paths`/`deny_paths`.
+16. Path filters: `read_file` allows a path matching `paths.include`, denies a path
+    not matched or matched by `paths.exclude` (exclude wins), fails closed when the
+    filter is active and the path is empty, requires both tag and path checks to pass,
+    and still honors `.noai`; `list_configured_rules` exposes the nested `paths`.
 
 ## 11. Dependencies
 
@@ -942,11 +955,19 @@ Makefile                        build/test/lint targets
 
 ## 26. Resolved Questions (v0.14)
 
-1. **Path filters**: `repo:read`/`repo:write` grants may carry `allow_paths` and
-   `deny_paths` (doublestar, case-sensitive). `allow_paths` empty = all paths;
-   otherwise the path must match one; `deny_paths` must match none and deny wins.
-   An active path filter with an empty path fails closed. Path filters on other
+1. **Path filters** (superseded by v0.15 for the key names): `repo:read`/`repo:write`
+   grants may carry path filters (doublestar, case-sensitive). Include empty = all
+   paths; otherwise the path must match one; exclude must match none and wins. An
+   active path filter with an empty path fails closed. Path filters on other
    capabilities are rejected at config load. Tags and paths combine (both must pass).
-2. **Generalized filter**: `TagFilter` became `CapabilityFilter` (Require, Exclude,
-   AllowPaths, DenyPaths); `HasTagFilter` became `HasFilter`, with
-   `HasTagConstraint` available so `read_file` fetches topics only for tag filters.
+2. **Generalized filter**: `TagFilter` became `CapabilityFilter`; `HasTagFilter`
+   became `HasFilter`, with `HasTagConstraint` available so `read_file` fetches topics
+   only for tag filters.
+
+## 27. Resolved Questions (v0.15)
+
+1. **Nested paths**: path filters are configured as `paths: {include: [...],
+   exclude: [...]}` (no flat `allow_paths`/`deny_paths`). `CapabilityFilter.Paths` is
+   a `PathFilter{Include, Exclude}`; `list_configured_rules` emits a nested `paths`
+   object. Unknown keys inside `paths`, a non-mapping `paths`, and duplicate keys are
+   rejected at config load. Semantics are unchanged from v0.14.

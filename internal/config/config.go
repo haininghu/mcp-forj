@@ -98,10 +98,16 @@ type CapabilityGrant struct {
 	Require []string
 	// Exclude lists tags the merge request must not carry.
 	Exclude []string
-	// AllowPaths lists path globs; when non-empty the file path must match one.
-	AllowPaths []string
-	// DenyPaths lists path globs; the file path must match none (deny wins).
-	DenyPaths []string
+	// Paths constrains the repository-relative file path (repo:read/repo:write).
+	Paths PathFilter
+}
+
+// PathFilter is the nested path constraint for a capability grant.
+type PathFilter struct {
+	// Include lists path globs; when non-empty the file path must match one.
+	Include []string
+	// Exclude lists path globs; the file path must match none (exclude wins).
+	Exclude []string
 }
 
 // UnmarshalYAML implements yaml.Unmarshaler for the compact capability form.
@@ -149,14 +155,12 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 				if err := val.Decode(&g.Exclude); err != nil {
 					return fmt.Errorf("capability %q: exclude: %w", name, err)
 				}
-			case "allow_paths":
-				if err := val.Decode(&g.AllowPaths); err != nil {
-					return fmt.Errorf("capability %q: allow_paths: %w", name, err)
+			case "paths":
+				paths, err := decodePathFilter(val)
+				if err != nil {
+					return fmt.Errorf("capability %q: paths: %w", name, err)
 				}
-			case "deny_paths":
-				if err := val.Decode(&g.DenyPaths); err != nil {
-					return fmt.Errorf("capability %q: deny_paths: %w", name, err)
-				}
+				g.Paths = paths
 			default:
 				return fmt.Errorf("capability %q: unknown filter key %q", name, key)
 			}
@@ -165,6 +169,39 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 	default:
 		return fmt.Errorf("capability must be a string or a single-key mapping")
 	}
+}
+
+// decodePathFilter decodes a nested paths mapping with only include/exclude keys.
+func decodePathFilter(value *yaml.Node) (PathFilter, error) {
+	if value.Tag == "!!null" {
+		return PathFilter{}, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return PathFilter{}, fmt.Errorf("must be a mapping")
+	}
+	var pf PathFilter
+	seen := make(map[string]bool, len(value.Content)/2)
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		key := value.Content[i].Value
+		val := value.Content[i+1]
+		if seen[key] {
+			return PathFilter{}, fmt.Errorf("duplicate key %q", key)
+		}
+		seen[key] = true
+		switch key {
+		case "include":
+			if err := val.Decode(&pf.Include); err != nil {
+				return PathFilter{}, fmt.Errorf("include: %w", err)
+			}
+		case "exclude":
+			if err := val.Decode(&pf.Exclude); err != nil {
+				return PathFilter{}, fmt.Errorf("exclude: %w", err)
+			}
+		default:
+			return PathFilter{}, fmt.Errorf("unknown key %q", key)
+		}
+	}
+	return pf, nil
 }
 
 func (g *CapabilityGrant) setScalar(name string) error {
@@ -350,27 +387,27 @@ func (c *Config) Validate() error {
 				}
 				grant.Require, grant.Exclude = require, exclude
 
-				allowPaths, err := normalizePaths(p.Name, j, grant.Name, "allow_paths", grant.AllowPaths)
+				include, err := normalizePaths(p.Name, j, grant.Name, "paths.include", grant.Paths.Include)
 				if err != nil {
 					return err
 				}
-				denyPaths, err := normalizePaths(p.Name, j, grant.Name, "deny_paths", grant.DenyPaths)
+				excludePaths, err := normalizePaths(p.Name, j, grant.Name, "paths.exclude", grant.Paths.Exclude)
 				if err != nil {
 					return err
 				}
-				grant.AllowPaths, grant.DenyPaths = allowPaths, denyPaths
+				grant.Paths.Include, grant.Paths.Exclude = include, excludePaths
 
-				if len(require) == 0 && len(exclude) == 0 && len(allowPaths) == 0 && len(denyPaths) == 0 {
+				if len(require) == 0 && len(exclude) == 0 && len(include) == 0 && len(excludePaths) == 0 {
 					continue
 				}
-				if len(allowPaths) > 0 || len(denyPaths) > 0 {
+				if len(include) > 0 || len(excludePaths) > 0 {
 					if grant.Name != string(policy.CapRepoRead) && grant.Name != string(policy.CapRepoWrite) {
 						return fmt.Errorf("config: provider %q rule %d: path filters are not supported yet for capability %q", p.Name, j, grant.Name)
 					}
-					for _, allowed := range allowPaths {
-						for _, excluded := range denyPaths {
-							if allowed == excluded {
-								return fmt.Errorf("config: provider %q rule %d: path %q appears in both allow_paths and deny_paths", p.Name, j, allowed)
+					for _, included := range include {
+						for _, excluded := range excludePaths {
+							if included == excluded {
+								return fmt.Errorf("config: provider %q rule %d: path %q appears in both paths.include and paths.exclude", p.Name, j, included)
 							}
 						}
 					}

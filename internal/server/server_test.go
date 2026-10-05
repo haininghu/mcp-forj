@@ -1697,12 +1697,12 @@ func TestReadFilePathFilter(t *testing.T) {
 		topics    map[string][]string
 		wantError bool
 	}{
-		{"allowed path", policy.CapabilityFilter{AllowPaths: []string{"docs/**"}}, "docs/README.md", nil, false},
-		{"path not allowed", policy.CapabilityFilter{AllowPaths: []string{"docs/**"}}, "src/main.go", nil, true},
-		{"denied path", policy.CapabilityFilter{DenyPaths: []string{"**/.env"}}, "sub/.env", nil, true},
-		{"deny wins over allow", policy.CapabilityFilter{AllowPaths: []string{"src/**"}, DenyPaths: []string{"src/secret/**"}}, "src/secret/x", nil, true},
-		{"tags and path pass", policy.CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, "docs/README.md", map[string][]string{"team/app": {"ai-ok"}}, false},
-		{"tags fail", policy.CapabilityFilter{Require: []string{"ai-ok"}, AllowPaths: []string{"docs/**"}}, "docs/README.md", map[string][]string{"team/app": {"other"}}, true},
+		{"allowed path", policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"docs/**"}}}, "docs/README.md", nil, false},
+		{"path not allowed", policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"docs/**"}}}, "src/main.go", nil, true},
+		{"excluded path", policy.CapabilityFilter{Paths: policy.PathFilter{Exclude: []string{"**/.env"}}}, "sub/.env", nil, true},
+		{"exclude wins over include", policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"src/**"}, Exclude: []string{"src/secret/**"}}}, "src/secret/x", nil, true},
+		{"tags and path pass", policy.CapabilityFilter{Require: []string{"ai-ok"}, Paths: policy.PathFilter{Include: []string{"docs/**"}}}, "docs/README.md", map[string][]string{"team/app": {"ai-ok"}}, false},
+		{"tags fail", policy.CapabilityFilter{Require: []string{"ai-ok"}, Paths: policy.PathFilter{Include: []string{"docs/**"}}}, "docs/README.md", map[string][]string{"team/app": {"other"}}, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1737,7 +1737,7 @@ func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
 		Effect:       "allow",
 		Capabilities: []policy.CapabilityGrant{{
 			Name:   policy.CapRepoRead,
-			Filter: policy.CapabilityFilter{AllowPaths: []string{"docs/**"}, DenyPaths: []string{"**/.env"}},
+			Filter: policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"docs/**"}, Exclude: []string{"**/.env"}}},
 		}},
 	}}
 	env := newTestEnv(t, rules, newFake())
@@ -1754,10 +1754,13 @@ func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
 		t.Fatalf("configured rules = %+v", out)
 	}
 	cap := out.Repositories[0].ConfiguredCapabilities[0]
-	if len(cap.AllowPaths) != 1 || cap.AllowPaths[0] != "docs/**" {
-		t.Errorf("allow_paths = %v, want [docs/**]", cap.AllowPaths)
+	if cap.Paths == nil {
+		t.Fatalf("paths missing from configured capability: %+v", cap)
 	}
-	if len(cap.DenyPaths) != 1 || cap.DenyPaths[0] != "**/.env" {
-		t.Errorf("deny_paths = %v, want [**/.env]", cap.DenyPaths)
+	if len(cap.Paths.Include) != 1 || cap.Paths.Include[0] != "docs/**" {
+		t.Errorf("paths.include = %v, want [docs/**]", cap.Paths.Include)
+	}
+	if len(cap.Paths.Exclude) != 1 || cap.Paths.Exclude[0] != "**/.env" {
+		t.Errorf("paths.exclude = %v, want [**/.env]", cap.Paths.Exclude)
 	}
 }
