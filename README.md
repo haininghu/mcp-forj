@@ -49,6 +49,7 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 | `list_merge_requests`      | `mr:read`           | List merge requests.                    |
 | `get_merge_request`        | `mr:read`           | Fetch one merge request.                |
 | `list_merge_request_notes` | `mr:read`           | List comments on a merge request.       |
+| `get_merge_request_diff`   | `mr:diff`           | Fetch the file diffs of a merge request.|
 | `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.             |
 | `rebase_merge_request`     | `mr:rebase`         | Trigger an asynchronous MR rebase.      |
 | `read_file`                | `repo:read`         | Read a repository file.                 |
@@ -63,7 +64,8 @@ See `configs/config.example.yaml`. Capabilities:
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:comment` – comment on merge requests.
 - `mr:rebase` – trigger an asynchronous rebase of a merge request.
-- `mr:diff` – read merge request diffs (reserved, not used in v1).
+- `mr:diff` – read merge request file diffs (`get_merge_request_diff`);
+  separately grantable and tag-filterable; not `.noai`-protected.
 - `mr:write` – reserved (creating/updating/merging MRs).
 - `repo:write` – reserved.
 

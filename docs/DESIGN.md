@@ -1,8 +1,18 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.15** (nested `paths` filter block)
+Status: **Draft v0.16** (`mr:diff` tool)
 Author: orchestrator
-Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+Scope: first iteration (GitLab only; MR metadata + comments + diffs + repo listing + rebase)
+
+## Changelog vs. v0.15
+
+- **AG1** Added the `get_merge_request_diff` tool backed by the `mr:diff`
+  capability (previously reserved). It lists the changed files of a merge request.
+  MR **tag filters** apply exactly as for `mr:read`; diffs are **not**
+  `.noai`-protected (they are merge-request metadata, not repository contents).
+- **AG2** Diff output limits: at most 100 files; each file's diff capped at 128 KiB;
+  total diff budget 512 KiB, after which the response stops and reports
+  `truncated: true`. Labels are never returned.
 
 ## Changelog vs. v0.14
 
@@ -248,14 +258,19 @@ are rejected — fail closed).
 | `repo:list`  | Discover repositories matching the configured patterns.       |
 | `repo:read`  | Read repository files / directory listings.                   |
 | `mr:read`    | List and view merge request **metadata** and notes. No diffs. |
-| `mr:diff`    | Read merge request diff content. *(reserved, not in v1)*      |
+| `mr:diff`    | Read merge request file diff content.                         |
 | `mr:comment` | Create comments/notes on merge requests.                      |
 | `mr:rebase`  | Trigger an asynchronous merge request rebase.                 |
 | `mr:write`   | Create, update, merge, or close merge requests. *(reserved)*  |
 | `repo:write` | Modify repository content (branches, files, pushes). *(reserved)* |
 
-`repo:list`, `repo:read`, `mr:read`, `mr:comment` and `mr:rebase` are used by tools.
-The remaining capabilities are reserved so the config vocabulary is stable.
+`repo:list`, `repo:read`, `mr:read`, `mr:diff`, `mr:comment` and `mr:rebase` are used
+by tools. The remaining capabilities are reserved so the config vocabulary is stable.
+
+`mr:diff` is **separately grantable** from `mr:read` (viewing metadata does not leak
+source), and it accepts MR **tag filters** like the other MR capabilities. Diffs are
+merge-request metadata, not repository contents, so `.noai` does **not** protect
+them.
 
 `repo:list` is granted per pattern and gates **only dynamic discovery** through the
 provider API. Concrete repository paths listed literally in the configuration (no
@@ -529,21 +544,31 @@ output.
 | `list_merge_requests`       | `mr:read`¹   | `ListMergeRequests`         |
 | `get_merge_request`         | `mr:read`¹   | `GetMergeRequest`           |
 | `list_merge_request_notes`  | `mr:read`¹   | `ListMergeRequestNotes`     |
+| `get_merge_request_diff`    | `mr:diff`¹   | `ListMergeRequestDiffs`     |
 | `add_merge_request_note`    | `mr:comment`¹| `AddMergeRequestNote`       |
 | `rebase_merge_request`      | `mr:rebase`³ | `RebaseMergeRequest`        |
 | `read_file`                 | `repo:read`² | `ReadFile`                  |
 
 ¹ **Tag filters** (§5) are evaluated against merge request labels.
 `get_merge_request` and `list_merge_request_notes` enforce an active `mr:read`
-filter; `add_merge_request_note` enforces an active `mr:comment` filter. These tools
-perform a policy-only pre-check (`Guard.AuthorizeRepoCapability`), fetch the merge
-request metadata, then call `Guard.AuthorizeWithTags` with the MR labels. For
-`add_merge_request_note` the metadata fetch is an internal authorization input: if it
-fails, the post is denied (fail-closed). `list_merge_requests` enforces an active
-`mr:read` filter **client-side**: the GitLab list endpoint returns `labels`, so each
-returned MR is evaluated with its own labels (`Guard.EvaluateWithTags`). MRs that do
-not match are skipped and counted in `omitted`; MRs whose labels are unknown
-(`LabelsKnown=false`) are omitted (fail-closed) and also counted.
+filter; `get_merge_request_diff` enforces an active `mr:diff` filter; and
+`add_merge_request_note` enforces an active `mr:comment` filter. These tools perform
+a policy-only pre-check (`Guard.AuthorizeRepoCapability`), fetch the merge request
+metadata, then call `Guard.AuthorizeWithTags` with the MR labels. For
+`add_merge_request_note` (and `get_merge_request_diff`) the metadata fetch is an
+internal authorization input: if it fails, the operation is denied (fail-closed).
+`list_merge_requests` enforces an active `mr:read` filter **client-side**: the GitLab
+list endpoint returns `labels`, so each returned MR is evaluated with its own labels
+(`Guard.EvaluateWithTags`). MRs that do not match are skipped and counted in
+`omitted`; MRs whose labels are unknown (`LabelsKnown=false`) are omitted
+(fail-closed) and also counted.
+
+`get_merge_request_diff` output limits: at most **100 files**; each file's diff is
+capped at **128 KiB**; the **total** diff budget is **512 KiB**. When a file's diff is
+truncated a trailing `\n[truncated]` marker is appended and that file's `truncated`
+is set; when adding a file would exceed the total budget (or more than 100 files
+exist) collection stops and the response's `truncated` is set. Labels are never
+returned.
 
 ² **Repo filters** combine project topics (tags) and, for `repo:read`/`repo:write`,
 **path globs** (nested `paths` block, doublestar, case-sensitive). `read_file`
@@ -646,8 +671,10 @@ Tool arguments are validated with explicit bounds:
   `repo:read` and `repo:write`: `read_file` (and any future content-write tool)
   checks the marker via `Guard.AuthorizeWithTags` and is denied if it is present or
   the check fails. It does **not** affect `repo:list` or any merge-request capability
-  (`mr:read`, `mr:comment`, `mr:rebase`); those work on `.noai` repositories when
-  granted by policy. `IsMarkerProtected` is the single place that defines this.
+  (`mr:read`, `mr:diff`, `mr:comment`, `mr:rebase`); those work on `.noai`
+  repositories when granted by policy. In particular merge-request diffs are **not**
+  `.noai`-protected: they are MR metadata, not repository-content reads.
+  `IsMarkerProtected` is the single place that defines this.
 - **Tags and paths are authorization inputs only.** Filters (§5) are evaluated
   against merge request labels, project topics, or the file path per operation;
   neither labels nor topics nor path decisions are cached or returned in output (the
@@ -720,15 +747,19 @@ Tool arguments are validated with explicit bounds:
   (allowed with
   `mr:rebase`, denied without it, tag filter matching/excluded/unknown, metadata-fetch
   error denies with no rebase call, `ErrForbidden` yields an actionable message,
-  rebase allowed on a `.noai` repo), and `get_merge_request` exposing
+  rebase allowed on a `.noai` repo), `get_merge_request_diff` enforcement (allowed
+  with `mr:diff`, denied without it, tag filter matching/excluded/unknown with no diff
+  call on denial, metadata-fetch error denies with no diff call, per-file and total
+  truncation, no labels in output), and `get_merge_request` exposing
   `rebase_in_progress`/`merge_error`/`has_conflicts`/`detailed_merge_status` without
   labels.
 - `internal/provider/gitlab`: mapping logic plus `httptest`-based client tests;
   `GetMergeRequest` maps labels (and sets `LabelsKnown`) and the rebase/merge status
   fields, `ListRepositories` maps topics (and sets `TopicsKnown`),
   `GetRepositoryTopics` returns topics / maps 404, `RebaseMergeRequest` issues a
-  `PUT .../rebase`, and `mapError` maps 401/403 → `ErrForbidden`, 400/405/409 →
-  `ErrInvalidState`, 404 → `ErrNotFound`, else generic.
+  `PUT .../rebase`, `ListMergeRequestDiffs` paginates `.../diffs` and maps files, and
+  `mapError` maps 401/403 → `ErrForbidden`, 400/405/409 → `ErrInvalidState`, 404 →
+  `ErrNotFound`, else generic.
 
 ### Security-critical tests (mandatory)
 
@@ -785,6 +816,9 @@ Tool arguments are validated with explicit bounds:
     not matched or matched by `paths.exclude` (exclude wins), fails closed when the
     filter is active and the path is empty, requires both tag and path checks to pass,
     and still honors `.noai`; `list_configured_rules` exposes the nested `paths`.
+17. Diffs: `get_merge_request_diff` requires `mr:diff`, is subject to MR tag filters,
+    is **not** `.noai`-protected, caps at 100 files / 128 KiB per file / 512 KiB
+    total (with `truncated` flags), and never returns labels.
 
 ## 11. Dependencies
 
@@ -971,3 +1005,12 @@ Makefile                        build/test/lint targets
    a `PathFilter{Include, Exclude}`; `list_configured_rules` emits a nested `paths`
    object. Unknown keys inside `paths`, a non-mapping `paths`, and duplicate keys are
    rejected at config load. Semantics are unchanged from v0.14.
+
+## 28. Resolved Questions (v0.16)
+
+1. **`mr:diff`**: now backs the `get_merge_request_diff` tool; separately grantable
+   from `mr:read` and accepting MR tag filters. Diffs are MR metadata, so `.noai`
+   does not protect them.
+2. **Diff limits**: at most 100 files, 128 KiB per file (marker appended), 512 KiB
+   total budget after which collection stops with `truncated: true`; labels are never
+   returned.

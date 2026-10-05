@@ -562,3 +562,54 @@ func TestListRepositoriesNoSearchOmitsNamespaces(t *testing.T) {
 		t.Errorf("search_namespaces = %q, want absent when no search term is given", values.Get("search_namespaces"))
 	}
 }
+
+func TestListMergeRequestDiffs(t *testing.T) {
+	var gotPath string
+	var pages []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		if page == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"old_path": "a.go", "new_path": "a.go", "diff": "+a"},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"old_path": "b.go", "new_path": "b.go", "diff": "+b", "new_file": true, "too_large": true},
+		})
+	}))
+
+	files, err := c.ListMergeRequestDiffs(context.Background(), "team/app", 42)
+	if err != nil {
+		t.Fatalf("ListMergeRequestDiffs: %v", err)
+	}
+	if !strings.HasSuffix(gotPath, "/merge_requests/42/diffs") {
+		t.Errorf("path = %q, want suffix /merge_requests/42/diffs", gotPath)
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Errorf("pages = %v, want [1 2]", pages)
+	}
+	if len(files) != 2 {
+		t.Fatalf("files = %+v, want 2", files)
+	}
+	if files[0].Diff != "+a" || files[0].NewFile {
+		t.Errorf("files[0] = %+v", files[0])
+	}
+	if files[1].Diff != "+b" || !files[1].NewFile || !files[1].TooLarge {
+		t.Errorf("files[1] = %+v", files[1])
+	}
+}
+
+func TestListMergeRequestDiffsError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	_, err := c.ListMergeRequestDiffs(context.Background(), "team/app", 42)
+	if !errors.Is(err, provider.ErrForbidden) {
+		t.Fatalf("error = %v, want provider.ErrForbidden", err)
+	}
+}

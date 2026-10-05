@@ -20,6 +20,9 @@ import (
 // providerType is the configuration type handled by this package.
 const providerType = "gitlab"
 
+// maxDiffFiles caps how many files a diff listing collects per merge request.
+const maxDiffFiles = 100
+
 func init() {
 	provider.RegisterFactory(providerType, func(cfg config.ProviderConfig) (provider.Provider, error) {
 		return New(cfg)
@@ -224,6 +227,39 @@ func (c *Client) ListMergeRequestNotes(ctx context.Context, repo string, number 
 		out = append(out, mapNote(note))
 	}
 	return out, nil
+}
+
+// ListMergeRequestDiffs implements provider.Provider. It paginates the diffs
+// endpoint, following pages until the file cap (100) or exhaustion.
+func (c *Client) ListMergeRequestDiffs(ctx context.Context, repo string, number int64) ([]provider.DiffFile, error) {
+	out := make([]provider.DiffFile, 0, maxDiffFiles)
+	for page := int64(1); ; page++ {
+		opts := &gitlab.ListMergeRequestDiffsOptions{
+			ListOptions: gitlab.ListOptions{PerPage: 100, Page: page},
+		}
+		diffs, resp, err := c.api.MergeRequests.ListMergeRequestDiffs(repo, number, opts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, d := range diffs {
+			out = append(out, provider.DiffFile{
+				OldPath:       d.OldPath,
+				NewPath:       d.NewPath,
+				NewFile:       d.NewFile,
+				RenamedFile:   d.RenamedFile,
+				DeletedFile:   d.DeletedFile,
+				GeneratedFile: d.GeneratedFile,
+				TooLarge:      d.TooLarge,
+				Diff:          d.Diff,
+			})
+			if len(out) >= maxDiffFiles {
+				return out, nil
+			}
+		}
+		if len(diffs) == 0 || resp == nil || resp.NextPage == 0 {
+			return out, nil
+		}
+	}
 }
 
 // AddMergeRequestNote implements provider.Provider.

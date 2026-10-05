@@ -73,6 +73,10 @@ providers:
                 include: ["docs/**", "*.md"]
                 exclude: ["**/.env", "**/secrets/**"]
           - mr:read
+          # Read file diffs for review-approved MRs only. Diffs are MR metadata
+          # and are not affected by the `.noai` marker.
+          - mr:diff:
+              require: [ai-reviewed]
 
       # Explicit denial (overrides anything broader that might follow). Deny
       # rules must not list capabilities.

@@ -32,6 +32,9 @@ type fakeProvider struct {
 	added            []string
 	rebaseCalls      int
 	rebaseErr        error
+	diffCalls        int
+	diffErr          error
+	diffs            []provider.DiffFile
 	listReposCalls   int
 	listRepoSearches []string
 	topics           map[string][]string
@@ -102,6 +105,17 @@ func (f *fakeProvider) AddMergeRequestNote(_ context.Context, _ string, _ int64,
 	}
 	f.added = append(f.added, body)
 	return &provider.Note{ID: 1, Body: body, Author: "me", CreatedAt: time.Now()}, nil
+}
+
+func (f *fakeProvider) ListMergeRequestDiffs(_ context.Context, _ string, _ int64) ([]provider.DiffFile, error) {
+	f.diffCalls++
+	if f.diffErr != nil {
+		return nil, f.diffErr
+	}
+	if f.providerErr != nil {
+		return nil, f.providerErr
+	}
+	return f.diffs, nil
 }
 
 func (f *fakeProvider) RebaseMergeRequest(_ context.Context, _ string, _ int64) error {
@@ -397,7 +411,7 @@ func TestAddNoteSucceedsWithCapability(t *testing.T) {
 	}
 }
 
-func TestNoDiffContentReturned(t *testing.T) {
+func TestMergeRequestMetadataHasNoDiffContent(t *testing.T) {
 	env := newTestEnv(t, allowRules("mr:read"), newFake())
 
 	res := env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
@@ -405,16 +419,6 @@ func TestNoDiffContentReturned(t *testing.T) {
 	for _, forbidden := range []string{"\"diff\"", "diff_refs", "changes"} {
 		if strings.Contains(text, forbidden) {
 			t.Errorf("merge request output contains %q: %s", forbidden, text)
-		}
-	}
-
-	tools, err := env.session.ListTools(context.Background(), nil)
-	if err != nil {
-		t.Fatalf("ListTools: %v", err)
-	}
-	for _, tool := range tools.Tools {
-		if strings.Contains(tool.Name, "diff") {
-			t.Errorf("unexpected diff tool registered: %s", tool.Name)
 		}
 	}
 }
@@ -1763,4 +1767,158 @@ func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
 	if len(cap.Paths.Exclude) != 1 || cap.Paths.Exclude[0] != "**/.env" {
 		t.Errorf("paths.exclude = %v, want [**/.env]", cap.Paths.Exclude)
 	}
+}
+
+func diffArgs() map[string]any {
+	return map[string]any{"provider": "fake", "repo": "team/app", "number": 1}
+}
+
+func TestGetMergeRequestDiffAllowed(t *testing.T) {
+	fake := newFake()
+	fake.diffs = []provider.DiffFile{
+		{OldPath: "a.go", NewPath: "a.go", Diff: "+package a\n"},
+		{OldPath: "b.go", NewPath: "b.go", NewFile: true, Diff: "+package b\n"},
+	}
+	env := newTestEnv(t, allowRules("mr:diff"), fake)
+
+	res := env.call(t, "get_merge_request_diff", diffArgs())
+	if res.IsError {
+		t.Fatalf("get_merge_request_diff denied: %s", resultText(t, res))
+	}
+	if fake.diffCalls != 1 {
+		t.Errorf("ListMergeRequestDiffs called %d times, want 1", fake.diffCalls)
+	}
+	var out mergeRequestDiffOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Number != 1 || len(out.Files) != 2 || out.Truncated {
+		t.Fatalf("output = %+v", out)
+	}
+	if out.Files[0].Diff != "+package a\n" || !out.Files[1].NewFile {
+		t.Errorf("files = %+v", out.Files)
+	}
+	if strings.Contains(strings.ToLower(resultText(t, res)), "label") {
+		t.Errorf("diff output leaked labels: %s", resultText(t, res))
+	}
+}
+
+func TestGetMergeRequestDiffRequiresCapability(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "get_merge_request_diff", diffArgs())
+	if !res.IsError {
+		t.Fatal("get_merge_request_diff succeeded without mr:diff")
+	}
+	if fake.diffCalls != 0 {
+		t.Errorf("ListMergeRequestDiffs called %d times, want 0", fake.diffCalls)
+	}
+}
+
+func TestGetMergeRequestDiffTagFilter(t *testing.T) {
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRDiff,
+			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+		}},
+	}}
+
+	t.Run("matching label allows", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed")
+		fake.diffs = []provider.DiffFile{{OldPath: "a", NewPath: "a", Diff: "+x"}}
+		env := newTestEnv(t, rules, fake)
+		res := env.call(t, "get_merge_request_diff", diffArgs())
+		if res.IsError {
+			t.Fatalf("denied: %s", resultText(t, res))
+		}
+		if fake.diffCalls != 1 {
+			t.Errorf("diff calls = %d, want 1", fake.diffCalls)
+		}
+	})
+	t.Run("excluded label denies", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed", "do-not-touch")
+		env := newTestEnv(t, rules, fake)
+		res := env.call(t, "get_merge_request_diff", diffArgs())
+		if !res.IsError {
+			t.Fatal("excluded label allowed diff")
+		}
+		if fake.diffCalls != 0 {
+			t.Errorf("diff calls = %d, want 0", fake.diffCalls)
+		}
+	})
+	t.Run("unknown labels fail closed", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, false, "ai-reviewed")
+		env := newTestEnv(t, rules, fake)
+		res := env.call(t, "get_merge_request_diff", diffArgs())
+		if !res.IsError {
+			t.Fatal("unknown labels allowed an active filter")
+		}
+		if fake.diffCalls != 0 {
+			t.Errorf("diff calls = %d, want 0", fake.diffCalls)
+		}
+	})
+}
+
+func TestGetMergeRequestDiffMetadataErrorDenies(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = errors.New("metadata unavailable")
+	env := newTestEnv(t, allowRules("mr:diff"), fake)
+
+	res := env.call(t, "get_merge_request_diff", diffArgs())
+	if !res.IsError {
+		t.Fatal("metadata fetch error did not deny the diff")
+	}
+	if fake.diffCalls != 0 {
+		t.Errorf("ListMergeRequestDiffs called %d times, want 0", fake.diffCalls)
+	}
+}
+
+func TestGetMergeRequestDiffTruncation(t *testing.T) {
+	t.Run("per-file truncation", func(t *testing.T) {
+		fake := newFake()
+		fake.diffs = []provider.DiffFile{{OldPath: "big", NewPath: "big", Diff: strings.Repeat("x", maxDiffFileBytes+50)}}
+		env := newTestEnv(t, allowRules("mr:diff"), fake)
+		res := env.call(t, "get_merge_request_diff", diffArgs())
+		if res.IsError {
+			t.Fatalf("get_merge_request_diff: %s", resultText(t, res))
+		}
+		var out mergeRequestDiffOutput
+		if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if len(out.Files) != 1 || !out.Files[0].Truncated {
+			t.Fatalf("files = %+v, want one truncated file", out.Files)
+		}
+		if !strings.HasSuffix(out.Files[0].Diff, truncatedMarker) {
+			t.Errorf("per-file diff missing truncation marker")
+		}
+	})
+	t.Run("total budget truncation", func(t *testing.T) {
+		fake := newFake()
+		chunk := strings.Repeat("y", 64<<10)
+		for i := 0; i < 10; i++ {
+			fake.diffs = append(fake.diffs, provider.DiffFile{OldPath: "f", NewPath: "f", Diff: chunk})
+		}
+		env := newTestEnv(t, allowRules("mr:diff"), fake)
+		res := env.call(t, "get_merge_request_diff", diffArgs())
+		if res.IsError {
+			t.Fatalf("get_merge_request_diff: %s", resultText(t, res))
+		}
+		var out mergeRequestDiffOutput
+		if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if !out.Truncated {
+			t.Error("truncated = false, want true when the total diff budget is exceeded")
+		}
+		if len(out.Files) >= 10 {
+			t.Errorf("files = %d, want fewer than 10 due to the total budget", len(out.Files))
+		}
+	})
 }

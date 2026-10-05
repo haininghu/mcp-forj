@@ -27,6 +27,9 @@ func (s stubProvider) ListMergeRequestNotes(context.Context, string, int64, List
 func (s stubProvider) AddMergeRequestNote(context.Context, string, int64, string) (*Note, error) {
 	return nil, nil
 }
+func (s stubProvider) ListMergeRequestDiffs(context.Context, string, int64) ([]DiffFile, error) {
+	return nil, nil
+}
 func (s stubProvider) RebaseMergeRequest(context.Context, string, int64) error {
 	return nil
 }

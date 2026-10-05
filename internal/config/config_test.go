@@ -1004,3 +1004,38 @@ providers:
 		})
 	}
 }
+
+func TestCapabilityGrantDiffAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:diff]
+      - repositories: ["a/c"]
+        effect: allow
+        capabilities:
+          - mr:diff:
+              require: [ai-reviewed]
+              exclude: [do-not-touch]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected mr:diff: %v", err)
+	}
+	plain := cfg.Providers[0].Rules[0].Capabilities[0]
+	if plain.Name != "mr:diff" || len(plain.Require) != 0 {
+		t.Errorf("plain mr:diff grant = %+v", plain)
+	}
+	filtered := cfg.Providers[0].Rules[1].Capabilities[0]
+	if filtered.Name != "mr:diff" || len(filtered.Require) != 1 || filtered.Require[0] != "ai-reviewed" {
+		t.Errorf("filtered mr:diff grant = %+v", filtered)
+	}
+	if len(filtered.Exclude) != 1 || filtered.Exclude[0] != "do-not-touch" {
+		t.Errorf("filtered mr:diff exclude = %v", filtered.Exclude)
+	}
+}

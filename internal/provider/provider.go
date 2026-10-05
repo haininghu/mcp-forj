@@ -85,6 +85,26 @@ type Note struct {
 	CreatedAt time.Time
 }
 
+// DiffFile is one file's diff within a merge request.
+type DiffFile struct {
+	// OldPath is the path before the change.
+	OldPath string
+	// NewPath is the path after the change.
+	NewPath string
+	// NewFile reports whether the file is newly added.
+	NewFile bool
+	// RenamedFile reports whether the file was renamed.
+	RenamedFile bool
+	// DeletedFile reports whether the file was deleted.
+	DeletedFile bool
+	// GeneratedFile reports whether the file is generated.
+	GeneratedFile bool
+	// TooLarge reports that the provider omitted the diff because it is too large.
+	TooLarge bool
+	// Diff is the unified diff text.
+	Diff string
+}
+
 // RepoListOptions bounds and filters repository enumeration.
 type RepoListOptions struct {
 	// Search is an optional provider-side search term (usually a namespace
@@ -122,6 +142,8 @@ type Provider interface {
 	ListMergeRequestNotes(ctx context.Context, repo string, number int64, opts ListOptions) ([]Note, error)
 	// AddMergeRequestNote creates a note on a merge request.
 	AddMergeRequestNote(ctx context.Context, repo string, number int64, body string) (*Note, error)
+	// ListMergeRequestDiffs lists the file diffs of a merge request.
+	ListMergeRequestDiffs(ctx context.Context, repo string, number int64) ([]DiffFile, error)
 	// RebaseMergeRequest starts an asynchronous rebase of a merge request's
 	// source branch onto its target branch.
 	RebaseMergeRequest(ctx context.Context, repo string, number int64) error

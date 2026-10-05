@@ -21,11 +21,14 @@ import (
 
 // Output limits. Oversized values are truncated and marked.
 const (
-	maxFileBytes    = 1 << 20 // 1 MiB
-	maxTextBytes    = 64 << 10
-	maxListResults  = 100  // MRs and notes
-	maxRepoResults  = 1000 // repository discovery cap
-	truncatedMarker = "\n[truncated]"
+	maxFileBytes      = 1 << 20 // 1 MiB
+	maxTextBytes      = 64 << 10
+	maxListResults    = 100  // MRs and notes
+	maxRepoResults    = 1000 // repository discovery cap
+	maxDiffFiles      = 100  // diff files per merge request
+	maxDiffFileBytes  = 128 << 10
+	maxDiffTotalBytes = 512 << 10
+	truncatedMarker   = "\n[truncated]"
 )
 
 // Server holds the MCP tool handlers and their dependencies.
@@ -69,6 +72,11 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	}, s.getMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_merge_request_diff",
+		Description: "Fetch the file diffs of a merge request. Requires the mr:diff capability.",
+	}, s.getMergeRequestDiff)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_merge_request_notes",
 		Description: "List the comments on a merge request. Requires the mr:read capability.",
 	}, s.listMergeRequestNotes)
@@ -107,6 +115,12 @@ type listMergeRequestsInput struct {
 }
 
 type getMergeRequestInput struct {
+	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
+	Number   int64  `json:"number" jsonschema:"merge request number"`
+}
+
+type getMergeRequestDiffInput struct {
 	Provider string `json:"provider" jsonschema:"logical provider name"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
@@ -204,6 +218,24 @@ type noteJSON struct {
 type listNotesOutput struct {
 	Notes     []noteJSON `json:"notes"`
 	Truncated bool       `json:"truncated"`
+}
+
+type diffFileJSON struct {
+	OldPath       string `json:"old_path"`
+	NewPath       string `json:"new_path"`
+	NewFile       bool   `json:"new_file"`
+	RenamedFile   bool   `json:"renamed_file"`
+	DeletedFile   bool   `json:"deleted_file"`
+	GeneratedFile bool   `json:"generated_file"`
+	TooLarge      bool   `json:"too_large"`
+	Diff          string `json:"diff"`
+	Truncated     bool   `json:"truncated"`
+}
+
+type mergeRequestDiffOutput struct {
+	Number    int64          `json:"number"`
+	Files     []diffFileJSON `json:"files"`
+	Truncated bool           `json:"truncated"`
 }
 
 type rebaseMergeRequestOutput struct {
@@ -461,6 +493,73 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	return jsonResult(toMergeRequestJSON(*mr))
+}
+
+// getMergeRequestDiff fetches the file diffs of a merge request. The MR metadata
+// is fetched first as an internal authorization input for tag filters; a fetch
+// failure denies the request (fail-closed). Diffs are not `.noai`-protected.
+func (s *Server) getMergeRequestDiff(ctx context.Context, _ *mcp.CallToolRequest, in getMergeRequestDiffInput) (*mcp.CallToolResult, any, error) {
+	if in.Number <= 0 {
+		return nil, nil, errors.New("number must be positive")
+	}
+	p, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRDiff); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRDiff, tagSetFromMR(*mr)); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	files, err := p.ListMergeRequestDiffs(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+	out, truncated := toDiffFiles(files)
+	return jsonResult(mergeRequestDiffOutput{Number: in.Number, Files: out, Truncated: truncated})
+}
+
+// toDiffFiles caps the number of files, truncates each file's diff, and enforces
+// the total diff budget. Shrinking is signalled via the per-file and top-level
+// truncated flags.
+func toDiffFiles(files []provider.DiffFile) ([]diffFileJSON, bool) {
+	out := make([]diffFileJSON, 0, len(files))
+	total := 0
+	truncated := false
+	for i, f := range files {
+		if i >= maxDiffFiles {
+			truncated = true
+			break
+		}
+		diff := f.Diff
+		fileTruncated := false
+		if len(diff) > maxDiffFileBytes {
+			diff = truncateText(diff, maxDiffFileBytes)
+			fileTruncated = true
+		}
+		if total+len(diff) > maxDiffTotalBytes {
+			truncated = true
+			break
+		}
+		total += len(diff)
+		out = append(out, diffFileJSON{
+			OldPath:       f.OldPath,
+			NewPath:       f.NewPath,
+			NewFile:       f.NewFile,
+			RenamedFile:   f.RenamedFile,
+			DeletedFile:   f.DeletedFile,
+			GeneratedFile: f.GeneratedFile,
+			TooLarge:      f.TooLarge,
+			Diff:          diff,
+			Truncated:     fileTruncated,
+		})
+	}
+	return out, truncated
 }
 
 func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolRequest, in listMergeRequestNotesInput) (*mcp.CallToolResult, any, error) {
