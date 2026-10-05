@@ -257,6 +257,9 @@ func TestGetMergeRequestNotFoundHTTP(t *testing.T) {
 
 func TestFileExistsHTTP(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("ref"); got != "HEAD" {
+			t.Errorf("file request ref = %q, want HEAD for default branch", got)
+		}
 		if strings.Contains(r.URL.Path, ".noai") {
 			http.NotFound(w, r)
 			return
@@ -287,7 +290,10 @@ func TestFileExistsHTTP(t *testing.T) {
 }
 
 func TestReadFileDecodesBase64(t *testing.T) {
-	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("ref"); got != "main" {
+			t.Errorf("file request ref = %q, want explicit main", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"file_name": "README.md",

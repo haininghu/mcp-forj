@@ -148,13 +148,18 @@ func (g *Guard) AuthorizeRepoCapability(ctx context.Context, providerName, repo 
 func (g *Guard) checkMarker(ctx context.Context, providerName, repo string) error {
 	checker, ok := g.checkers[providerName]
 	if !ok || checker == nil {
-		g.logger.Info("marker check", "provider", providerName, "repo", repo, "result", "error")
+		g.logger.Warn("marker check failed", "provider", providerName, "repo", repo, "reason", "no file checker")
 		return fmt.Errorf("%w: no file checker for provider %s", ErrMarkerCheck, providerName)
 	}
 
 	exists, err := checker.FileExists(ctx, repo, g.markerFile, "")
 	if err != nil {
-		g.logger.Info("marker check", "provider", providerName, "repo", repo, "marker", g.markerFile, "result", "error")
+		g.logger.Warn("marker check failed",
+			"provider", providerName,
+			"repo", repo,
+			"marker", g.markerFile,
+			"error", err.Error(),
+		)
 		return fmt.Errorf("%w: %s: %w", ErrMarkerCheck, repo, err)
 	}
 	g.logger.Info("marker check", "provider", providerName, "repo", repo, "marker", g.markerFile, "exists", exists)

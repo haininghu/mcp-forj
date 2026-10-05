@@ -1,8 +1,17 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.18** (HTTP status surfaced in provider errors)
+Status: **Draft v0.19** (fixed repository-file `ref` handling)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + diffs + repo listing + rebase)
+
+## Changelog vs. v0.18
+
+- **AJ1** Fixed repository file reads: GitLab's repository-files endpoint requires
+  a `ref` (there is no server-side default), so an empty ref now sends `HEAD`
+  (the documented way to select the default branch). Previously an empty ref was
+  omitted, GitLab answered `400`, and the `.noai` marker check failed closed for
+  `read_file` (message: "could not verify the .noai marker"). This affected every
+  `read_file` call without an explicit ref.
 
 ## Changelog vs. v0.17
 

@@ -306,9 +306,12 @@ func (c *Client) FileExists(ctx context.Context, repo, path, ref string) (bool, 
 	return true, nil
 }
 
+// refOptions builds the file options. The GitLab repository-files endpoint
+// requires a ref (there is no server-side default), so an empty ref means the
+// default branch via the special value HEAD.
 func refOptions(ref string) *gitlab.GetFileOptions {
 	if ref == "" {
-		return nil
+		ref = "HEAD"
 	}
 	return &gitlab.GetFileOptions{Ref: &ref}
 }
