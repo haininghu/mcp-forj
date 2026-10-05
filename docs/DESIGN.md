@@ -1,8 +1,16 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.17** (`.noai` marker-check diagnostics)
+Status: **Draft v0.18** (HTTP status surfaced in provider errors)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + diffs + repo listing + rebase)
+
+## Changelog vs. v0.17
+
+- **AI1** Added `provider.HTTPError{Status, Err}` (wraps a sentinel, safe message
+  `"<sentinel> (HTTP <n>)"`) and `provider.HTTPStatus(err)`. `mapError` now attaches
+  the real status to the mapped sentinels (and to the generic failure), so the server
+  can include the numeric code in `mapProviderError` and in the `.noai` marker-check
+  message. Response bodies and tokens are still never surfaced.
 
 ## Changelog vs. v0.16
 
@@ -724,11 +732,13 @@ Tool arguments are validated with explicit bounds:
   (`provider`, `repo`, `capability`, `decision`, `reason`). The `.noai` check result
   is logged as well. Logs never contain tokens or full request bodies.
 - **Error hygiene**: provider errors are mapped to safe, status-based messages
-  (401/403 forbidden, 400/405/409 invalid state, 404 not found); raw HTTP bodies are
-  never leaked to the MCP client. Actionable diagnostics (e.g. a missing scope or
-  role) come from these status classes, not from response content. In particular a
-  forbidden `.noai` marker check reports that the token needs repository read access
-  and the project must be in scope, while other marker-check failures stay generic.
+  (401/403 forbidden, 400/405/409 invalid state, 404 not found) and the **numeric
+  HTTP status is surfaced** (`(HTTP <n>)`) via `provider.HTTPError`/`HTTPStatus`; raw
+  HTTP bodies are never leaked to the MCP client. Actionable diagnostics (e.g. a
+  missing scope or role) come from these status classes, not from response content.
+  In particular a forbidden `.noai` marker check reports that the token needs
+  repository read access and the project must be in scope (with the status code),
+  while other marker-check failures stay generic (still with the code when known).
 
 ## 10. Testing Strategy
 
@@ -1043,3 +1053,11 @@ Makefile                        build/test/lint targets
    reachable. The server maps a forbidden cause to an actionable message (token needs
    repository read access; project must be in the token scope) and keeps the generic
    marker message otherwise; the operation still fails closed either way.
+
+## 30. Resolved Questions (v0.18)
+
+1. **HTTP status surfaced**: `provider.HTTPError` wraps the mapped sentinel with the
+   numeric status; `provider.HTTPStatus(err)` extracts it. The server appends
+   `(HTTP <n>)` to provider-error and marker-check messages when known. `gitlab`
+   404s (a plain sentinel) are surfaced as HTTP 404. Response bodies/tokens are never
+   included.

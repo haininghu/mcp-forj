@@ -1925,7 +1925,7 @@ func TestGetMergeRequestDiffTruncation(t *testing.T) {
 
 func TestMarkerCheckForbiddenDiagnostic(t *testing.T) {
 	fake := newFake()
-	fake.markerErrByRepo = map[string]error{"team/app": fmt.Errorf("gitlab: %w", provider.ErrForbidden)}
+	fake.markerErrByRepo = map[string]error{"team/app": &provider.HTTPError{Status: 403, Err: provider.ErrForbidden}}
 	env := newTestEnv(t, allowRules("repo:read"), fake)
 
 	res := env.call(t, "read_file", readFileArgs())
@@ -1935,6 +1935,23 @@ func TestMarkerCheckForbiddenDiagnostic(t *testing.T) {
 	text := strings.ToLower(resultText(t, res))
 	if !strings.Contains(text, "forbidden") || !strings.Contains(text, "repository read access") {
 		t.Errorf("error = %q, want the forbidden repository-read hint", resultText(t, res))
+	}
+	if !strings.Contains(text, "http 403") {
+		t.Errorf("error = %q, want the HTTP status code", resultText(t, res))
+	}
+}
+
+func TestProviderErrorIncludesStatus(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = &provider.HTTPError{Status: 500, Err: errors.New("gitlab: request failed")}
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if !res.IsError {
+		t.Fatal("list_merge_requests succeeded despite a provider error")
+	}
+	if !strings.Contains(strings.ToLower(resultText(t, res)), "http 500") {
+		t.Errorf("error = %q, want the HTTP status code", resultText(t, res))
 	}
 }
 

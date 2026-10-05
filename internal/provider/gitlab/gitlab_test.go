@@ -210,8 +210,12 @@ func TestMapErrorStatusMapping(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := &gitlab.ErrorResponse{Response: &http.Response{StatusCode: tt.status}}
-			if got := mapError(err); !errors.Is(got, tt.want) {
+			got := mapError(err)
+			if !errors.Is(got, tt.want) {
 				t.Errorf("mapError(%d) = %v, want %v", tt.status, got, tt.want)
+			}
+			if status := provider.HTTPStatus(got); status != tt.status {
+				t.Errorf("HTTPStatus(mapError(%d)) = %d, want %d", tt.status, status, tt.status)
 			}
 		})
 	}
@@ -223,6 +227,18 @@ func TestMapErrorStatusMapping(t *testing.T) {
 				t.Errorf("mapError(500) = %v, unexpectedly matches %v", got, sentinel)
 			}
 		}
+		if status := provider.HTTPStatus(got); status != http.StatusInternalServerError {
+			t.Errorf("HTTPStatus(mapError(500)) = %d, want 500", status)
+		}
+		if !strings.Contains(got.Error(), "HTTP 500") {
+			t.Errorf("error = %q, want it to include the status code", got)
+		}
+	})
+	t.Run("no status", func(t *testing.T) {
+		got := mapError(errors.New("dial tcp: connection refused"))
+		if status := provider.HTTPStatus(got); status != 0 {
+			t.Errorf("HTTPStatus = %d, want 0", status)
+		}
 	})
 }
 
@@ -231,8 +247,11 @@ func TestGetMergeRequestNotFoundHTTP(t *testing.T) {
 		http.NotFound(w, nil)
 	}))
 	_, err := c.GetMergeRequest(context.Background(), "team/app", 1)
-	if err != provider.ErrNotFound {
+	if !errors.Is(err, provider.ErrNotFound) {
 		t.Fatalf("error = %v, want provider.ErrNotFound", err)
+	}
+	if status := provider.HTTPStatus(err); status != http.StatusNotFound {
+		t.Errorf("HTTPStatus = %d, want 404", status)
 	}
 }
 
@@ -358,8 +377,11 @@ func TestGetRepositoryTopicsNotFound(t *testing.T) {
 		http.NotFound(w, nil)
 	}))
 	_, err := c.GetRepositoryTopics(context.Background(), "team/app")
-	if err != provider.ErrNotFound {
+	if !errors.Is(err, provider.ErrNotFound) {
 		t.Fatalf("error = %v, want provider.ErrNotFound", err)
+	}
+	if status := provider.HTTPStatus(err); status != http.StatusNotFound {
+		t.Errorf("HTTPStatus = %d, want 404", status)
 	}
 }
 
@@ -390,8 +412,11 @@ func TestRebaseMergeRequestHTTPError(t *testing.T) {
 	if err == nil {
 		t.Fatal("RebaseMergeRequest succeeded on 403, want error")
 	}
-	if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "Forbidden") {
-		t.Errorf("error leaks raw HTTP detail: %v", err)
+	if !errors.Is(err, provider.ErrForbidden) {
+		t.Fatalf("error = %v, want provider.ErrForbidden", err)
+	}
+	if got := provider.HTTPStatus(err); got != http.StatusForbidden {
+		t.Errorf("HTTPStatus = %d, want 403", got)
 	}
 }
 

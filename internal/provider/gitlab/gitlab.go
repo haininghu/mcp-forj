@@ -366,16 +366,39 @@ func isNotFound(err error) bool {
 }
 
 func mapError(err error) error {
+	status := statusCode(err)
 	switch {
 	case isNotFound(err):
-		return provider.ErrNotFound
-	case gitlab.HasStatusCode(err, http.StatusUnauthorized), gitlab.HasStatusCode(err, http.StatusForbidden):
-		return provider.ErrForbidden
-	case gitlab.HasStatusCode(err, http.StatusBadRequest),
-		gitlab.HasStatusCode(err, http.StatusMethodNotAllowed),
-		gitlab.HasStatusCode(err, http.StatusConflict):
-		return provider.ErrInvalidState
+		// gitlab.ErrNotFound is a plain sentinel without a response, so surface
+		// the known 404 status explicitly.
+		if status == 0 {
+			status = http.StatusNotFound
+		}
+		return wrapStatus(status, provider.ErrNotFound)
+	case status == http.StatusUnauthorized || status == http.StatusForbidden:
+		return wrapStatus(status, provider.ErrForbidden)
+	case status == http.StatusBadRequest || status == http.StatusMethodNotAllowed || status == http.StatusConflict:
+		return wrapStatus(status, provider.ErrInvalidState)
+	case status != 0:
+		return &provider.HTTPError{Status: status, Err: errors.New("gitlab: request failed")}
 	default:
 		return errors.New("gitlab: request failed")
 	}
+}
+
+// wrapStatus attaches the HTTP status to a sentinel when one is known.
+func wrapStatus(status int, sentinel error) error {
+	if status == 0 {
+		return sentinel
+	}
+	return &provider.HTTPError{Status: status, Err: sentinel}
+}
+
+// statusCode extracts the HTTP status from a GitLab error response, or 0.
+func statusCode(err error) int {
+	var errResp *gitlab.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil {
+		return errResp.Response.StatusCode
+	}
+	return 0
 }

@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -21,6 +22,34 @@ var (
 	// permits the operation (HTTP 400/405/409).
 	ErrInvalidState = errors.New("invalid state")
 )
+
+// HTTPError carries an HTTP status code while wrapping a sentinel error. Its
+// message is safe to surface (no response body).
+type HTTPError struct {
+	// Status is the HTTP status code.
+	Status int
+	// Err is the wrapped cause/sentinel.
+	Err error
+}
+
+// Error implements error.
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("%s (HTTP %d)", e.Err, e.Status)
+}
+
+// Unwrap returns the wrapped error.
+func (e *HTTPError) Unwrap() error {
+	return e.Err
+}
+
+// HTTPStatus returns the HTTP status carried by err, or 0 when none is present.
+func HTTPStatus(err error) int {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Status
+	}
+	return 0
+}
 
 // Repository identifies a repository at a provider.
 type Repository struct {

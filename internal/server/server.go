@@ -756,26 +756,36 @@ func mapAuthError(err error, providerName, repo string) error {
 	case errors.Is(err, policy.ErrNoAI):
 		return fmt.Errorf("repository %q is marked .noai and is off limits", repo)
 	case errors.Is(err, policy.ErrMarkerCheck):
+		status := provider.HTTPStatus(err)
 		if errors.Is(err, provider.ErrForbidden) {
-			return fmt.Errorf("could not verify the .noai marker for repository %q: forbidden (the token needs repository read access and the project must be in the token scope); access denied", repo)
+			return withStatus(fmt.Sprintf("could not verify the .noai marker for repository %q: forbidden (the token needs repository read access and the project must be in the token scope); access denied", repo), status)
 		}
-		return fmt.Errorf("could not verify the .noai marker for repository %q; access denied", repo)
+		return withStatus(fmt.Sprintf("could not verify the .noai marker for repository %q; access denied", repo), status)
 	default:
 		return errors.New("authorization failed")
 	}
 }
 
 func mapProviderError(err error) error {
+	status := provider.HTTPStatus(err)
 	switch {
 	case errors.Is(err, provider.ErrNotFound):
-		return errors.New("not found")
+		return withStatus("not found", status)
 	case errors.Is(err, provider.ErrForbidden):
-		return errors.New("forbidden: the provider token lacks the required permission (write scope, merge-request Update permission, or sufficient project role)")
+		return withStatus("forbidden: the provider token lacks the required permission (write scope, merge-request Update permission, or sufficient project role)", status)
 	case errors.Is(err, provider.ErrInvalidState):
-		return errors.New("the merge request is not in a rebaseable state")
+		return withStatus("the merge request is not in a rebaseable state", status)
 	default:
-		return errors.New("provider request failed")
+		return withStatus("provider request failed", status)
 	}
+}
+
+// withStatus appends the HTTP status to a safe message when one is known.
+func withStatus(message string, status int) error {
+	if status != 0 {
+		return fmt.Errorf("%s (HTTP %d)", message, status)
+	}
+	return errors.New(message)
 }
 
 // validatePath applies the ordered path-traversal checks from the design. It
