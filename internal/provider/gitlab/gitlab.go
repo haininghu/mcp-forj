@@ -66,6 +66,12 @@ func (c *Client) Type() string { return providerType }
 // the token (all accessible projects by default, or only membership projects
 // when project_scope is "membership"), following pages until the limit is
 // reached or the provider is exhausted.
+//
+// When a search term is given, discovery is group-first: the term is treated as
+// a group path and the Group-boundary endpoint (include_subgroups=true) is used,
+// which matches a fine-grained/group-scoped token and returns exactly the
+// projects under that namespace. If the term is not a group (404), it falls back
+// to the User-boundary /projects search with search_namespaces=true.
 func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOptions) ([]provider.Repository, error) {
 	limit := opts.Limit
 	if limit <= 0 {
@@ -75,35 +81,37 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 	if perPage > 100 {
 		perPage = 100
 	}
-	membership := c.membershipOnly
 
+	if opts.Search != "" {
+		repos, err := c.listGroupProjects(ctx, opts.Search, perPage, limit)
+		if err == nil {
+			return repos, nil
+		}
+		if !errors.Is(err, provider.ErrNotFound) {
+			return nil, err
+		}
+		// The search term is not a group; fall back to the /projects search.
+	}
+	return c.listProjects(ctx, opts.Search, perPage, limit)
+}
+
+// listGroupProjects lists projects under a group (including subgroups). A 404
+// (the term is not a group) is returned as provider.ErrNotFound so the caller
+// can fall back.
+func (c *Client) listGroupProjects(ctx context.Context, group string, perPage, limit int) ([]provider.Repository, error) {
+	includeSubGroups := true
 	out := make([]provider.Repository, 0, limit)
 	for page := int64(1); ; page++ {
-		listOpts := &gitlab.ListProjectsOptions{
-			ListOptions: gitlab.ListOptions{PerPage: int64(perPage), Page: page},
-			Membership:  &membership,
+		listOpts := &gitlab.ListGroupProjectsOptions{
+			ListOptions:      gitlab.ListOptions{PerPage: int64(perPage), Page: page},
+			IncludeSubGroups: &includeSubGroups,
 		}
-		if opts.Search != "" {
-			search := opts.Search
-			// GitLab searches path/name/description only; search_namespaces
-			// additionally matches ancestor namespaces, so a full namespace
-			// prefix such as "devops/platform" finds its projects (like the UI).
-			includeNamespaces := true
-			listOpts.Search = &search
-			listOpts.SearchNamespaces = &includeNamespaces
-		}
-		projects, resp, err := c.api.Projects.ListProjects(listOpts, gitlab.WithContext(ctx))
+		projects, resp, err := c.api.Groups.ListGroupProjects(group, listOpts, gitlab.WithContext(ctx))
 		if err != nil {
 			return nil, mapError(err)
 		}
 		for _, project := range projects {
-			out = append(out, provider.Repository{
-				Provider:    c.name,
-				Path:        project.PathWithNamespace,
-				WebURL:      project.WebURL,
-				Topics:      append([]string(nil), project.Topics...),
-				TopicsKnown: true,
-			})
+			out = append(out, mapProject(c.name, project))
 			if len(out) >= limit {
 				return out, nil
 			}
@@ -111,6 +119,50 @@ func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOpt
 		if len(projects) == 0 || resp == nil || resp.NextPage == 0 {
 			return out, nil
 		}
+	}
+}
+
+// listProjects lists projects visible to the token via the User-boundary
+// /projects endpoint. A non-empty search also sets search_namespaces=true so a
+// full namespace path matches (GitLab otherwise searches only project
+// path/name/description).
+func (c *Client) listProjects(ctx context.Context, search string, perPage, limit int) ([]provider.Repository, error) {
+	membership := c.membershipOnly
+	out := make([]provider.Repository, 0, limit)
+	for page := int64(1); ; page++ {
+		listOpts := &gitlab.ListProjectsOptions{
+			ListOptions: gitlab.ListOptions{PerPage: int64(perPage), Page: page},
+			Membership:  &membership,
+		}
+		if search != "" {
+			term := search
+			includeNamespaces := true
+			listOpts.Search = &term
+			listOpts.SearchNamespaces = &includeNamespaces
+		}
+		projects, resp, err := c.api.Projects.ListProjects(listOpts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, project := range projects {
+			out = append(out, mapProject(c.name, project))
+			if len(out) >= limit {
+				return out, nil
+			}
+		}
+		if len(projects) == 0 || resp == nil || resp.NextPage == 0 {
+			return out, nil
+		}
+	}
+}
+
+func mapProject(providerName string, project *gitlab.Project) provider.Repository {
+	return provider.Repository{
+		Provider:    providerName,
+		Path:        project.PathWithNamespace,
+		WebURL:      project.WebURL,
+		Topics:      append([]string(nil), project.Topics...),
+		TopicsKnown: true,
 	}
 }
 

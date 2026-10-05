@@ -466,17 +466,67 @@ func TestListRepositoriesProjectScope(t *testing.T) {
 	}
 }
 
-func TestListRepositoriesSearchPassthrough(t *testing.T) {
+func TestListRepositoriesGroupFirst(t *testing.T) {
+	var gotPath, gotInclude, gotSearch string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.EscapedPath()
+		gotInclude = r.URL.Query().Get("include_subgroups")
+		gotSearch = r.URL.Query().Get("search")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{
+				"id":                  1,
+				"path_with_namespace": "devops/platform/app",
+				"web_url":             "https://x/devops/platform/app",
+				"topics":              []string{"ai-ok"},
+			},
+		})
+	}))
+
+	repos, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "devops/platform", Limit: 10})
+	if err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if !strings.HasSuffix(gotPath, "/groups/devops%2Fplatform/projects") {
+		t.Errorf("path = %q, want group endpoint with URL-encoded slash", gotPath)
+	}
+	if gotInclude != "true" {
+		t.Errorf("include_subgroups = %q, want true", gotInclude)
+	}
+	if gotSearch != "" {
+		t.Errorf("group search must not send search, got %q", gotSearch)
+	}
+	if len(repos) != 1 || repos[0].Path != "devops/platform/app" {
+		t.Fatalf("repos = %+v, want devops/platform/app", repos)
+	}
+	if !repos[0].TopicsKnown || !reflect.DeepEqual(repos[0].Topics, []string{"ai-ok"}) {
+		t.Errorf("topics = %v (known=%v), want [ai-ok] known", repos[0].Topics, repos[0].TopicsKnown)
+	}
+}
+
+func TestListRepositoriesFallsBackToProjectsSearch(t *testing.T) {
+	var gotPaths []string
 	var gotSearch, gotNamespaces string
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/groups/") {
+			http.NotFound(w, r)
+			return
+		}
+		gotPaths = append(gotPaths, r.URL.Path)
 		gotSearch = r.URL.Query().Get("search")
 		gotNamespaces = r.URL.Query().Get("search_namespaces")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]map[string]any{})
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"id": 1, "path_with_namespace": "devops/platform/app"},
+		})
 	}))
 
-	if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "devops/platform", Limit: 10}); err != nil {
+	repos, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "devops/platform", Limit: 10})
+	if err != nil {
 		t.Fatalf("ListRepositories: %v", err)
+	}
+	if len(gotPaths) != 1 || gotPaths[0] != "/api/v4/projects" {
+		t.Fatalf("project paths = %v, want [/api/v4/projects]", gotPaths)
 	}
 	if gotSearch != "devops/platform" {
 		t.Errorf("search = %q, want devops/platform", gotSearch)
@@ -484,11 +534,16 @@ func TestListRepositoriesSearchPassthrough(t *testing.T) {
 	if gotNamespaces != "true" {
 		t.Errorf("search_namespaces = %q, want true", gotNamespaces)
 	}
+	if len(repos) != 1 || repos[0].Path != "devops/platform/app" {
+		t.Fatalf("repos = %+v, want devops/platform/app", repos)
+	}
 }
 
 func TestListRepositoriesNoSearchOmitsNamespaces(t *testing.T) {
 	var values url.Values
+	var gotPath string
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
 		values = r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode([]map[string]any{})
@@ -496,6 +551,9 @@ func TestListRepositoriesNoSearchOmitsNamespaces(t *testing.T) {
 
 	if _, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Limit: 10}); err != nil {
 		t.Fatalf("ListRepositories: %v", err)
+	}
+	if gotPath != "/api/v4/projects" {
+		t.Errorf("path = %q, want /api/v4/projects", gotPath)
 	}
 	if values.Has("search") {
 		t.Errorf("search = %q, want absent", values.Get("search"))

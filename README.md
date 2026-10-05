@@ -82,9 +82,11 @@ returned with no provider API call. The `limit` argument bounds only the discove
 repositories (default 100, capped at 1000); static repositories are always returned
 and may push the total above `limit`. When `search` is omitted, search prefixes are
 derived from the `repo:list` rule patterns (e.g. `devops/platform/**` →
-`devops/platform`), so glob patterns find their namespaces; search requests set
-`search_namespaces=true` so full namespace paths match (GitLab otherwise searches only
-project path/name/description). An explicit `search` is passed through verbatim.
+`devops/platform`), so glob patterns find their namespaces. Each prefix is looked up
+group-first via `GET /groups/:id/projects?include_subgroups=true` (which works for
+fine-grained/group-scoped tokens), falling back to the `/projects` search with
+`search_namespaces=true` when the term is not a group; an explicit `search` is passed
+through verbatim.
 Discovery scope is controlled by the provider's `project_scope`: `accessible`
 (default, all projects the token can see) or `membership`. Listing does not check the
 `.noai` marker, so a `.noai` repository may appear in a listing; the marker only

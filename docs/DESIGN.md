@@ -1,8 +1,18 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.12** (`search_namespaces` for prefix search)
+Status: **Draft v0.13** (group-first discovery for scoped tokens)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.12
+
+- **AD1** Prefix discovery is now **group-first**: a derived prefix is treated as a
+  group path and queried through the Group-boundary endpoint
+  (`GET /groups/:id/projects?include_subgroups=true`), which a fine-grained /
+  group-scoped token can use (the User-boundary `/projects` search often returns
+  403). If the term is not a group (404), discovery falls back to the
+  `/projects` search with `search_namespaces=true`. No-search discovery still uses
+  `/projects`.
 
 ## Changelog vs. v0.11
 
@@ -451,11 +461,17 @@ member), while `membership` restricts to projects the token's user is a member o
 The GitLab implementation sets `membership=false` for `accessible` and
 `membership=true` for `membership`.
 
-When `Search` is set, the implementation also sends `search_namespaces=true`.
-GitLab's `search` matches only project `path`, `name`, or `description`; the extra
-flag includes ancestor namespaces, so a prefix such as `devops/platform` finds the
-projects under that namespace (matching what the UI does). Without a search term the
-flag is omitted. See §8 for how prefixes are derived.
+When `Search` is set, discovery is **group-first**: the term is treated as a group
+path and queried through the Group-boundary endpoint
+`GET /groups/:id/projects?include_subgroups=true`, which returns exactly the projects
+under that namespace. This matters for **fine-grained / group-scoped tokens**: the
+User-boundary `/projects` search (`search_namespaces=true`) often returns 403 for
+such tokens, whereas the Group endpoint matches their boundary. If the term is not a
+group (404), the provider **falls back** to the `/projects` search with
+`search_namespaces=true` (GitLab's `search` matches only project
+`path`/`name`/`description`, and the flag adds ancestor-namespace matching like the
+UI). Without a search term, discovery uses `/projects` (membership per
+`project_scope`). See §8 for how prefixes are derived.
 
 The GitLab implementation maps each project's `topics` into `Repository.Topics` and
 sets `TopicsKnown = true`. `GetRepositoryTopics` fetches a single project (via the
@@ -541,13 +557,13 @@ granted:
   verbatim; when it is omitted, **search prefixes are derived** from the `repo:list`
   rule patterns (`Guard.ListSearchPrefixes`), one call per prefix (`devops/platform/**`
   → `devops/platform`), so glob patterns find their namespaces instead of relying on
-  a broad, truncated window. Each search also sets `search_namespaces=true` so the
-  full namespace path matches (GitLab otherwise searches only project
-  `path`/`name`/`description`). With no derivable prefix a single unfiltered call is
-  made. If
-  `repo:list` is not granted, the call still succeeds and returns only the static
-  repositories (possibly none); it is **not** an error. There is no all-providers
-  mode: `provider` is mandatory.
+  a broad, truncated window. Each search is **group-first** (Group-boundary
+  `include_subgroups=true`, which works for fine-grained/group-scoped tokens); if the
+  term is not a group (404) it falls back to the `/projects` search with
+  `search_namespaces=true`. With no derivable prefix a single unfiltered `/projects`
+  call is made. If `repo:list` is not granted, the call still succeeds and returns
+  only the static repositories (possibly none); it is **not** an error. There is no
+  all-providers mode: `provider` is mandatory.
 - **`.noai` does not affect listing.** Listing never checks the marker, so a `.noai`
   repository (static or discovered) still appears. `.noai` only blocks operations via
   `Guard.Authorize`.
@@ -874,3 +890,11 @@ Makefile                        build/test/lint targets
    `search`, so ancestor namespaces are matched (e.g. `devops/platform` finds
    projects under that namespace, like the GitLab UI). The flag is omitted when no
    search term is provided.
+
+## 25. Resolved Questions (v0.13)
+
+1. **Group-first discovery**: a search prefix is queried via the Group-boundary
+   endpoint (`/groups/:id/projects?include_subgroups=true`) so fine-grained /
+   group-scoped tokens can discover their namespace (the User-boundary `/projects`
+   search often returns 403). Non-group terms (404) fall back to `/projects` with
+   `search_namespaces=true`. Discovery without a search term uses `/projects`.
