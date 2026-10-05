@@ -43,7 +43,7 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 | Tool                       | Required capability | Description                             |
 |----------------------------|---------------------|-----------------------------------------|
 | `list_configured_rules`    | –                   | List configured rules and capabilities. |
-| `list_repositories`        | `repo:list`         | Discover repositories matching patterns.|
+| `list_repositories`        | – (`repo:list`¹)    | List configured repos, plus discovered ones.|
 | `list_merge_requests`      | `mr:read`           | List merge requests.                    |
 | `get_merge_request`        | `mr:read`           | Fetch one merge request.                |
 | `list_merge_request_notes` | `mr:read`           | List comments on a merge request.       |
@@ -54,7 +54,8 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 
 See `configs/config.example.yaml`. Capabilities:
 
-- `repo:list` – discover repositories matching the configured patterns.
+- `repo:list` – discover repositories through the provider API. Repositories listed
+  literally in the config are always returned even without this capability.
 - `repo:read` – read repository files.
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:comment` – comment on merge requests.
@@ -62,8 +63,13 @@ See `configs/config.example.yaml`. Capabilities:
 - `mr:write` – reserved.
 - `repo:write` – reserved.
 
-`list_repositories` requires `repo:list` and returns only repositories for which the
-matching rule grants it. Repositories carrying the `.noai` marker are excluded.
+¹ `list_repositories` always returns concrete repositories listed literally in the
+configuration (unless a `deny` rule hides them) and needs no capability for that.
+The `repo:list` capability additionally allows discovery of repositories matching
+glob patterns through the provider API; without it only the configured repositories
+are returned and the call still succeeds. The `limit` argument bounds only the
+discovered repositories. Listing does not check the `.noai` marker, so a `.noai`
+repository may appear in a listing; the marker still blocks every operation on it.
 
 The `token` field accepts either a literal secret or `${NAME}` references expanded
 from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is

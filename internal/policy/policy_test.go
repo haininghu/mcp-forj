@@ -106,6 +106,54 @@ func TestKnownCapabilities(t *testing.T) {
 	}
 }
 
+func TestClassify(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+	})
+	if matched, effect := p.Classify("team/secret"); !matched || effect != EffectDeny {
+		t.Errorf("Classify(team/secret) = (%v, %q), want (true, deny)", matched, effect)
+	}
+	if matched, effect := p.Classify("team/app"); !matched || effect != EffectAllow {
+		t.Errorf("Classify(team/app) = (%v, %q), want (true, allow)", matched, effect)
+	}
+	if matched, _ := p.Classify("other/x"); matched {
+		t.Error("Classify(other/x) matched, want no match")
+	}
+}
+
+func TestStaticRepositories(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/app", "archive/**", "team/secret", "legacy/lit"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+	})
+	got := p.StaticRepositories()
+	want := []string{"team/app", "legacy/lit"}
+	if len(got) != len(want) {
+		t.Fatalf("StaticRepositories = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("StaticRepositories = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestIsLiteralPattern(t *testing.T) {
+	literals := []string{"team/app", "a/b/c", "team/service-a"}
+	glob := []string{"team/*", "archive/**", "a?b", "a[bc]", "{a,b}", `a\b`}
+	for _, p := range literals {
+		if !isLiteralPattern(p) {
+			t.Errorf("isLiteralPattern(%q) = false, want true", p)
+		}
+	}
+	for _, p := range glob {
+		if isLiteralPattern(p) {
+			t.Errorf("isLiteralPattern(%q) = true, want false", p)
+		}
+	}
+}
+
 func TestGrantsAnywhere(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},

@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -115,6 +116,44 @@ func (p *Policy) Evaluate(repo string, c Capability) Decision {
 		}
 	}
 	return Decision{Allowed: false, Matched: false, Reason: "no matching rule"}
+}
+
+// Classify returns the effect of the first rule matching repo. matched is false
+// when no rule matches.
+func (p *Policy) Classify(repo string) (matched bool, effect Effect) {
+	for _, rule := range p.rules {
+		if ruleMatches(rule, repo) {
+			return true, rule.Effect
+		}
+	}
+	return false, ""
+}
+
+// StaticRepositories returns the concrete repository paths listed directly in
+// the configuration whose first matching rule allows them. Literal patterns are
+// collected in first-appearance order and deduplicated.
+func (p *Policy) StaticRepositories() []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, rule := range p.rules {
+		for _, pattern := range rule.Repositories {
+			if !isLiteralPattern(pattern) || seen[pattern] {
+				continue
+			}
+			seen[pattern] = true
+			if matched, effect := p.Classify(pattern); matched && effect == EffectAllow {
+				out = append(out, pattern)
+			}
+		}
+	}
+	return out
+}
+
+// isLiteralPattern reports whether p is a concrete repository path rather than
+// a glob pattern. A literal contains none of the glob metacharacters *, ?, [,
+// { or \.
+func isLiteralPattern(p string) bool {
+	return !strings.ContainsAny(p, `*?[{\`)
 }
 
 // GrantsAnywhere reports whether any allow rule grants capability c, regardless

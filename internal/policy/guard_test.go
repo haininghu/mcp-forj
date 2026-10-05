@@ -120,6 +120,36 @@ func TestAuthorizeList(t *testing.T) {
 	}
 }
 
+func TestGuardStaticRepositoriesAndEvaluate(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app", "archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{}, ".noai", nil)
+
+	static, err := g.StaticRepositories("fake")
+	if err != nil {
+		t.Fatalf("StaticRepositories: %v", err)
+	}
+	if len(static) != 1 || static[0] != "team/app" {
+		t.Errorf("StaticRepositories = %v, want [team/app]", static)
+	}
+	if _, err := g.StaticRepositories("missing"); !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("StaticRepositories(missing) = %v, want ErrUnknownProvider", err)
+	}
+
+	decision, err := g.Evaluate("fake", "archive/a", CapRepoList)
+	if err != nil || !decision.Allowed || !decision.Matched {
+		t.Errorf("Evaluate(archive/a) = (%+v, %v), want allowed+matched", decision, err)
+	}
+	decision, err = g.Evaluate("fake", "team/other", CapRepoList)
+	if err != nil || decision.Allowed || decision.Matched {
+		t.Errorf("Evaluate(team/other) = (%+v, %v), want not allowed+not matched", decision, err)
+	}
+	if _, err := g.Evaluate("missing", "x", CapRepoList); !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("Evaluate(missing) = %v, want ErrUnknownProvider", err)
+	}
+}
+
 func TestConfiguredRulesSortedByProvider(t *testing.T) {
 	p1 := mustBuild(t, []RuleSpec{{Repositories: []string{"a/*"}, Effect: "allow", Capabilities: []string{"mr:read"}}})
 	p2 := mustBuild(t, []RuleSpec{{Repositories: []string{"b/*"}, Effect: "deny"}})

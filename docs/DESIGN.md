@@ -126,10 +126,14 @@ are rejected — fail closed).
 `repo:list`, `repo:read`, `mr:read`, and `mr:comment` are used by v1 tools. The
 remaining capabilities are defined but unused so the config vocabulary is stable.
 
-`repo:list` is granted per pattern. A repository is only returned by
-`list_repositories` if the requesting rule grants `repo:list` for that exact
-repository, so a grant on `legacy/**` lets an agent discover the repositories under
-`legacy/` without exposing anything else.
+`repo:list` is granted per pattern and gates **only dynamic discovery** through the
+provider API. Concrete repository paths listed literally in the configuration (no
+glob metacharacters) are always returned by `list_repositories` regardless of
+`repo:list` (a `deny` rule still hides them), because they are already known
+statically. For glob patterns the provider is queried and each candidate is admitted
+only if the first matching rule grants `repo:list` for that repository, so a grant on
+`legacy/**` lets an agent discover the repositories under `legacy/` without exposing
+anything else.
 
 The example from the requirements maps to:
 `allow: [mr:read, mr:comment]` — inspect and comment on MRs, but no `repo:read`,
@@ -296,33 +300,37 @@ configured rule with its **configured** capabilities. It requires no capability 
 is the discoverability entry point. It does **not** claim the capabilities are
 effective and does not reveal `.noai` state.
 
-`list_repositories` enumerates concrete repositories from the provider and requires
-`repo:list`:
+`list_repositories` returns the repositories explicitly configured for a provider
+(always) plus repositories discovered through the provider API when `repo:list` is
+granted:
 
-- Input: `provider` (required; must be a registered provider that grants
-  `repo:list`), `search` (optional provider-side search term), `limit` (optional).
-- The named provider is eligible only if at least one allow-rule grants `repo:list`
-  (`Guard.AuthorizeList`); otherwise the call is an error. There is no
-  all-providers mode: `provider` is mandatory, consistent with the other tools.
-- The server issues one `ListRepositories` call per provider with the caller's
-  `search` (or none) and filters the candidates client-side. Prefix derivation from
-  glob patterns was deliberately **cut** in v1: client-side `Authorize` is the
-  security boundary and provider-side searching is a passthrough for the caller.
-- Every candidate repository returned by the provider is filtered through the normal
-  `Guard.Authorize(..., repo:list)` check. Repositories blocked by `.noai` are
-  **excluded**. A marker-check failure omits only that repository (fail-closed per
-  repository). The `omitted` counter counts **only** candidates that matched a rule
-  but were blocked (a `deny` rule, the `.noai` marker, or a marker-check failure);
-  candidates that match no rule at all are simply filtered out and are **not**
-  counted. `omitted` is reported in the result, so a listing is never silently
-  incomplete.
-- Results are deduplicated by provider+path and capped at the limit. `truncated` is
-  `true` when the result may be incomplete for either reason: the cap was hit, or the
-  provider fetch window was exhausted. The server requests `limit+1` candidates per
-  provider and stops paginating there, so receiving more than `limit` candidates is
-  itself reported as `truncated`, even when client-side filtering leaves the returned
-  list under the cap. A filtered-out candidate does not by itself suppress
-  `truncated`.
+- Input: `provider` (required; must be a registered provider), `search` (optional
+  provider-side search term), `limit` (optional).
+- **Static repositories**: concrete paths listed literally in the configuration are
+  always returned, in first-appearance order and deduplicated, provided the first
+  matching rule allows them (a `deny` rule hides them). This requires no `repo:list`
+  capability, no provider API call and no `.noai` check. Static entries have no
+  `web_url`.
+- **Dynamic discovery**: if at least one allow-rule grants `repo:list`
+  (`Guard.AuthorizeList`), the server issues one `ListRepositories` call with the
+  caller's `search` (or none) and filters candidates client-side using the
+  policy-only `Guard.Evaluate(..., repo:list)`. If `repo:list` is not granted, the
+  call still succeeds and returns only the static repositories (possibly none); it is
+  **not** an error. There is no all-providers mode: `provider` is mandatory.
+- **`.noai` does not affect listing.** Listing never checks the marker, so a `.noai`
+  repository (static or discovered) still appears. `.noai` only blocks operations via
+  `Guard.Authorize`.
+- The `omitted` counter counts **only** discovered candidates that matched a rule but
+  were not allowed for `repo:list` (e.g. a `deny` rule or a rule that lacks the
+  capability). Candidates that match no rule at all are simply filtered out and are
+  **not** counted. Static repositories never contribute to `omitted`.
+- Results are deduplicated by provider+path (static wins). `limit` bounds only the
+  number of **discovered** repositories; static repositories are always returned and
+  may push the total above `limit`. The server requests `limit+1` candidates and
+  stops paginating there, so receiving more than `limit` candidates is itself
+  reported as `truncated`, as is dropping an allowed candidate because the dynamic
+  cap was reached. `truncated` therefore means the discovered result may be
+  incomplete; a filtered-out candidate does not by itself suppress `truncated`.
 
 Tool arguments are validated with explicit bounds:
 - `provider` must name a configured provider.
@@ -336,11 +344,11 @@ Tool arguments are validated with explicit bounds:
 ## 9. Security Considerations
 
 - **Deny by default**, hardcoded at provider and rule level.
-- **`.noai` is authoritative** and fail-closed; checked before every operation. For
-  `list_repositories`, each candidate is checked individually: blocked repositories
-  are excluded and the count of omitted repositories is reported, so results are
-  never silently incomplete. A repository whose marker cannot be checked is omitted
-  (fail-closed).
+- **`.noai` is authoritative** and fail-closed; checked before every **operation**
+  via `Guard.Authorize`. It does **not** affect `list_repositories`: listing never
+  checks the marker, so a `.noai` repository may appear in a listing. Listing only
+  reflects configured visibility; the marker still blocks every attempt to operate on
+  that repository.
 - **`list_configured_rules` exposes the policy** (patterns and effects) to the
   caller. This is intentional in the single-trusted-agent model and reveals no
   secrets; revisit if per-client identities are ever added.
@@ -401,13 +409,14 @@ Tool arguments are validated with explicit bounds:
    when it is supplied literally.
 10. `list_configured_rules` reports configured capabilities and does not leak `.noai`
     state or the token.
-11. `list_repositories` without `repo:list` → denied; with `repo:list` on
-    `archive/**` only repositories matching that pattern are returned; a `deny` rule
-    ordered before a broad `repo:list` allow excludes the denied repository; a
-    `.noai` repository is excluded and counted as omitted; a marker-check error
-    omits only that repository; `truncated` is set when the cap is hit; when
-    `provider` is omitted an ineligible provider is skipped, when given explicitly
-    it is an error.
+11. `list_repositories`: literal (static) repositories are returned without
+    `repo:list` and without a provider call; a static repository denied by a `deny`
+    rule is excluded; a static `.noai` repository is still returned; with `repo:list`
+    on `archive/**` only matching discovered repositories are returned; a discovered
+    `.noai` repository is included (listing ignores the marker); missing `repo:list`
+    is not an error and yields static repositories only; unknown provider is an error
+    and an omitted `provider` is rejected by the schema; duplicates between static and
+    dynamic lists are removed; `truncated` is set when the cap or fetch window is hit.
 
 ## 11. Dependencies
 
@@ -461,9 +470,11 @@ Makefile                        build/test/lint targets
    resolution happens at load time and an unset/empty reference is a hard error.
    Literal secrets are supported but discouraged. The value is held in a redacting
    `Secret` type.
-2. **`repo:list` scope**: granted per pattern. Enumeration queries the provider and
-   filters each candidate through the normal per-repository `repo:list` check, so
-   `.noai` repositories are excluded and grants cannot leak beyond their pattern.
+2. **`repo:list` scope**: granted per pattern and gates only dynamic provider-API
+   discovery. Concrete paths listed literally in the configuration are always
+   returned regardless of `repo:list` (subject to `deny` rules). Dynamic candidates
+   are filtered through the policy-only per-repository `repo:list` check, so grants
+   cannot leak beyond their pattern. Listing ignores `.noai`.
 3. **Listing pagination**: the provider maps the limit to `PerPage` and follows pages
    up to the limit, reporting `truncated`. Derived-prefix querying was cut; `search`
    is a caller-controlled passthrough.

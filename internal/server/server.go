@@ -53,7 +53,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_repositories",
-		Description: "Discover repositories a provider's token is a member of that match the configured patterns. The provider argument is required. Results are capped and filtered per repository; truncated=true means the list may be incomplete because the cap was reached or the provider fetch window was exhausted. Requires the repo:list capability.",
+		Description: "List repositories explicitly configured (always) plus repositories discovered through the provider API when the repo:list capability is granted. The provider argument is required.",
 	}, s.listRepositories)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -89,7 +89,7 @@ type listConfiguredRulesInput struct{}
 type listRepositoriesInput struct {
 	Provider string `json:"provider" jsonschema:"logical provider name"`
 	Search   string `json:"search,omitempty" jsonschema:"optional provider-side search term"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of results (capped at 100)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of discovered repositories (capped at 100); configured repositories are always returned"`
 }
 
 type listMergeRequestsInput struct {
@@ -139,7 +139,7 @@ type listConfiguredRulesOutput struct {
 type repositoryJSON struct {
 	Provider string `json:"provider"`
 	Path     string `json:"path"`
-	WebURL   string `json:"web_url"`
+	WebURL   string `json:"web_url,omitempty"`
 }
 
 type listRepositoriesOutput struct {
@@ -209,80 +209,79 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		limit = maxListResults
 	}
 
-	name, err := s.resolveListableProvider(in.Provider)
-	if err != nil {
-		return nil, nil, err
+	name := in.Provider
+	if name == "" {
+		return nil, nil, errors.New("provider is required")
 	}
 	p, ok := s.registry.Get(name)
 	if !ok {
 		return nil, nil, fmt.Errorf("unknown provider %q", name)
 	}
 
-	repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: limit + 1})
+	static, err := s.guard.StaticRepositories(name)
 	if err != nil {
-		return nil, nil, mapProviderError(err)
+		return nil, nil, fmt.Errorf("unknown provider %q", name)
 	}
-
-	// The provider fetch window itself was exhausted: there may be more
-	// candidates that were never returned, so the listing is incomplete even
-	// if filtering happens to leave room under the cap.
-	truncated := len(repos) > limit
 
 	var (
 		collected []repositoryJSON
 		omitted   int
-		seen      = make(map[string]bool)
+		truncated bool
+		seen      = make(map[string]bool, len(static))
 	)
-	for _, repo := range repos {
-		key := name + "\x00" + repo.Path
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
 
-		if err := s.guard.Authorize(ctx, name, repo.Path, policy.CapRepoList); err != nil {
-			if errors.Is(err, policy.ErrNoAI) || errors.Is(err, policy.ErrMarkerCheck) || errors.Is(err, policy.ErrDenied) {
-				omitted++
-			}
-			continue
+	// Repositories listed literally in the configuration are always returned
+	// (subject to deny rules); no capability, provider call or marker check.
+	// They are not subject to limit: only discovery is bounded.
+	for _, repoPath := range static {
+		seen[name+"\x00"+repoPath] = true
+		collected = append(collected, repositoryJSON{Provider: name, Path: repoPath})
+	}
+
+	// Dynamic discovery through the provider API requires repo:list. Without it
+	// the listing simply contains the static repositories (possibly none).
+	if s.guard.AuthorizeList(name) == nil {
+		dynamicLimit := limit
+		repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: dynamicLimit + 1})
+		if err != nil {
+			return nil, nil, mapProviderError(err)
 		}
-		if len(collected) >= limit {
+		// The provider fetch window itself was exhausted: there may be more
+		// candidates that were never returned, so the listing is incomplete even
+		// if filtering happens to leave room under the cap.
+		if len(repos) > dynamicLimit {
 			truncated = true
-			continue
 		}
-		collected = append(collected, repositoryJSON{
-			Provider: name,
-			Path:     repo.Path,
-			WebURL:   repo.WebURL,
-		})
+		for _, repo := range repos {
+			key := name + "\x00" + repo.Path
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			decision, err := s.guard.Evaluate(name, repo.Path, policy.CapRepoList)
+			if err != nil {
+				return nil, nil, fmt.Errorf("unknown provider %q", name)
+			}
+			if !decision.Allowed {
+				if decision.Matched {
+					omitted++
+				}
+				continue
+			}
+			if len(collected) >= limit {
+				truncated = true
+				continue
+			}
+			collected = append(collected, repositoryJSON{
+				Provider: name,
+				Path:     repo.Path,
+				WebURL:   repo.WebURL,
+			})
+		}
 	}
+
 	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
-}
-
-// resolveListableProvider validates the required provider argument and returns
-// it when it is registered and grants repo:list.
-func (s *Server) resolveListableProvider(requested string) (string, error) {
-	if requested == "" {
-		return "", errors.New("provider is required")
-	}
-	if _, ok := s.registry.Get(requested); !ok {
-		return "", fmt.Errorf("unknown provider %q", requested)
-	}
-	if err := s.guard.AuthorizeList(requested); err != nil {
-		return "", mapAuthorizeListError(err, requested)
-	}
-	return requested, nil
-}
-
-func mapAuthorizeListError(err error, providerName string) error {
-	switch {
-	case errors.Is(err, policy.ErrUnknownProvider):
-		return fmt.Errorf("unknown provider %q", providerName)
-	case errors.Is(err, policy.ErrDenied):
-		return fmt.Errorf("provider %q does not grant repo:list", providerName)
-	default:
-		return errors.New("authorization failed")
-	}
 }
 
 func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, in listMergeRequestsInput) (*mcp.CallToolResult, any, error) {

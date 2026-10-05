@@ -113,6 +113,31 @@ func (g *Guard) AuthorizeList(providerName string) error {
 	return nil
 }
 
+// StaticRepositories returns the concrete repository paths configured for
+// providerName whose first matching rule allows them. It performs no marker
+// check and requires no capability.
+func (g *Guard) StaticRepositories(providerName string) ([]string, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.StaticRepositories(), nil
+}
+
+// Evaluate performs a policy-only evaluation for providerName, repo and
+// capability. It performs no .noai marker check. It returns ErrUnknownProvider
+// when the provider has no policy. Every decision is logged.
+func (g *Guard) Evaluate(providerName, repo string, c Capability) (Decision, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		g.logDecision(providerName, repo, c, "deny", "unknown provider")
+		return Decision{}, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	decision := p.Evaluate(repo, c)
+	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
+	return decision, nil
+}
+
 // ConfiguredRule describes a rule as it appears in the configuration. It is
 // used by list_configured_rules and deliberately exposes only configured
 // capabilities, never effective access.

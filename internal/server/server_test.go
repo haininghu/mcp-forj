@@ -29,12 +29,14 @@ type fakeProvider struct {
 	mrs             []provider.MergeRequest
 	notes           []provider.Note
 	added           []string
+	listReposCalls  int
 }
 
 func (f *fakeProvider) Name() string { return f.name }
 func (f *fakeProvider) Type() string { return "fake" }
 
 func (f *fakeProvider) ListRepositories(_ context.Context, opts provider.RepoListOptions) ([]provider.Repository, error) {
+	f.listReposCalls++
 	if f.providerErr != nil {
 		return nil, f.providerErr
 	}
@@ -431,21 +433,91 @@ func repoJSON(t *testing.T, res *mcp.CallToolResult) listRepositoriesOutput {
 	return out
 }
 
-func TestListRepositoriesWithoutCapability(t *testing.T) {
-	env := newTestEnv(t, allowRules("mr:read"), newFake())
+func TestListRepositoriesStaticWithoutCapability(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:read"), fake)
 
 	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
-	if !res.IsError {
-		t.Fatal("list_repositories succeeded without repo:list")
+	if res.IsError {
+		t.Fatalf("list_repositories errored without repo:list: %s", resultText(t, res))
 	}
-	if !strings.Contains(resultText(t, res), "repo:list") {
-		t.Errorf("error = %q, want mention of repo:list", resultText(t, res))
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/app" {
+		t.Fatalf("repositories = %v, want [team/app]", out.Repositories)
+	}
+	if out.Repositories[0].WebURL != "" {
+		t.Errorf("static repository web_url = %q, want empty", out.Repositories[0].WebURL)
+	}
+	if fake.listReposCalls != 0 {
+		t.Errorf("provider ListRepositories called %d times, want 0 for static-only listing", fake.listReposCalls)
 	}
 
 	// provider is required: omitting it must fail rather than list anything.
 	res = env.call(t, "list_repositories", map[string]any{})
 	if !res.IsError {
 		t.Fatalf("list_repositories with omitted provider succeeded: %s", resultText(t, res))
+	}
+}
+
+func TestListRepositoriesStaticDeniedExcluded(t *testing.T) {
+	fake := newFake()
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/app" {
+		t.Fatalf("repositories = %v, want [team/app] (team/secret denied)", out.Repositories)
+	}
+}
+
+func TestListRepositoriesStaticNoAIIncluded(t *testing.T) {
+	fake := newFake()
+	fake.markerByRepo = map[string]bool{"team/noai": true}
+	fake.markerErr = errors.New("marker check must not run during listing")
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/noai"},
+		Effect:       "allow",
+		Capabilities: []string{"mr:read"},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/noai" {
+		t.Fatalf("repositories = %v, want [team/noai] (marker must not affect listing)", out.Repositories)
+	}
+}
+
+func TestListRepositoriesDynamicRequiresRepoList(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{{Provider: "fake", Path: "archive/x", WebURL: "https://x/archive/x"}}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app", "archive/**"},
+		Effect:       "allow",
+		Capabilities: []string{"mr:read"},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/app" {
+		t.Fatalf("repositories = %v, want only static team/app", out.Repositories)
+	}
+	if fake.listReposCalls != 0 {
+		t.Errorf("provider ListRepositories called %d times, want 0 without repo:list", fake.listReposCalls)
 	}
 }
 
@@ -501,7 +573,7 @@ func TestListRepositoriesDenyBeforeAllow(t *testing.T) {
 	}
 }
 
-func TestListRepositoriesExcludesNoAI(t *testing.T) {
+func TestListRepositoriesDiscoveredNoAIIncluded(t *testing.T) {
 	fake := newFake()
 	fake.repos = []provider.Repository{
 		{Provider: "fake", Path: "archive/noai"},
@@ -515,15 +587,15 @@ func TestListRepositoriesExcludesNoAI(t *testing.T) {
 		t.Fatalf("list_repositories: %s", resultText(t, res))
 	}
 	out := repoJSON(t, res)
-	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
-		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	if len(out.Repositories) != 2 {
+		t.Fatalf("repositories = %v, want both (marker must not affect listing)", out.Repositories)
 	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
+	if out.Omitted != 0 {
+		t.Errorf("omitted = %d, want 0", out.Omitted)
 	}
 }
 
-func TestListRepositoriesMarkerErrorOmitsOnlyThatRepo(t *testing.T) {
+func TestListRepositoriesIgnoresMarkerErrors(t *testing.T) {
 	fake := newFake()
 	fake.repos = []provider.Repository{
 		{Provider: "fake", Path: "archive/bad"},
@@ -537,11 +609,44 @@ func TestListRepositoriesMarkerErrorOmitsOnlyThatRepo(t *testing.T) {
 		t.Fatalf("list_repositories: %s", resultText(t, res))
 	}
 	out := repoJSON(t, res)
-	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
-		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	if len(out.Repositories) != 2 {
+		t.Fatalf("repositories = %v, want both (marker errors ignored during listing)", out.Repositories)
 	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
+	if out.Omitted != 0 {
+		t.Errorf("omitted = %d, want 0", out.Omitted)
+	}
+}
+
+func TestListRepositoriesDedupesStaticAndDynamic(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/a", WebURL: "https://x/archive/a"},
+		{Provider: "fake", Path: "archive/b", WebURL: "https://x/archive/b"},
+	}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"archive/a", "archive/**"},
+		Effect:       "allow",
+		Capabilities: []string{"repo:list"},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 2 {
+		t.Fatalf("repositories = %v, want static archive/a + dynamic archive/b with no duplicate", out.Repositories)
+	}
+	paths := []string{out.Repositories[0].Path, out.Repositories[1].Path}
+	if paths[0] != "archive/a" || paths[1] != "archive/b" {
+		t.Fatalf("repositories = %v, want [archive/a archive/b]", paths)
+	}
+	if out.Repositories[0].WebURL != "" {
+		t.Errorf("static archive/a web_url = %q, want empty", out.Repositories[0].WebURL)
+	}
+	if out.Repositories[1].WebURL != "https://x/archive/b" {
+		t.Errorf("dynamic archive/b web_url = %q, want https://x/archive/b", out.Repositories[1].WebURL)
 	}
 }
 
@@ -627,13 +732,18 @@ func TestListRepositoriesProviderSelection(t *testing.T) {
 		t.Fatalf("repositories = %v, want only eligible", out.Repositories)
 	}
 
-	// Explicit ineligible provider is an error.
+	// Explicit provider without repo:list is not an error: it returns only the
+	// static repositories and never calls the provider API.
 	res = env.call(t, "list_repositories", map[string]any{"provider": "ineligible"})
-	if !res.IsError {
-		t.Fatal("explicit ineligible provider did not error")
+	if res.IsError {
+		t.Fatalf("list_repositories(ineligible) errored: %s", resultText(t, res))
 	}
-	if !strings.Contains(resultText(t, res), "repo:list") {
-		t.Errorf("error = %q, want mention of repo:list", resultText(t, res))
+	out = repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/app" {
+		t.Fatalf("ineligible repositories = %v, want static [team/app]", out.Repositories)
+	}
+	if ineligible.listReposCalls != 0 {
+		t.Errorf("ineligible provider ListRepositories called %d times, want 0", ineligible.listReposCalls)
 	}
 
 	// Explicit unknown provider is an error.
