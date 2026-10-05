@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -33,12 +32,13 @@ type Client struct {
 	api  *gitlab.Client
 }
 
-// New creates a GitLab client from cfg. The token is read from the environment
-// variable named by cfg.TokenEnv and is never stored in the configuration.
+// New creates a GitLab client from cfg. The token is read from cfg.Token,
+// which has already been resolved by config.Parse, and is never stored in the
+// configuration.
 func New(cfg config.ProviderConfig) (*Client, error) {
-	token := os.Getenv(cfg.TokenEnv)
+	token := cfg.Token.Value()
 	if token == "" {
-		return nil, fmt.Errorf("gitlab: environment variable %s is empty or unset", cfg.TokenEnv)
+		return nil, fmt.Errorf("gitlab: token is empty")
 	}
 	httpClient := &http.Client{Timeout: time.Duration(cfg.RequestTimeout)}
 	api, err := gitlab.NewClient(token,
@@ -56,6 +56,50 @@ func (c *Client) Name() string { return c.name }
 
 // Type implements provider.Provider.
 func (c *Client) Type() string { return providerType }
+
+// ListRepositories implements provider.Provider. It lists repositories the
+// token is a member of, following pages until the limit is reached or the
+// provider is exhausted.
+func (c *Client) ListRepositories(ctx context.Context, opts provider.RepoListOptions) ([]provider.Repository, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
+	}
+	perPage := limit
+	if perPage > 100 {
+		perPage = 100
+	}
+	membership := true
+
+	out := make([]provider.Repository, 0, limit)
+	for page := int64(1); ; page++ {
+		listOpts := &gitlab.ListProjectsOptions{
+			ListOptions: gitlab.ListOptions{PerPage: int64(perPage), Page: page},
+			Membership:  &membership,
+		}
+		if opts.Search != "" {
+			search := opts.Search
+			listOpts.Search = &search
+		}
+		projects, resp, err := c.api.Projects.ListProjects(listOpts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, project := range projects {
+			out = append(out, provider.Repository{
+				Provider: c.name,
+				Path:     project.PathWithNamespace,
+				WebURL:   project.WebURL,
+			})
+			if len(out) >= limit {
+				return out, nil
+			}
+		}
+		if len(projects) == 0 || resp == nil || resp.NextPage == 0 {
+			return out, nil
+		}
+	}
+}
 
 // ListMergeRequests implements provider.Provider.
 func (c *Client) ListMergeRequests(ctx context.Context, repo string, opts provider.ListOptions) ([]provider.MergeRequest, error) {

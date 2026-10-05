@@ -9,6 +9,9 @@ type stubProvider struct{ name, typ string }
 
 func (s stubProvider) Name() string { return s.name }
 func (s stubProvider) Type() string { return s.typ }
+func (s stubProvider) ListRepositories(context.Context, RepoListOptions) ([]Repository, error) {
+	return nil, nil
+}
 func (s stubProvider) ListMergeRequests(context.Context, string, ListOptions) ([]MergeRequest, error) {
 	return nil, nil
 }

@@ -95,8 +95,26 @@ func (g *Guard) Authorize(ctx context.Context, providerName, repo string, c Capa
 	return nil
 }
 
+// AuthorizeList checks whether providerName may list repositories at all. It
+// succeeds when the provider is known and at least one allow rule grants
+// CapRepoList. It does not perform a .noai marker check: listing filters each
+// candidate through Authorize instead.
+func (g *Guard) AuthorizeList(providerName string) error {
+	p, ok := g.policies[providerName]
+	if !ok {
+		g.logDecision(providerName, "", CapRepoList, "deny", "unknown provider")
+		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	if !p.GrantsAnywhere(CapRepoList) {
+		g.logDecision(providerName, "", CapRepoList, "deny", "repo:list not granted")
+		return fmt.Errorf("%w: repo:list not granted", ErrDenied)
+	}
+	g.logDecision(providerName, "", CapRepoList, "allow", "repo:list granted")
+	return nil
+}
+
 // ConfiguredRule describes a rule as it appears in the configuration. It is
-// used by list_repositories and deliberately exposes only configured
+// used by list_configured_rules and deliberately exposes only configured
 // capabilities, never effective access.
 type ConfiguredRule struct {
 	// Provider is the logical provider name.

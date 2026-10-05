@@ -47,8 +47,13 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-forj", Version: version}, nil)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_configured_rules",
+		Description: "List the access rules and configured capabilities for this server. Configured capabilities may be further restricted by the .noai marker.",
+	}, s.listConfiguredRules)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_repositories",
-		Description: "List the repositories and capabilities configured for this server. Configured capabilities may be further restricted by the .noai marker.",
+		Description: "Discover repositories the token is a member of that match the configured patterns. Requires the repo:list capability.",
 	}, s.listRepositories)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -79,7 +84,13 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	return srv
 }
 
-type listRepositoriesInput struct{}
+type listConfiguredRulesInput struct{}
+
+type listRepositoriesInput struct {
+	Provider string `json:"provider,omitempty" jsonschema:"optional logical provider name; all listable providers when omitted"`
+	Search   string `json:"search,omitempty" jsonschema:"optional provider-side search term"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of results (capped at 100)"`
+}
 
 type listMergeRequestsInput struct {
 	Provider string `json:"provider" jsonschema:"logical provider name"`
@@ -121,8 +132,20 @@ type configuredRepository struct {
 	ConfiguredCapabilities []string `json:"configured_capabilities"`
 }
 
-type listRepositoriesOutput struct {
+type listConfiguredRulesOutput struct {
 	Repositories []configuredRepository `json:"repositories"`
+}
+
+type repositoryJSON struct {
+	Provider string `json:"provider"`
+	Path     string `json:"path"`
+	WebURL   string `json:"web_url"`
+}
+
+type listRepositoriesOutput struct {
+	Repositories []repositoryJSON `json:"repositories"`
+	Omitted      int              `json:"omitted"`
+	Truncated    bool             `json:"truncated"`
 }
 
 type mergeRequestJSON struct {
@@ -162,7 +185,7 @@ type readFileOutput struct {
 	Truncated bool   `json:"truncated"`
 }
 
-func (s *Server) listRepositories(_ context.Context, _ *mcp.CallToolRequest, _ listRepositoriesInput) (*mcp.CallToolResult, any, error) {
+func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, _ listConfiguredRulesInput) (*mcp.CallToolResult, any, error) {
 	rules := s.guard.ConfiguredRules()
 	repos := make([]configuredRepository, 0, len(rules))
 	for _, rule := range rules {
@@ -177,7 +200,94 @@ func (s *Server) listRepositories(_ context.Context, _ *mcp.CallToolRequest, _ l
 			ConfiguredCapabilities: caps,
 		})
 	}
-	return jsonResult(listRepositoriesOutput{Repositories: repos})
+	return jsonResult(listConfiguredRulesOutput{Repositories: repos})
+}
+
+func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, in listRepositoriesInput) (*mcp.CallToolResult, any, error) {
+	limit := in.Limit
+	if limit <= 0 || limit > maxListResults {
+		limit = maxListResults
+	}
+
+	names, err := s.listableProviders(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var (
+		collected []repositoryJSON
+		omitted   int
+		truncated bool
+		seen      = make(map[string]bool)
+	)
+	for _, name := range names {
+		p, ok := s.registry.Get(name)
+		if !ok {
+			continue
+		}
+		repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: in.Search, Limit: limit + 1})
+		if err != nil {
+			return nil, nil, mapProviderError(err)
+		}
+		for _, repo := range repos {
+			key := name + "\x00" + repo.Path
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+
+			if err := s.guard.Authorize(ctx, name, repo.Path, policy.CapRepoList); err != nil {
+				if errors.Is(err, policy.ErrNoAI) || errors.Is(err, policy.ErrMarkerCheck) || errors.Is(err, policy.ErrDenied) {
+					omitted++
+				}
+				continue
+			}
+			if len(collected) >= limit {
+				truncated = true
+				continue
+			}
+			collected = append(collected, repositoryJSON{
+				Provider: name,
+				Path:     repo.Path,
+				WebURL:   repo.WebURL,
+			})
+		}
+	}
+	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
+}
+
+// listableProviders returns the providers that may list repositories. When
+// requested is non-empty it must be registered and grant repo:list; otherwise
+// every registered provider that grants repo:list is returned.
+func (s *Server) listableProviders(requested string) ([]string, error) {
+	if requested != "" {
+		if _, ok := s.registry.Get(requested); !ok {
+			return nil, fmt.Errorf("unknown provider %q", requested)
+		}
+		if err := s.guard.AuthorizeList(requested); err != nil {
+			return nil, mapAuthorizeListError(err, requested)
+		}
+		return []string{requested}, nil
+	}
+	names := s.registry.Names()
+	listable := make([]string, 0, len(names))
+	for _, name := range names {
+		if err := s.guard.AuthorizeList(name); err == nil {
+			listable = append(listable, name)
+		}
+	}
+	return listable, nil
+}
+
+func mapAuthorizeListError(err error, providerName string) error {
+	switch {
+	case errors.Is(err, policy.ErrUnknownProvider):
+		return fmt.Errorf("unknown provider %q", providerName)
+	case errors.Is(err, policy.ErrDenied):
+		return fmt.Errorf("provider %q does not grant repo:list", providerName)
+	default:
+		return errors.New("authorization failed")
+	}
 }
 
 func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, in listMergeRequestsInput) (*mcp.CallToolResult, any, error) {

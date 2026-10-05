@@ -88,6 +88,38 @@ func TestGuardDeniedCapability(t *testing.T) {
 	}
 }
 
+func TestAuthorizeList(t *testing.T) {
+	granted := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+	})
+	notGranted := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+	})
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	g := NewGuard(
+		map[string]*Policy{"granted": granted, "not-granted": notGranted},
+		map[string]FileChecker{},
+		".noai",
+		logger,
+	)
+
+	if err := g.AuthorizeList("granted"); err != nil {
+		t.Fatalf("AuthorizeList(granted) = %v, want nil", err)
+	}
+	err := g.AuthorizeList("not-granted")
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("AuthorizeList(not-granted) = %v, want ErrDenied", err)
+	}
+	err = g.AuthorizeList("missing")
+	if !errors.Is(err, ErrUnknownProvider) {
+		t.Fatalf("AuthorizeList(missing) = %v, want ErrUnknownProvider", err)
+	}
+	if !strings.Contains(logs.String(), "repo:list") {
+		t.Errorf("logs do not mention repo:list: %s", logs.String())
+	}
+}
+
 func TestConfiguredRulesSortedByProvider(t *testing.T) {
 	p1 := mustBuild(t, []RuleSpec{{Repositories: []string{"a/*"}, Effect: "allow", Capabilities: []string{"mr:read"}}})
 	p2 := mustBuild(t, []RuleSpec{{Repositories: []string{"b/*"}, Effect: "deny"}})

@@ -55,6 +55,16 @@ type Note struct {
 	CreatedAt time.Time
 }
 
+// RepoListOptions bounds and filters repository enumeration.
+type RepoListOptions struct {
+	// Search is an optional provider-side search term (usually a namespace
+	// prefix).
+	Search string
+	// Limit is the maximum number of repositories to return; zero means the
+	// provider default.
+	Limit int
+}
+
 // ListOptions bounds and filters list operations.
 type ListOptions struct {
 	// State filters by merge request state; empty means no filter.
@@ -70,6 +80,8 @@ type Provider interface {
 	// Type returns the provider type, e.g. "gitlab".
 	Type() string
 
+	// ListRepositories enumerates repositories the token is a member of.
+	ListRepositories(ctx context.Context, opts RepoListOptions) ([]Repository, error)
 	// ListMergeRequests lists merge requests for a repository.
 	ListMergeRequests(ctx context.Context, repo string, opts ListOptions) ([]MergeRequest, error)
 	// GetMergeRequest fetches a single merge request by number.

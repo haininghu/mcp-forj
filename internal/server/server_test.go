@@ -18,18 +18,28 @@ import (
 )
 
 type fakeProvider struct {
-	name        string
-	marker      bool
-	markerErr   error
-	providerErr error
-	files       map[string][]byte
-	mrs         []provider.MergeRequest
-	notes       []provider.Note
-	added       []string
+	name            string
+	marker          bool
+	markerErr       error
+	markerByRepo    map[string]bool
+	markerErrByRepo map[string]error
+	providerErr     error
+	files           map[string][]byte
+	repos           []provider.Repository
+	mrs             []provider.MergeRequest
+	notes           []provider.Note
+	added           []string
 }
 
 func (f *fakeProvider) Name() string { return f.name }
 func (f *fakeProvider) Type() string { return "fake" }
+
+func (f *fakeProvider) ListRepositories(_ context.Context, opts provider.RepoListOptions) ([]provider.Repository, error) {
+	if f.providerErr != nil {
+		return nil, f.providerErr
+	}
+	return applyLimit(f.repos, opts.Limit), nil
+}
 
 func (f *fakeProvider) ListMergeRequests(_ context.Context, _ string, opts provider.ListOptions) ([]provider.MergeRequest, error) {
 	if f.providerErr != nil {
@@ -84,7 +94,13 @@ func (f *fakeProvider) ReadFile(_ context.Context, _, path, _ string) ([]byte, e
 	return data, nil
 }
 
-func (f *fakeProvider) FileExists(context.Context, string, string, string) (bool, error) {
+func (f *fakeProvider) FileExists(_ context.Context, repo, _, _ string) (bool, error) {
+	if err, ok := f.markerErrByRepo[repo]; ok {
+		return false, err
+	}
+	if marked, ok := f.markerByRepo[repo]; ok {
+		return marked, nil
+	}
 	if f.markerErr != nil {
 		return false, f.markerErr
 	}
@@ -148,6 +164,40 @@ func newTestEnv(t *testing.T, rules []policy.RuleSpec, fake *fakeProvider) *test
 	t.Cleanup(func() { _ = session.Close() })
 
 	return &testEnv{session: session, logs: &logs, fake: fake}
+}
+
+func newMultiEnv(t *testing.T, fakes []*fakeProvider, rules map[string][]policy.RuleSpec) *testEnv {
+	t.Helper()
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	policies := make(map[string]*policy.Policy, len(fakes))
+	checkers := make(map[string]policy.FileChecker, len(fakes))
+	registry := provider.NewRegistry()
+	for _, fake := range fakes {
+		pol, err := policy.Build(rules[fake.name])
+		if err != nil {
+			t.Fatalf("policy.Build(%s): %v", fake.name, err)
+		}
+		policies[fake.name] = pol
+		checkers[fake.name] = fake
+		registry.Register(fake)
+	}
+	guard := policy.NewGuard(policies, checkers, ".noai", logger)
+	srv := New(guard, registry, logger)
+
+	ctx := context.Background()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	if _, err := srv.MCPServer("test").Connect(ctx, serverTransport, nil); err != nil {
+		t.Fatalf("server connect: %v", err)
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client connect: %v", err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+
+	return &testEnv{session: session, logs: &logs}
 }
 
 func (e *testEnv) call(t *testing.T, name string, args map[string]any) *mcp.CallToolResult {
@@ -340,14 +390,14 @@ func TestPathTraversalRejected(t *testing.T) {
 	}
 }
 
-func TestListRepositoriesReportsConfiguredCapabilities(t *testing.T) {
+func TestListConfiguredRulesReportsConfiguredCapabilities(t *testing.T) {
 	fake := newFake()
-	fake.marker = true // must not affect list_repositories
+	fake.marker = true // must not affect list_configured_rules
 	env := newTestEnv(t, allowRules("mr:read", "mr:comment"), fake)
 
-	res := env.call(t, "list_repositories", map[string]any{})
+	res := env.call(t, "list_configured_rules", map[string]any{})
 	if res.IsError {
-		t.Fatalf("list_repositories denied: %s", resultText(t, res))
+		t.Fatalf("list_configured_rules denied: %s", resultText(t, res))
 	}
 	text := resultText(t, res)
 	if !strings.Contains(text, "configured_capabilities") {
@@ -358,6 +408,207 @@ func TestListRepositoriesReportsConfiguredCapabilities(t *testing.T) {
 	}
 	if strings.Contains(text, ".noai") || strings.Contains(text, "marker") {
 		t.Errorf("output leaked .noai state: %s", text)
+	}
+	if strings.Contains(text, "token") || strings.Contains(text, "secret") {
+		t.Errorf("output leaked secret material: %s", text)
+	}
+}
+
+func listReposRules(patterns ...string) []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: patterns,
+		Effect:       "allow",
+		Capabilities: []string{"repo:list"},
+	}}
+}
+
+func repoJSON(t *testing.T, res *mcp.CallToolResult) listRepositoriesOutput {
+	t.Helper()
+	var out listRepositoriesOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return out
+}
+
+func TestListRepositoriesWithoutCapability(t *testing.T) {
+	env := newTestEnv(t, allowRules("mr:read"), newFake())
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if !res.IsError {
+		t.Fatal("list_repositories succeeded without repo:list")
+	}
+	if !strings.Contains(resultText(t, res), "repo:list") {
+		t.Errorf("error = %q, want mention of repo:list", resultText(t, res))
+	}
+
+	// With no explicit provider, an ineligible provider is skipped and the
+	// result is empty rather than an error.
+	res = env.call(t, "list_repositories", map[string]any{})
+	if res.IsError {
+		t.Fatalf("list_repositories with omitted provider errored: %s", resultText(t, res))
+	}
+	if out := repoJSON(t, res); len(out.Repositories) != 0 {
+		t.Errorf("repositories = %v, want none", out.Repositories)
+	}
+}
+
+func TestListRepositoriesFiltersByPattern(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/a", WebURL: "https://x/archive/a"},
+		{Provider: "fake", Path: "team/b", WebURL: "https://x/team/b"},
+		{Provider: "fake", Path: "archive/c", WebURL: "https://x/archive/c"},
+	}
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 2 {
+		t.Fatalf("repositories = %v, want 2", out.Repositories)
+	}
+	for _, r := range out.Repositories {
+		if !strings.HasPrefix(r.Path, "archive/") {
+			t.Errorf("unexpected repository %q", r.Path)
+		}
+	}
+	if out.Omitted != 0 {
+		t.Errorf("omitted = %d, want 0", out.Omitted)
+	}
+}
+
+func TestListRepositoriesDenyBeforeAllow(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/secret"},
+		{Provider: "fake", Path: "archive/ok"},
+	}
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"archive/secret"}, Effect: "deny"},
+		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
+		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListRepositoriesExcludesNoAI(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/noai"},
+		{Provider: "fake", Path: "archive/ok"},
+	}
+	fake.markerByRepo = map[string]bool{"archive/noai": true}
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
+		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListRepositoriesMarkerErrorOmitsOnlyThatRepo(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/bad"},
+		{Provider: "fake", Path: "archive/ok"},
+	}
+	fake.markerErrByRepo = map[string]error{"archive/bad": errors.New("network down")}
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
+		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListRepositoriesTruncation(t *testing.T) {
+	fake := newFake()
+	fake.repos = nil
+	for i := 0; i < maxListResults+5; i++ {
+		fake.repos = append(fake.repos, provider.Repository{Provider: "fake", Path: "archive/r" + string(rune('a'+i%26)) + string(rune('0'+i/26))})
+	}
+	env := newTestEnv(t, listReposRules("archive/**"), fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if !out.Truncated {
+		t.Error("truncated = false, want true")
+	}
+	if len(out.Repositories) != maxListResults {
+		t.Errorf("len = %d, want %d", len(out.Repositories), maxListResults)
+	}
+}
+
+func TestListRepositoriesProviderSelection(t *testing.T) {
+	eligible := newFake()
+	eligible.name = "eligible"
+	eligible.repos = []provider.Repository{{Provider: "eligible", Path: "archive/a"}}
+	ineligible := newFake()
+	ineligible.name = "ineligible"
+	ineligible.repos = []provider.Repository{{Provider: "ineligible", Path: "archive/b"}}
+
+	env := newMultiEnv(t,
+		[]*fakeProvider{eligible, ineligible},
+		map[string][]policy.RuleSpec{
+			"eligible":   listReposRules("archive/**"),
+			"ineligible": allowRules("mr:read"),
+		},
+	)
+
+	// Omitted provider: ineligible one is skipped.
+	res := env.call(t, "list_repositories", map[string]any{})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Provider != "eligible" {
+		t.Fatalf("repositories = %v, want only eligible", out.Repositories)
+	}
+
+	// Explicit ineligible provider is an error.
+	res = env.call(t, "list_repositories", map[string]any{"provider": "ineligible"})
+	if !res.IsError {
+		t.Fatal("explicit ineligible provider did not error")
+	}
+	if !strings.Contains(resultText(t, res), "repo:list") {
+		t.Errorf("error = %q, want mention of repo:list", resultText(t, res))
+	}
+
+	// Explicit unknown provider is an error.
+	res = env.call(t, "list_repositories", map[string]any{"provider": "missing"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown provider") {
+		t.Errorf("unknown provider result = %q", resultText(t, res))
 	}
 }
 

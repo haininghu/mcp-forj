@@ -1,12 +1,27 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/hvo/mcp-forj/internal/policy"
 )
+
+func tokenYAML(token string) string {
+	return `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: "` + token + `"
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+}
 
 const validYAML = `
 server:
@@ -18,7 +33,7 @@ providers:
   - name: gitlab-work
     type: gitlab
     base_url: https://gitlab.example.com
-    token_env: GITLAB_WORK_TOKEN
+    token: "literal-secret"
     request_timeout: 45s
     rules:
       - repositories: ["team/service-a"]
@@ -49,6 +64,9 @@ func TestParseValid(t *testing.T) {
 	if got := p.Rules[0].Capabilities; len(got) != 2 || got[0] != "mr:read" {
 		t.Errorf("capabilities = %v", got)
 	}
+	if p.Token.Value() != "literal-secret" {
+		t.Errorf("token = %q, want literal-secret", p.Token.Value())
+	}
 	if _, ok := cfg.ProviderByName("gitlab-work"); !ok {
 		t.Error("ProviderByName did not find configured provider")
 	}
@@ -63,7 +81,7 @@ providers:
   - name: p
     type: gitlab
     base_url: http://gitlab.internal
-    token_env: TOKEN
+    token: TOKEN
     rules:
       - repositories: ["a/b"]
         effect: allow
@@ -113,7 +131,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/b"]
         effect: allow
@@ -122,7 +140,7 @@ providers:
 			wantErr: "unknown capability",
 		},
 		{
-			name: "missing token_env",
+			name: "missing token",
 			yaml: `
 providers:
   - name: p
@@ -133,7 +151,7 @@ providers:
         effect: allow
         capabilities: [mr:read]
 `,
-			wantErr: "token_env is required",
+			wantErr: "token is required",
 		},
 		{
 			name: "duplicate provider name",
@@ -142,7 +160,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/b"]
         effect: allow
@@ -150,7 +168,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/c"]
         effect: allow
@@ -165,7 +183,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/b"]
         effect: maybe
@@ -181,7 +199,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/b"]
         effect: allow
@@ -196,7 +214,7 @@ providers:
   - name: p
     type: gitlab
     base_url: gitlab.example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/b"]
         effect: allow
@@ -211,7 +229,7 @@ providers:
   - name: p
     type: github
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - repositories: ["a/b"]
         effect: allow
@@ -226,7 +244,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules:
       - effect: allow
         capabilities: [mr:read]
@@ -264,7 +282,7 @@ providers:
   - name: p
     type: gitlab
     base_url: https://example.com
-    token_env: T
+    token: T
     rules: []
 `
 	cfg, err := Parse([]byte(yaml))
@@ -286,6 +304,94 @@ providers:
 	decision := pol.Evaluate("team/app", policy.CapMRRead)
 	if decision.Allowed || decision.Matched {
 		t.Errorf("empty rules allowed access: %+v", decision)
+	}
+}
+
+func TestTokenLiteral(t *testing.T) {
+	cfg, err := Parse([]byte(tokenYAML("literal-token")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Providers[0].Token.Value(); got != "literal-token" {
+		t.Errorf("token = %q, want literal-token", got)
+	}
+}
+
+func TestTokenLiteralWithDollarStaysLiteral(t *testing.T) {
+	cfg, err := Parse([]byte(tokenYAML("abc$def")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Providers[0].Token.Value(); got != "abc$def" {
+		t.Errorf("token = %q, want abc$def", got)
+	}
+}
+
+func TestTokenEnvReference(t *testing.T) {
+	t.Setenv("MCP_FORJ_TEST_TOKEN", "resolved-secret")
+	cfg, err := Parse([]byte(tokenYAML("${MCP_FORJ_TEST_TOKEN}")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Providers[0].Token.Value(); got != "resolved-secret" {
+		t.Errorf("token = %q, want resolved-secret", got)
+	}
+}
+
+func TestTokenEnvUnsetRejected(t *testing.T) {
+	_, err := Parse([]byte(tokenYAML("${MCP_FORJ_TEST_UNSET_XYZ}")))
+	if err == nil {
+		t.Fatal("Parse accepted an unset environment reference")
+	}
+	if !strings.Contains(err.Error(), "MCP_FORJ_TEST_UNSET_XYZ") {
+		t.Errorf("error = %q, want it to name the environment variable", err)
+	}
+}
+
+func TestTokenEnvEmptyRejected(t *testing.T) {
+	t.Setenv("MCP_FORJ_TEST_EMPTY", "")
+	_, err := Parse([]byte(tokenYAML("${MCP_FORJ_TEST_EMPTY}")))
+	if err == nil {
+		t.Fatal("Parse accepted an empty environment reference")
+	}
+	if !strings.Contains(err.Error(), "MCP_FORJ_TEST_EMPTY") {
+		t.Errorf("error = %q, want it to name the environment variable", err)
+	}
+}
+
+func TestTokenWhitespaceTrimmed(t *testing.T) {
+	cfg, err := Parse([]byte(tokenYAML("  spaced-token  ")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Providers[0].Token.Value(); got != "spaced-token" {
+		t.Errorf("token = %q, want spaced-token", got)
+	}
+}
+
+func TestTokenRedaction(t *testing.T) {
+	const secret = "top-secret-value"
+	t.Setenv("MCP_FORJ_TEST_SECRET", secret)
+	cfg, err := Parse([]byte(tokenYAML("${MCP_FORJ_TEST_SECRET}")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Providers[0].Token.Value() != secret {
+		t.Fatalf("token not resolved")
+	}
+	for _, formatted := range []string{
+		fmt.Sprintf("%v", cfg),
+		fmt.Sprintf("%+v", cfg),
+		fmt.Sprintf("%#v", cfg),
+		cfg.Providers[0].Token.GoString(),
+		cfg.Providers[0].Token.String(),
+	} {
+		if strings.Contains(formatted, secret) {
+			t.Errorf("secret leaked in %q", formatted)
+		}
+	}
+	if cfg.Providers[0].Token.String() != "[REDACTED]" {
+		t.Errorf("Token.String() = %q, want [REDACTED]", cfg.Providers[0].Token.String())
 	}
 }
 

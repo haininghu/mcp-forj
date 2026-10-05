@@ -117,6 +117,18 @@ func (p *Policy) Evaluate(repo string, c Capability) Decision {
 	return Decision{Allowed: false, Matched: false, Reason: "no matching rule"}
 }
 
+// GrantsAnywhere reports whether any allow rule grants capability c, regardless
+// of repository. It is used to decide whether a provider is eligible for
+// repository listing.
+func (p *Policy) GrantsAnywhere(c Capability) bool {
+	for _, rule := range p.rules {
+		if rule.Effect == EffectAllow && rule.Capabilities[c] {
+			return true
+		}
+	}
+	return false
+}
+
 // Rules returns a deep copy of the compiled rules for introspection.
 func (p *Policy) Rules() []Rule {
 	out := make([]Rule, len(p.rules))

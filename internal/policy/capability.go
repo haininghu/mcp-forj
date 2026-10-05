@@ -6,10 +6,13 @@ package policy
 // that are validated at configuration-load time.
 type Capability string
 
-// Known capabilities. Only CapRepoRead, CapMRRead and CapMRComment are used by
-// the first iteration's tools; the remaining values are reserved so the
+// Known capabilities. CapRepoList, CapRepoRead, CapMRRead and CapMRComment are
+// used by the first iteration's tools; the remaining values are reserved so the
 // configuration vocabulary stays stable.
 const (
+	// CapRepoList permits discovering repositories matching the configured
+	// patterns.
+	CapRepoList Capability = "repo:list"
 	// CapRepoRead permits reading repository files.
 	CapRepoRead Capability = "repo:read"
 	// CapMRRead permits listing and viewing merge request metadata and notes.
@@ -26,6 +29,7 @@ const (
 )
 
 var knownCapabilities = []Capability{
+	CapRepoList,
 	CapRepoRead,
 	CapMRRead,
 	CapMRDiff,

@@ -95,10 +95,29 @@ func TestKnownCapabilities(t *testing.T) {
 	if !IsKnownCapability("mr:read") {
 		t.Error("mr:read should be known")
 	}
+	if !IsKnownCapability("repo:list") {
+		t.Error("repo:list should be known")
+	}
 	if IsKnownCapability("repo:teleport") {
 		t.Error("repo:teleport should not be known")
 	}
-	if len(KnownCapabilities()) != 6 {
-		t.Errorf("KnownCapabilities length = %d, want 6", len(KnownCapabilities()))
+	if len(KnownCapabilities()) != 7 {
+		t.Errorf("KnownCapabilities length = %d, want 7", len(KnownCapabilities()))
+	}
+}
+
+func TestGrantsAnywhere(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+		{Repositories: []string{"team/**"}, Effect: "deny"},
+	})
+	if !p.GrantsAnywhere(CapRepoList) {
+		t.Error("GrantsAnywhere(repo:list) = false, want true")
+	}
+	if p.GrantsAnywhere(CapRepoRead) {
+		t.Error("GrantsAnywhere(repo:read) = true, want false")
+	}
+	if p.GrantsAnywhere(CapMRRead) {
+		t.Error("GrantsAnywhere(mr:read) = true, want false")
 	}
 }

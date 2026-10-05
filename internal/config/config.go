@@ -4,14 +4,20 @@ package config
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/hvo/mcp-forj/internal/policy"
 )
+
+// envRefPattern matches a whole-string environment reference such as "${NAME}".
+var envRefPattern = regexp.MustCompile(`^\$\{[A-Za-z_][A-Za-z0-9_]*\}$`)
 
 const (
 	defaultServerName     = "mcp-forj"
@@ -52,8 +58,9 @@ type ProviderConfig struct {
 	Type string `yaml:"type"`
 	// BaseURL is the provider's API base URL.
 	BaseURL string `yaml:"base_url"`
-	// TokenEnv names the environment variable holding the API token.
-	TokenEnv string `yaml:"token_env"`
+	// Token is the API token, either a literal secret or a whole-string
+	// ${NAME} environment reference. It is resolved by Parse.
+	Token Secret `yaml:"token"`
 	// RequestTimeout bounds each provider request.
 	RequestTimeout Duration `yaml:"request_timeout"`
 	// Rules are the access rules, evaluated in order.
@@ -69,6 +76,23 @@ type RuleConfig struct {
 	// Capabilities are granted by an "allow" rule.
 	Capabilities []string `yaml:"capabilities"`
 }
+
+// Secret is a configuration secret. Its formatting methods always redact the
+// value, so accidental %v/%+v/%#v or slog dumps of a Config cannot leak it.
+// The raw value is reachable only through Value.
+type Secret string
+
+// Value returns the raw secret. It is the only accessor.
+func (s Secret) Value() string { return string(s) }
+
+// String implements fmt.Stringer and always redacts the value.
+func (s Secret) String() string { return "[REDACTED]" }
+
+// GoString implements fmt.GoStringer and always redacts the value.
+func (s Secret) GoString() string { return "[REDACTED]" }
+
+// LogValue implements slog.LogValuer and always redacts the value.
+func (s Secret) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
 
 // Duration is a time.Duration that unmarshals from a Go duration string such as
 // "30s".
@@ -115,11 +139,37 @@ func Parse(data []byte) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("config: parse: %w", err)
 	}
+	for i := range cfg.Providers {
+		resolved, err := resolveSecret(string(cfg.Providers[i].Token))
+		if err != nil {
+			return nil, fmt.Errorf("config: provider %q: %w", cfg.Providers[i].Name, err)
+		}
+		cfg.Providers[i].Token = resolved
+	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// resolveSecret trims surrounding whitespace and resolves a whole-string
+// ${NAME} environment reference. Any other non-empty value is used as a literal
+// secret. Error messages name only the environment variable, never its value.
+func resolveSecret(raw string) (Secret, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", fmt.Errorf("token is required")
+	}
+	if envRefPattern.MatchString(trimmed) {
+		name := trimmed[2 : len(trimmed)-1]
+		value := os.Getenv(name)
+		if value == "" {
+			return "", fmt.Errorf("token: environment variable %s is empty or unset", name)
+		}
+		return Secret(value), nil
+	}
+	return Secret(trimmed), nil
 }
 
 // Validate checks the configuration for consistency. It fails closed: unknown
@@ -153,8 +203,8 @@ func (c *Config) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("config: provider %q: base_url must be an absolute http(s) URL", p.Name)
 		}
-		if p.TokenEnv == "" {
-			return fmt.Errorf("config: provider %q: token_env is required", p.Name)
+		if p.Token.Value() == "" {
+			return fmt.Errorf("config: provider %q: token is required", p.Name)
 		}
 
 		for j, rule := range p.Rules {

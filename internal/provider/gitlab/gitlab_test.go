@@ -58,18 +58,16 @@ func TestMapNote(t *testing.T) {
 }
 
 func TestNewMissingToken(t *testing.T) {
-	t.Setenv("MCP_FORJ_TEST_MISSING", "")
 	_, err := New(config.ProviderConfig{
-		Name:     "p",
-		Type:     "gitlab",
-		BaseURL:  "https://gitlab.example.com",
-		TokenEnv: "MCP_FORJ_TEST_MISSING",
+		Name:    "p",
+		Type:    "gitlab",
+		BaseURL: "https://gitlab.example.com",
 	})
 	if err == nil {
-		t.Fatal("New succeeded with an unset token, want error")
+		t.Fatal("New succeeded with an empty token, want error")
 	}
-	if !strings.Contains(err.Error(), "MCP_FORJ_TEST_MISSING") {
-		t.Errorf("error = %q, want it to name the env var", err)
+	if !strings.Contains(err.Error(), "token is empty") {
+		t.Errorf("error = %q, want it to mention the empty token", err)
 	}
 }
 
@@ -77,18 +75,76 @@ func newTestClient(t *testing.T, handler http.Handler) *Client {
 	t.Helper()
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
-	t.Setenv("MCP_FORJ_TEST_TOKEN", "test-token")
 	c, err := New(config.ProviderConfig{
 		Name:           "p",
 		Type:           "gitlab",
 		BaseURL:        srv.URL,
-		TokenEnv:       "MCP_FORJ_TEST_TOKEN",
+		Token:          config.Secret("test-token"),
 		RequestTimeout: config.Duration(5 * time.Second),
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return c
+}
+
+func TestListRepositoriesPagination(t *testing.T) {
+	var pages, searches []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/projects" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query().Get("membership"); got != "true" {
+			t.Errorf("membership = %q, want true", got)
+		}
+		searches = append(searches, r.URL.Query().Get("search"))
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		switch page {
+		case "1":
+			w.Header().Set("X-Next-Page", "2")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 1, "path_with_namespace": "archive/a", "web_url": "https://x/archive/a"},
+				{"id": 2, "path_with_namespace": "archive/b", "web_url": "https://x/archive/b"},
+			})
+		default:
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": 3, "path_with_namespace": "archive/c", "web_url": "https://x/archive/c"},
+			})
+		}
+	}))
+
+	repos, err := c.ListRepositories(context.Background(), provider.RepoListOptions{Search: "archive", Limit: 3})
+	if err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if len(repos) != 3 {
+		t.Fatalf("len = %d, want 3", len(repos))
+	}
+	if repos[2].Path != "archive/c" || repos[2].Provider != "p" {
+		t.Errorf("third repo = %+v, want archive/c for provider p", repos[2])
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Errorf("pages = %v, want [1 2]", pages)
+	}
+	if len(searches) == 0 || searches[0] != "archive" {
+		t.Errorf("searches = %v, want first = archive", searches)
+	}
+
+	// The limit stops collection before the second page.
+	pages = nil
+	repos, err = c.ListRepositories(context.Background(), provider.RepoListOptions{Limit: 2})
+	if err != nil {
+		t.Fatalf("ListRepositories: %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("len = %d, want 2", len(repos))
+	}
+	if len(pages) != 1 {
+		t.Errorf("pages = %v, want [1]", pages)
+	}
 }
 
 func TestGetMergeRequestHTTP(t *testing.T) {
