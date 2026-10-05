@@ -21,6 +21,8 @@ const (
 	CapMRDiff Capability = "mr:diff"
 	// CapMRComment permits creating comments on merge requests.
 	CapMRComment Capability = "mr:comment"
+	// CapRebase permits triggering a merge request rebase.
+	CapRebase Capability = "mr:rebase"
 	// CapMRWrite permits creating, updating, merging or closing merge requests
 	// (reserved).
 	CapMRWrite Capability = "mr:write"
@@ -34,6 +36,7 @@ var knownCapabilities = []Capability{
 	CapMRRead,
 	CapMRDiff,
 	CapMRComment,
+	CapRebase,
 	CapMRWrite,
 	CapRepoWrite,
 }

@@ -48,6 +48,7 @@ The server speaks MCP over stdio. Point your MCP client at the binary.
 | `get_merge_request`        | `mr:read`           | Fetch one merge request.                |
 | `list_merge_request_notes` | `mr:read`           | List comments on a merge request.       |
 | `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.             |
+| `rebase_merge_request`     | `mr:rebase`         | Trigger an asynchronous MR rebase.      |
 | `read_file`                | `repo:read`         | Read a repository file.                 |
 
 ## Configuration
@@ -59,8 +60,9 @@ See `configs/config.example.yaml`. Capabilities:
 - `repo:read` – read repository files.
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:comment` – comment on merge requests.
+- `mr:rebase` – trigger an asynchronous rebase of a merge request.
 - `mr:diff` – read merge request diffs (reserved, not used in v1).
-- `mr:write` – reserved.
+- `mr:write` – reserved (creating/updating/merging MRs).
 - `repo:write` – reserved.
 
 ¹ `list_repositories` returns concrete repositories listed literally in the
@@ -100,10 +102,14 @@ be determined for an active filter, the decision fails closed.
 Limitations:
 
 - MR filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
-  `mr:read`) and `add_merge_request_note` (`mr:comment`); these tools fetch the merge
-  request metadata to evaluate labels. `list_merge_requests` does **not** evaluate
-  labels (the list API returns none) and fails closed when an `mr:read` tag filter is
-  active.
+  `mr:read`), `add_merge_request_note` (`mr:comment`) and `rebase_merge_request`
+  (`mr:rebase`); these tools fetch the merge request metadata to evaluate labels.
+  `list_merge_requests` does **not** evaluate labels (the list API returns none) and
+  fails closed when an `mr:read` tag filter is active.
+- `rebase_merge_request` is a write operation: it triggers an **asynchronous** rebase
+  (the outcome appears later on the merge request) and requires push access to the
+  source branch. The token must have that access; the server fetches MR metadata for
+  authorization before requesting the rebase (fail-closed).
 - Repo filters are enforced on `read_file` (`repo:read`) and `list_repositories`
   (`repo:list`) using project topics. A `repo:read` filter fetches topics before
   reading. A `repo:list` filter also applies to repositories listed literally in the

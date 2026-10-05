@@ -153,8 +153,8 @@ func TestKnownCapabilities(t *testing.T) {
 	if IsKnownCapability("repo:teleport") {
 		t.Error("repo:teleport should not be known")
 	}
-	if len(KnownCapabilities()) != 7 {
-		t.Errorf("KnownCapabilities length = %d, want 7", len(KnownCapabilities()))
+	if len(KnownCapabilities()) != 8 {
+		t.Errorf("KnownCapabilities length = %d, want 8", len(KnownCapabilities()))
 	}
 }
 

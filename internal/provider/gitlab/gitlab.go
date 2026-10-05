@@ -173,6 +173,17 @@ func (c *Client) AddMergeRequestNote(ctx context.Context, repo string, number in
 	return &out, nil
 }
 
+// RebaseMergeRequest implements provider.Provider. GitLab performs the rebase
+// asynchronously (202 Accepted); the outcome is visible later on the merge
+// request.
+func (c *Client) RebaseMergeRequest(ctx context.Context, repo string, number int64) error {
+	_, err := c.api.MergeRequests.RebaseMergeRequest(repo, number, nil, gitlab.WithContext(ctx))
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // ReadFile implements provider.Provider. An empty ref means the default branch.
 func (c *Client) ReadFile(ctx context.Context, repo, path, ref string) ([]byte, error) {
 	file, _, err := c.api.RepositoryFiles.GetFile(repo, path, refOptions(ref), gitlab.WithContext(ctx))

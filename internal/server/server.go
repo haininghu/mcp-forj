@@ -77,6 +77,11 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	}, s.addMergeRequestNote)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "rebase_merge_request",
+		Description: "Trigger an asynchronous rebase of a merge request's source branch onto its target branch. Requires the mr:rebase capability.",
+	}, s.rebaseMergeRequest)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_file",
 		Description: "Read a repository file at an optional ref. Requires the repo:read capability.",
 	}, s.readFile)
@@ -116,6 +121,12 @@ type addMergeRequestNoteInput struct {
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 	Body     string `json:"body" jsonschema:"comment text"`
+}
+
+type rebaseMergeRequestInput struct {
+	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
+	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
 type readFileInput struct {
@@ -180,6 +191,13 @@ type noteJSON struct {
 type listNotesOutput struct {
 	Notes     []noteJSON `json:"notes"`
 	Truncated bool       `json:"truncated"`
+}
+
+type rebaseMergeRequestOutput struct {
+	Provider string `json:"provider"`
+	Repo     string `json:"repo"`
+	Number   int64  `json:"number"`
+	Status   string `json:"status"`
 }
 
 type readFileOutput struct {
@@ -439,6 +457,40 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 		return nil, nil, mapProviderError(err)
 	}
 	return jsonResult(toNoteJSON(*note))
+}
+
+// rebaseMergeRequest triggers an asynchronous rebase. The merge request
+// metadata is fetched first as an internal authorization input (for tag
+// filters); if it cannot be fetched the rebase is denied (fail-closed). The
+// rebase itself completes asynchronously, so the result only acknowledges that
+// it was requested.
+func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in rebaseMergeRequestInput) (*mcp.CallToolResult, any, error) {
+	if in.Number <= 0 {
+		return nil, nil, errors.New("number must be positive")
+	}
+	p, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapRebase); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapRebase, tagSetFromMR(*mr)); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	if err := p.RebaseMergeRequest(ctx, in.Repo, in.Number); err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+	return jsonResult(rebaseMergeRequestOutput{
+		Provider: in.Provider,
+		Repo:     in.Repo,
+		Number:   in.Number,
+		Status:   "rebase requested",
+	})
 }
 
 // resolveProvider resolves a provider by name without authorization.

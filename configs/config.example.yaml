@@ -36,6 +36,9 @@ providers:
           - mr:comment:
               require: [ai-reviewed]
               exclude: [do-not-touch]
+          # Trigger a rebase only for review-approved MRs.
+          - mr:rebase:
+              require: [ai-reviewed]
 
       # Read-only access to all other repositories in this group.
       - repositories:

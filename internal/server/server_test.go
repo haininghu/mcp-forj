@@ -29,6 +29,8 @@ type fakeProvider struct {
 	mrs             []provider.MergeRequest
 	notes           []provider.Note
 	added           []string
+	rebaseCalls     int
+	rebaseErr       error
 	listReposCalls  int
 	topics          map[string][]string
 	topicsErr       map[string]error
@@ -97,6 +99,17 @@ func (f *fakeProvider) AddMergeRequestNote(_ context.Context, _ string, _ int64,
 	}
 	f.added = append(f.added, body)
 	return &provider.Note{ID: 1, Body: body, Author: "me", CreatedAt: time.Now()}, nil
+}
+
+func (f *fakeProvider) RebaseMergeRequest(_ context.Context, _ string, _ int64) error {
+	f.rebaseCalls++
+	if f.rebaseErr != nil {
+		return f.rebaseErr
+	}
+	if f.providerErr != nil {
+		return f.providerErr
+	}
+	return nil
 }
 
 func (f *fakeProvider) ReadFile(_ context.Context, _, path, _ string) ([]byte, error) {
@@ -1323,5 +1336,136 @@ func TestTopicsNeverReturned(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func filteredRebaseRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapRebase,
+			Filter: policy.TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+		}},
+	}}
+}
+
+func rebaseArgs() map[string]any {
+	return map[string]any{"provider": "fake", "repo": "team/app", "number": 1}
+}
+
+func TestRebaseMergeRequestAllowed(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if res.IsError {
+		t.Fatalf("rebase_merge_request denied: %s", resultText(t, res))
+	}
+	if fake.rebaseCalls != 1 {
+		t.Errorf("RebaseMergeRequest called %d times, want 1", fake.rebaseCalls)
+	}
+	if !strings.Contains(resultText(t, res), "rebase requested") {
+		t.Errorf("output = %q, want rebase requested status", resultText(t, res))
+	}
+}
+
+func TestRebaseMergeRequestRequiresCapability(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if !res.IsError {
+		t.Fatal("rebase_merge_request succeeded without mr:rebase")
+	}
+	if fake.rebaseCalls != 0 {
+		t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
+	}
+}
+
+func TestRebaseMergeRequestTagFilter(t *testing.T) {
+	t.Run("matching label allows", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed")
+		env := newTestEnv(t, filteredRebaseRules(), fake)
+
+		res := env.call(t, "rebase_merge_request", rebaseArgs())
+		if res.IsError {
+			t.Fatalf("matching label denied: %s", resultText(t, res))
+		}
+		if fake.rebaseCalls != 1 {
+			t.Errorf("RebaseMergeRequest called %d times, want 1", fake.rebaseCalls)
+		}
+	})
+	t.Run("excluded label denies", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed", "do-not-touch")
+		env := newTestEnv(t, filteredRebaseRules(), fake)
+
+		res := env.call(t, "rebase_merge_request", rebaseArgs())
+		if !res.IsError {
+			t.Fatal("excluded label allowed the rebase")
+		}
+		if fake.rebaseCalls != 0 {
+			t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
+		}
+	})
+	t.Run("unknown labels fail closed", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, false, "ai-reviewed")
+		env := newTestEnv(t, filteredRebaseRules(), fake)
+
+		res := env.call(t, "rebase_merge_request", rebaseArgs())
+		if !res.IsError {
+			t.Fatal("unknown labels allowed an active filter")
+		}
+		if fake.rebaseCalls != 0 {
+			t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
+		}
+	})
+}
+
+func TestRebaseMergeRequestMetadataErrorDenies(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = errors.New("metadata unavailable")
+	env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if !res.IsError {
+		t.Fatal("metadata fetch error did not deny the rebase")
+	}
+	if fake.rebaseCalls != 0 {
+		t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
+	}
+}
+
+func TestRebaseMergeRequestProviderErrorIsSafe(t *testing.T) {
+	fake := newFake()
+	fake.rebaseErr = errors.New("403 forbidden secret-detail")
+	env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if !res.IsError {
+		t.Fatal("provider rebase error did not surface as a tool error")
+	}
+	if strings.Contains(resultText(t, res), "secret-detail") {
+		t.Errorf("provider error leaked: %s", resultText(t, res))
+	}
+	if fake.rebaseCalls != 1 {
+		t.Errorf("RebaseMergeRequest called %d times, want 1", fake.rebaseCalls)
+	}
+}
+
+func TestRebaseMergeRequestNoAIDenies(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("result = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	}
+	if fake.rebaseCalls != 0 {
+		t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
 	}
 }

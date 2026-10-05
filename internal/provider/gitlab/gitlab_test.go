@@ -321,3 +321,35 @@ func TestGetRepositoryTopicsNotFound(t *testing.T) {
 		t.Fatalf("error = %v, want provider.ErrNotFound", err)
 	}
 }
+
+func TestRebaseMergeRequestHTTP(t *testing.T) {
+	var gotMethod, gotPath string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusAccepted)
+	}))
+
+	if err := c.RebaseMergeRequest(context.Background(), "team/app", 42); err != nil {
+		t.Fatalf("RebaseMergeRequest: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %s, want PUT", gotMethod)
+	}
+	if !strings.HasSuffix(gotPath, "/merge_requests/42/rebase") {
+		t.Errorf("path = %s, want suffix /merge_requests/42/rebase", gotPath)
+	}
+}
+
+func TestRebaseMergeRequestHTTPError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	err := c.RebaseMergeRequest(context.Background(), "team/app", 42)
+	if err == nil {
+		t.Fatal("RebaseMergeRequest succeeded on 403, want error")
+	}
+	if strings.Contains(err.Error(), "403") || strings.Contains(err.Error(), "Forbidden") {
+		t.Errorf("error leaks raw HTTP detail: %v", err)
+	}
+}

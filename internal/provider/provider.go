@@ -104,6 +104,9 @@ type Provider interface {
 	ListMergeRequestNotes(ctx context.Context, repo string, number int64, opts ListOptions) ([]Note, error)
 	// AddMergeRequestNote creates a note on a merge request.
 	AddMergeRequestNote(ctx context.Context, repo string, number int64, body string) (*Note, error)
+	// RebaseMergeRequest starts an asynchronous rebase of a merge request's
+	// source branch onto its target branch.
+	RebaseMergeRequest(ctx context.Context, repo string, number int64) error
 
 	// ReadFile reads a repository file. An empty ref means the default branch.
 	ReadFile(ctx context.Context, repo, path, ref string) ([]byte, error)

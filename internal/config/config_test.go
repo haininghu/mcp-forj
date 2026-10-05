@@ -720,3 +720,33 @@ providers:
 		t.Fatalf("grant = %+v, want repo:write with require [ai-ok]", grant)
 	}
 }
+
+func TestCapabilityGrantRebaseAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:rebase]
+      - repositories: ["a/c"]
+        effect: allow
+        capabilities:
+          - mr:rebase:
+              require: [ai-reviewed]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected mr:rebase: %v", err)
+	}
+	if got := cfg.Providers[0].Rules[0].Capabilities[0]; got.Name != "mr:rebase" || len(got.Require) != 0 {
+		t.Errorf("plain mr:rebase grant = %+v", got)
+	}
+	filtered := cfg.Providers[0].Rules[1].Capabilities[0]
+	if filtered.Name != "mr:rebase" || len(filtered.Require) != 1 || filtered.Require[0] != "ai-reviewed" {
+		t.Errorf("filtered mr:rebase grant = %+v", filtered)
+	}
+}

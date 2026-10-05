@@ -1,8 +1,17 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.5** (adds tag-scoped repo capabilities via project topics)
+Status: **Draft v0.6** (adds `mr:rebase`)
 Author: orchestrator
-Scope: first iteration (GitLab only; MR metadata + comments + repo listing)
+Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.5
+
+- **W1** Added the `mr:rebase` capability and the `rebase_merge_request` tool. It
+  triggers an asynchronous GitLab rebase of an MR's source branch onto its target
+  branch. `mr:write` stays reserved.
+- **W2** Rebase is a write operation and requires push access on the source branch;
+  the tool fetches MR metadata first as an internal authorization input (fail-closed)
+  and supports MR tag filters like the other MR tools.
 
 ## Changelog vs. v0.4
 
@@ -149,11 +158,12 @@ are rejected — fail closed).
 | `mr:read`    | List and view merge request **metadata** and notes. No diffs. |
 | `mr:diff`    | Read merge request diff content. *(reserved, not in v1)*      |
 | `mr:comment` | Create comments/notes on merge requests.                      |
+| `mr:rebase`  | Trigger an asynchronous merge request rebase.                 |
 | `mr:write`   | Create, update, merge, or close merge requests. *(reserved)*  |
 | `repo:write` | Modify repository content (branches, files, pushes). *(reserved)* |
 
-`repo:list`, `repo:read`, `mr:read`, and `mr:comment` are used by v1 tools. The
-remaining capabilities are defined but unused so the config vocabulary is stable.
+`repo:list`, `repo:read`, `mr:read`, `mr:comment` and `mr:rebase` are used by tools.
+The remaining capabilities are reserved so the config vocabulary is stable.
 
 `repo:list` is granted per pattern and gates **only dynamic discovery** through the
 provider API. Concrete repository paths listed literally in the configuration (no
@@ -380,6 +390,7 @@ output.
 | `get_merge_request`         | `mr:read`¹   | `GetMergeRequest`           |
 | `list_merge_request_notes`  | `mr:read`¹   | `ListMergeRequestNotes`     |
 | `add_merge_request_note`    | `mr:comment`¹| `AddMergeRequestNote`       |
+| `rebase_merge_request`      | `mr:rebase`³ | `RebaseMergeRequest`        |
 | `read_file`                 | `repo:read`² | `ReadFile`                  |
 
 ¹ **Tag filters** (§5) are evaluated against the fetched merge request.
@@ -398,6 +409,16 @@ filter is configured, then evaluates them; a topic-fetch error denies the read
 (fail-closed). `list_repositories` applies an active `repo:list` filter to both
 static and discovered repositories (see below). `repo:write` has no tool, so filters
 on it are accepted but inert.
+
+³ **`rebase_merge_request`** is a **write** operation. It requires the `mr:rebase`
+capability and triggers an **asynchronous** GitLab rebase of the source branch onto
+the target branch; the call returns a `"rebase requested"` acknowledgement and the
+outcome is visible later on the merge request. The provider token must have push
+access to the source branch (GitLab returns 403 otherwise, surfaced as a safe
+provider error). MR **tag filters** apply: the server fetches the MR metadata first
+as an internal authorization input (`Guard.AuthorizeRepoCapability` pre-check →
+`GetMergeRequest` → `Guard.AuthorizeWithTags`), and a metadata-fetch failure denies
+the rebase (fail-closed).
 
 `list_configured_rules` is config-only (no remote call, no secrets) and returns each
 configured rule with its **configured** capabilities, including any tag filters as
@@ -454,6 +475,10 @@ Tool arguments are validated with explicit bounds:
 ## 9. Security Considerations
 
 - **Deny by default**, hardcoded at provider and rule level.
+- **Write operations** are limited to creating MR comments (`mr:comment`) and
+  triggering MR rebases (`mr:rebase`). A rebase is asynchronous and requires push
+  access to the source branch; it is authorized like any other MR operation,
+  including tag filters, and its MR metadata is fetched first (fail-closed).
 - **`.noai` is authoritative** and fail-closed; checked before every **operation**
   via `Guard.Authorize`. It does **not** affect `list_repositories`: listing never
   checks the marker, so a `.noai` repository may appear in a listing. Listing only
@@ -502,8 +527,8 @@ Tool arguments are validated with explicit bounds:
   cfg)` / `Secret.String()` never contains the resolved value. Capability-grant
   parsing: scalar form, compact mapping form (require/exclude), null value, and
   rejection of unknown filter keys, more than one capability key, a tag in both
-  lists, empty tags, duplicate capabilities, filters on `deny` rules, and acceptance
-  of filters on repo capabilities.
+  lists, empty tags, duplicate capabilities, filters on `deny` rules, acceptance of
+  filters on repo capabilities, and acceptance of `mr:rebase` (plain and filtered).
 - `internal/policy`: rule precedence, `*` vs `**` glob matching, default deny,
   capability subset, deny override, `EvaluateWithTags` (require-all, exclude-any,
   fail-closed on unknown tags, zero filter unaffected, repo capabilities),
@@ -512,13 +537,17 @@ Tool arguments are validated with explicit bounds:
 - `internal/policy/noai`: marker present/absent, provider error (always deny).
 - `internal/server`: end-to-end tool calls against a **fake provider** using the
   SDK's in-memory transports; assert allow, capability denial, `.noai` denial, repo
-  listing filtering, argument validation, MR label enforcement, and repo topic
+  listing filtering, argument validation, MR label   enforcement, repo topic
   enforcement (`read_file` allowed/denied on topics, topic-fetch error denies, no
   topic call without a filter; `list_repositories` static and discovered filtering,
-  omitted counting, and `.noai` still denying `read_file` when topics pass).
+  omitted counting, and `.noai` still denying `read_file` when topics pass), and
+  rebase enforcement (allowed with `mr:rebase`, denied without it, tag filter
+  matching/excluded/unknown, metadata-fetch error denies with no rebase call,
+  provider error mapped safely, `.noai` denies).
 - `internal/provider/gitlab`: mapping logic plus `httptest`-based client tests;
   `GetMergeRequest` maps labels (and sets `LabelsKnown`), `ListRepositories` maps
-  topics (and sets `TopicsKnown`), and `GetRepositoryTopics` returns topics / maps 404.
+  topics (and sets `TopicsKnown`), `GetRepositoryTopics` returns topics / maps 404,
+  and `RebaseMergeRequest` issues a `PUT .../rebase` and maps errors.
 
 ### Security-critical tests (mandatory)
 
@@ -558,6 +587,9 @@ Tool arguments are validated with explicit bounds:
     repositories by topic (a static repo with an active filter is omitted on error or
     non-match and counted in `omitted`; a static repo with no filter is returned with
     no call), and `.noai` still denies `read_file` when the topic filter passes.
+14. Rebase: `rebase_merge_request` requires `mr:rebase`; a matching MR label allows,
+    an excluded or unknown label denies, a metadata-fetch error denies without
+    calling the provider, a provider error maps to a safe message, and `.noai` denies.
 
 ## 11. Dependencies
 
@@ -649,3 +681,14 @@ Makefile                        build/test/lint targets
    provider call.
 4. **Fail-closed**: unknown topics (`TopicsKnown=false`) or a topic-fetch error deny
    `read_file` / omit the repository from `list_repositories`.
+
+## 18. Resolved Questions (v0.6)
+
+1. **Rebase capability**: a dedicated `mr:rebase` capability (not `mr:write`) gates
+   `rebase_merge_request`, so a grant to comment cannot implicitly push/rebase.
+2. **Asynchronous**: GitLab rebases asynchronously; the tool acknowledges the request
+   and the outcome appears later on the merge request. The token needs push access to
+   the source branch (403 otherwise).
+3. **Authorization**: the MR metadata is fetched first as an internal authorization
+   input; MR tag filters apply, and a metadata-fetch failure denies the rebase
+   (fail-closed).
