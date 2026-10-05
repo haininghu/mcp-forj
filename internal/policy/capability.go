@@ -47,11 +47,17 @@ func KnownCapabilities() []Capability {
 }
 
 // IsMarkerProtected reports whether the .noai marker restricts capability c.
-// The marker protects only repository file reads (repo:read); all other
-// capabilities, when granted by policy, work on .noai repositories. Extend this
-// function if more capabilities should become marker-protected later.
+// The marker blocks operations on repository contents (repo:read and
+// repo:write); it does not affect merge-request operations (mr:*) or repository
+// listing (repo:list, which is discovery/metadata). Extend this function if more
+// capabilities should become marker-protected later.
 func IsMarkerProtected(c Capability) bool {
-	return c == CapRepoRead
+	switch c {
+	case CapRepoRead, CapRepoWrite:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsKnownCapability reports whether s names a known capability.

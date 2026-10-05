@@ -186,16 +186,36 @@ func TestAuthorizeWithTagsMarkerStillApplies(t *testing.T) {
 	}
 }
 
-func TestMarkerDoesNotProtectOtherCapabilities(t *testing.T) {
+func TestMarkerProtectsOnlyRepoContents(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead, CapMRComment, CapRebase)},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(
+			CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRComment, CapRebase,
+		)},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
 	ctx := context.Background()
-	for _, c := range []Capability{CapMRRead, CapMRComment, CapRebase} {
+
+	// The marker protects repository-content operations.
+	for _, c := range []Capability{CapRepoRead, CapRepoWrite} {
+		if err := g.Authorize(ctx, "fake", "team/app", c); !errors.Is(err, ErrNoAI) {
+			t.Errorf("Authorize(%s) on .noai repo = %v, want ErrNoAI", c, err)
+		}
+	}
+	// It does not affect listing or merge-request operations.
+	for _, c := range []Capability{CapRepoList, CapMRRead, CapMRComment, CapRebase} {
 		if err := g.Authorize(ctx, "fake", "team/app", c); err != nil {
 			t.Errorf("Authorize(%s) on .noai repo = %v, want nil", c, err)
 		}
+	}
+}
+
+func TestMarkerPresentDeniesRepoWrite(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapRepoWrite)},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
+	if err := g.Authorize(context.Background(), "fake", "team/app", CapRepoWrite); !errors.Is(err, ErrNoAI) {
+		t.Fatalf("Authorize(repo:write) on .noai repo = %v, want ErrNoAI", err)
 	}
 }
 

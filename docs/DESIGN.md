@@ -1,8 +1,16 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.7** (`.noai` scoped to `repo:read`; deny rules carry no capabilities)
+Status: **Draft v0.8** (`.noai` protects repository-content operations)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.7
+
+- **Y1** `.noai` protects all operations on repository **contents**: both
+  `repo:read` and `repo:write` (in addition to the existing `read_file` behavior).
+  It still does **not** affect merge-request capabilities (`mr:*`) or repository
+  listing (`repo:list`). This is a forward-looking guarantee: `repo:write` has no
+  tool yet, but a future write tool will be blocked by the marker automatically.
 
 ## Changelog vs. v0.6
 
@@ -90,8 +98,9 @@ Access must be governed by an explicit configuration: for each provider and
 repository it defines **what an agent may do**. Some repositories may only be
 inspected and commented on at the merge-request level, while reading source code or
 changing anything is forbidden. Repositories that contain a `.noai` marker file
-cannot have their **files read** (`repo:read` / `read_file`); merge-request
-operations still follow their granted capabilities.
+cannot have their **contents read or written** (`repo:read` / `repo:write`);
+merge-request operations and repository listing still follow their granted
+capabilities.
 
 The first iteration must stay deliberately small so the direction can change later.
 
@@ -100,7 +109,8 @@ The first iteration must stay deliberately small so the direction can change lat
 - One MCP server exposing tools for common repository/merge-request operations.
 - **Deny-by-default** authorization, driven by a human-readable YAML config.
 - Per-provider, per-repository **capability** grants.
-- Hard, non-overridable block on file reads from repositories containing `.noai`.
+- Hard, non-overridable block on repository-content operations (read/write) for
+  repositories containing `.noai`.
 - A clean provider abstraction so GitHub/Forjo can be added without touching policy
   or server code.
 - Good tests and English documentation.
@@ -310,15 +320,17 @@ capability key are rejected. See §5 for the tag-filter rules.
 
 ### `.noai` guard
 
-The `.noai` marker protects **only repository file reads** (`repo:read` /
-`read_file`). It is independent of and senior to the rules: if the marker file exists
-in the repository, `read_file` is denied regardless of the `repo:read` grant, and it
-cannot be enabled or disabled by rules. Every other capability, when granted by
-policy, works on `.noai` repositories. The set of protected capabilities is
-centralized in `policy.IsMarkerProtected` so it can be extended later.
+The `.noai` marker protects operations on repository **contents**: both
+`repo:read` (`read_file`) and `repo:write` (no tool yet). It is independent of and
+senior to the rules: if the marker file exists in the repository, those operations
+are denied regardless of the grant, and it cannot be enabled or disabled by rules.
+It does **not** affect merge-request capabilities (`mr:*`) or repository listing
+(`repo:list`, which is discovery/metadata); those work on `.noai` repositories when
+granted by policy. The set of protected capabilities is centralized in
+`policy.IsMarkerProtected`.
 
-For v1 there is **no cache** — the marker is checked on every `repo:read` operation.
-If the check fails for any reason, `read_file` is denied (fail-closed).
+For v1 there is **no cache** — the marker is checked on every content operation. If
+the check fails for any reason, the operation is denied (fail-closed).
 
 The marker is checked at the repository's **default branch** (HEAD), using the
 server's own token via a dedicated provider call (`FileExists`). This is a
@@ -498,12 +510,12 @@ Tool arguments are validated with explicit bounds:
   triggering MR rebases (`mr:rebase`). A rebase is asynchronous and requires push
   access to the source branch; it is authorized like any other MR operation,
   including tag filters, and its MR metadata is fetched first (fail-closed).
-- **`.noai` protects only file reads.** It is authoritative and fail-closed for
-  `repo:read`: `read_file` checks the marker via `Guard.AuthorizeWithTags` and is
-  denied if it is present or the check fails. It does **not** affect any other
-  capability: merge-request operations (including `mr:read`, `mr:comment`,
-  `mr:rebase`) and `list_repositories` work on `.noai` repositories when granted by
-  policy. `IsMarkerProtected` is the single place that defines this.
+- **`.noai` protects repository contents.** It is authoritative and fail-closed for
+  `repo:read` and `repo:write`: `read_file` (and any future content-write tool)
+  checks the marker via `Guard.AuthorizeWithTags` and is denied if it is present or
+  the check fails. It does **not** affect `repo:list` or any merge-request capability
+  (`mr:read`, `mr:comment`, `mr:rebase`); those work on `.noai` repositories when
+  granted by policy. `IsMarkerProtected` is the single place that defines this.
 - **Tags are an authorization input only.** Tag filters (§5) are evaluated against
   merge request labels or project topics fetched per operation; neither labels nor
   topics are cached or returned in tool output (the server's JSON output structs
@@ -555,8 +567,9 @@ Tool arguments are validated with explicit bounds:
   fail-closed on unknown tags, zero filter unaffected, repo capabilities),
   `CapabilityGranted` semantics, `HasTagFilter` (true only for a matched allow grant
   with a non-zero filter), and `GrantsAnywhere` with filters.
-- `internal/policy/noai`: `.noai` present/absent and provider error deny
-  `repo:read` (fail-closed), while `mr:read`/`mr:comment`/`mr:rebase` are unaffected.
+- `internal/policy/noai`: `.noai` present/absent and provider error deny the
+  content capabilities `repo:read` and `repo:write` (fail-closed), while
+  `repo:list` and `mr:read`/`mr:comment`/`mr:rebase` are unaffected.
 - `internal/server`: end-to-end tool calls against a **fake provider** using the
   SDK's in-memory transports; assert allow, capability denial, `.noai` denial of
   `read_file` only (MR tools succeed on `.noai` repos), repo listing filtering,
@@ -574,9 +587,10 @@ Tool arguments are validated with explicit bounds:
 
 ### Security-critical tests (mandatory)
 
-1. `.noai` present → `read_file` denies even with `repo:read`; every other tool
-   (MR operations, listing) succeeds with its capability.
-2. `.noai` check error → `read_file` denies (fail-closed); other tools are
+1. `.noai` present → repository-content operations (`repo:read`, and `repo:write`
+   at the guard level) deny even with the grant; every other tool (MR operations,
+   `repo:list`) succeeds with its capability.
+2. `.noai` check error → content operations deny (fail-closed); other tools are
    unaffected.
 3. `add_merge_request_note` without `mr:comment` → deny; `read_file` without
    `repo:read` → deny.
@@ -721,11 +735,20 @@ Makefile                        build/test/lint targets
 
 ## 19. Resolved Questions (v0.7)
 
-1. **`.noai` scope**: the marker protects only `repo:read` (`read_file`).
-   `IsMarkerProtected` is the single source of truth. All other capabilities,
-   including MR reads/comments/rebase and repository listing, work on `.noai`
-   repositories when granted by policy. The marker check stays fail-closed for
-   `read_file`.
+1. **`.noai` scope** (superseded by v0.8): v0.7 restricted the marker to
+   `repo:read`; v0.8 extends it to both repository-content operations
+   (`repo:read` and `repo:write`).
 2. **Deny rules**: `deny` rules must not list `capabilities` at all; a `deny` rule
    only hides the matching repositories. Capabilities on deny rules (plain or
    filtered) are rejected at config load.
+
+## 20. Resolved Questions (v0.8)
+
+1. **`.noai` scope**: the marker protects repository-content operations
+   (`repo:read`, `repo:write`); `IsMarkerProtected` is the single source of truth.
+   It does **not** affect `repo:list` (discovery/metadata) or merge-request
+   capabilities (`mr:read`, `mr:comment`, `mr:rebase`), which work on `.noai`
+   repositories when granted. The marker check stays fail-closed for content
+   operations.
+2. **Forward-looking**: `repo:write` has no tool yet; the guard already enforces
+   the marker for it so a future write tool inherits the protection automatically.

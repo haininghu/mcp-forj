@@ -8,10 +8,11 @@ server:
   name: mcp-forj
   log_level: info          # debug | info | warn | error
   noai:
-    marker_file: .noai     # repository marker that blocks repository file reads
-    # The marker protects ONLY read_file (repo:read). Merge-request operations
-    # follow their own capabilities and still work on .noai repositories.
-    # The marker is checked on every read_file (fail-closed, no caching).
+    marker_file: .noai     # repository marker that blocks content read/write
+    # The marker protects operations on repository CONTENTS (repo:read and
+    # repo:write). Merge-request operations (mr:*) and repository listing
+    # (repo:list) follow their own capabilities and still work on .noai repos.
+    # The marker is checked on every content operation (fail-closed, no caching).
     # The provider token below MUST be able to read repository files on the
     # default branch, otherwise read_file is denied.
 
