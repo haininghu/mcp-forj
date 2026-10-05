@@ -1,24 +1,24 @@
 # mcp-forj
 
-A policy-governed [Model Context Protocol](https://modelcontextprotocol.io) server
-that gives AI agents controlled access to code hosting providers.
+A policy-governed [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents
+controlled access to code hosting providers. The first iteration supports **GitLab** (multiple instances);
+GitHub and the internal "Forjo" system are planned and already accounted for by the provider abstraction.
 
-The first iteration supports **GitLab** (multiple instances) with read and
-merge-request-comment tools. GitHub and the internal "Forjo" system are planned and
-are already accounted for by the provider abstraction.
-
-Access is **deny-by-default** and configured per provider and repository.
-Repositories containing a `.noai` marker file cannot have their contents read or
-written (`repo:read` / `repo:write`); merge-request operations and repository
-listing follow their own capabilities.
+Access is **deny-by-default** and configured per provider and repository. Repositories containing a `.noai`
+marker file cannot have their contents read or written; merge-request operations and repository listing
+follow their own capabilities.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design and
-[`configs/config.example.yaml`](configs/config.example.yaml) for a documented
-configuration.
+[`configs/config.example.yaml`](configs/config.example.yaml) for a documented configuration.
 
 ## Status
 
 Early first draft. The API and configuration format may still change.
+
+## Requirements
+
+- Go 1.27+
+- A GitLab token with the required permissions (see [GitLab token permissions](#gitlab-token-permissions))
 
 ## Build
 
@@ -28,8 +28,6 @@ make test         # run the test suite
 make cover        # coverage report
 ```
 
-Requires Go 1.27+.
-
 ## Run
 
 ```bash
@@ -38,127 +36,172 @@ export GITLAB_WORK_TOKEN="<your-token>"
 ./bin/mcp-forj -config configs/config.yaml
 ```
 
-The server speaks MCP over stdio. Point your MCP client at the binary.
+The server speaks MCP over stdio; all logging goes to stderr. `-config` defaults to `configs/config.yaml`,
+and the `MCP_FORJ_CONFIG` environment variable overrides that default path.
+
+### Use with opencode
+
+Register the server as a local MCP server in `opencode.json` (absolute paths are recommended):
+
+```json
+{
+  "mcp": {
+    "mcp-forj": {
+      "type": "local",
+      "command": ["/path/to/bin/mcp-forj", "-config", "/path/to/configs/config.yaml"],
+      "enabled": true,
+      "environment": { "GITLAB_WORK_TOKEN": "{env:GITLAB_WORK_TOKEN}" }
+    }
+  }
+}
+```
+
+opencode loads its configuration once at startup, so restart it after editing.
 
 ## Tools
 
-| Tool                       | Required capability | Description                                  |
-|----------------------------|---------------------|----------------------------------------------|
-| `list_configured_rules`    | –                   | List configured rules and capabilities.      |
-| `list_repositories`        | – (`repo:list`¹)    | List configured repos, plus discovered ones. |
-| `list_merge_requests`      | `mr:read`           | List merge requests.                         |
-| `get_merge_request`        | `mr:read`           | Fetch one merge request.                     |
-| `list_merge_request_notes` | `mr:read`           | List comments on a merge request.            |
-| `get_merge_request_diff`   | `mr:diff`           | Fetch the file diffs of a merge request.     |
-| `add_merge_request_note`   | `mr:comment`        | Comment on a merge request.                  |
-| `rebase_merge_request`     | `mr:rebase`         | Trigger an asynchronous MR rebase.           |
-| `read_file`                | `repo:read`         | Read a repository file.                      |
+| Tool                       | Capability    | Description                                     |
+|----------------------------|---------------|-------------------------------------------------|
+| `list_configured_rules`    | –             | List configured rules and capabilities.         |
+| `list_repositories`        | see below     | List configured repositories, plus discovered.  |
+| `list_merge_requests`      | `mr:read`     | List merge requests (metadata only, no diffs).  |
+| `get_merge_request`        | `mr:read`     | Fetch one merge request.                        |
+| `list_merge_request_notes` | `mr:read`¹    | List comments on a merge request.               |
+| `get_merge_request_diff`   | `mr:diff`     | Fetch the file diffs of a merge request.        |
+| `add_merge_request_note`   | `mr:comment`¹ | Comment on a merge request.                     |
+| `rebase_merge_request`     | `mr:rebase`   | Trigger an asynchronous merge request rebase.   |
+| `read_file`                | `repo:read`   | Read a repository file at an optional ref.      |
+
+¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
+[GitLab token permissions](#gitlab-token-permissions).
+
+## Capabilities
+
+- `repo:list` – discover repositories through the provider API.
+- `repo:read` – read repository files.
+- `mr:read` – view merge request metadata and notes (no diffs).
+- `mr:diff` – read merge request file diffs (`get_merge_request_diff`).
+- `mr:comment` – comment on merge requests.
+- `mr:rebase` – trigger an asynchronous merge request rebase.
+- `mr:write` – reserved (create/update/merge merge requests).
+- `repo:write` – reserved.
 
 ## Configuration
 
-See `configs/config.example.yaml`. Capabilities:
+Rules are evaluated in order and the **first match wins**; put specific rules before broad ones. A rule
+with `effect: allow` grants only the capabilities it lists (everything else is denied); a rule with
+`effect: deny` denies the matched repositories entirely and must not list `capabilities`. If no rule
+matches, access is denied.
 
-- `repo:list` – discover repositories through the provider API. Repositories listed
-  literally in the config are always returned even without this capability.
-- `repo:read` – read repository files.
-- `mr:read` – view merge request metadata and notes (no diffs).
-- `mr:comment` – comment on merge requests.
-- `mr:rebase` – trigger an asynchronous rebase of a merge request.
-- `mr:diff` – read merge request file diffs (`get_merge_request_diff`);
-  separately grantable and tag-filterable; not `.noai`-protected.
-- `mr:write` – reserved (creating/updating/merging MRs).
-- `repo:write` – reserved.
-
-`deny` rules must not list `capabilities`; a deny rule simply hides the matching
-repositories (config load rejects capabilities on deny rules).
-
-¹ `list_repositories` returns concrete repositories listed literally in the
-configuration (unless a `deny` rule hides them) and needs no capability for that.
-The `repo:list` capability additionally allows discovery of repositories matching
-glob patterns through the provider API; without it only the configured repositories
-are returned and the call still succeeds. Exception: if the matched allow rule
-carries an active `repo:list` topic filter, that filter also applies to the literal
-config repositories — their topics are fetched and they may be omitted (counted in
-`omitted`) on error or non-match. Without such a filter, literal repositories are
-returned with no provider API call. The `limit` argument bounds only the discovered
-repositories (default 100, capped at 1000); static repositories are always returned
-and may push the total above `limit`. When `search` is omitted, search prefixes are
-derived from the `repo:list` rule patterns (e.g. `devops/platform/**` →
-`devops/platform`), so glob patterns find their namespaces. Each prefix is looked up
-group-first via `GET /groups/:id/projects?include_subgroups=true` (which works for
-fine-grained/group-scoped tokens), falling back to the `/projects` search with
-`search_namespaces=true` when the term is not a group; an explicit `search` is passed
-through verbatim.
-Discovery scope is controlled by the provider's `project_scope`: `accessible`
-(default, all projects the token can see) or `membership`. Listing does not check the
-`.noai` marker, so a `.noai` repository may appear in a listing; the marker only
-blocks repository-content operations (read/write), not merge-request operations or
-listing.
+```yaml
+providers:
+  - name: gitlab-work
+    type: gitlab
+    base_url: https://gitlab.example.com
+    token: "${GITLAB_WORK_TOKEN}"   # literal or ${NAME} env reference
+    project_scope: accessible       # accessible (default) | membership
+    rules:
+      - repositories: ["devops/components/*", "devops/tooling/*"]
+        effect: allow
+        capabilities:
+          - mr:read
+          - mr:rebase
+          - mr:diff:
+              require: [renovate]
+          - repo:list
+          - repo:read:
+              paths:
+                include: ["pom.xml", "go.mod", "package.json", "Dockerfile"]
+      - repositories: ["legacy/**"]
+        effect: deny
+```
 
 ### Capability filters
 
-Any capability may optionally carry a filter, written as a single-key mapping in the
-`capabilities` list. For MR capabilities the tags are GitLab MR **labels**; for repo
-capabilities they are project **topics**. `repo:read`/`repo:write` may also carry
-**path globs** matched against the repository-relative file path:
+Any capability may carry a filter, written as a single-key mapping in the `capabilities` list. For merge
+request capabilities the tags are GitLab MR **labels**; for repository capabilities they are project
+**topics**. `repo:read` and `repo:write` may additionally restrict **file paths** with doublestar globs:
 
 ```yaml
 capabilities:
   - mr:read
   - mr:comment:
-      require: [ai-reviewed]      # MR must have ALL of these labels
-      exclude: [do-not-touch]     # MR must have NONE of these labels
+      require: [ai-reviewed]        # MR must have ALL of these labels
+      exclude: [do-not-touch]       # MR must have NONE of these labels
   - repo:list:
-      require: [ai-ok]            # project must have this topic
+      require: [ai-ok]              # project must have this topic
   - repo:read:
-      exclude: [confidential]     # project must not have this topic
-      paths:                      # nested path filter (repo:read/repo:write)
-        include: ["docs/**", "*.md"]        # path must match one
+      exclude: [confidential]       # project must not have this topic
+      paths:
+        include: ["docs/**", "*.md"]           # path must match at least one
         exclude: ["**/.env", "**/secrets/**"]  # path must match none
 ```
 
-Tags are matched by exact, case-sensitive equality. Path globs are doublestar and
-case-sensitive (`*.md` is root-level only; `**/*.md` is any depth). An empty
-`paths.include` allows all paths; `paths.exclude` wins over `paths.include`; an
-active path filter with an empty path fails closed. Tags and paths combine (both must
-pass). Whenever required information cannot be determined, the decision fails closed.
+Tags are matched by exact, case-sensitive equality. Path globs are case-sensitive (`*.md` is root-level
+only, `**/*.md` matches at any depth). An empty `paths.include` allows all paths; `paths.exclude` wins
+over `paths.include`; an active path filter with an empty path fails closed. Tags and paths combine (both
+must pass). Whenever required information cannot be determined, the decision fails closed.
 
-Limitations:
+### Repository listing
 
-- MR filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
-  `mr:read`), `add_merge_request_note` (`mr:comment`) and `rebase_merge_request`
-  (`mr:rebase`); these tools fetch the merge request metadata to evaluate labels.
-  `list_merge_requests` enforces an active `mr:read` filter client-side from the
-  labels returned by the list endpoint: non-matching or unknown-label MRs are omitted
-  and counted in `omitted`.
-- `rebase_merge_request` is a write operation: it triggers an **asynchronous** rebase
-  and requires write access (write scope, MR Update permission, or a sufficient
-  project role). The outcome appears later via `get_merge_request`
-  (`rebase_in_progress`, `merge_error`, `has_conflicts`, `detailed_merge_status`). A
-  missing permission surfaces as an actionable "forbidden" message; a non-rebaseable
-  MR surfaces as "not in a rebaseable state". The server fetches MR metadata for
-  authorization before requesting the rebase (fail-closed).
-- Repo filters are enforced on `read_file` (`repo:read`) and `list_repositories`
-  (`repo:list`) using project topics. A `repo:read` filter fetches topics before
-  reading. A `repo:list` filter also applies to repositories listed literally in the
-  config; when a literal repo has an active `repo:list` filter its topics are fetched
-  and it is omitted on error or non-match. Literal repos with **no** active filter
-  are returned without any provider call. `repo:write` has no tool; filters there are
-  accepted but inert.
-- No caching and no glob/regex matching; topics come from `ListProjects`.
+`list_repositories` returns concrete repositories listed **literally** in the configuration without any
+capability or provider call, unless a `deny` rule hides them. The `repo:list` capability additionally
+enables discovery of repositories matching glob patterns through the provider API.
 
-The `token` field accepts either a literal secret or `${NAME}` references expanded
-from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is
-never logged. It must be able to read repository files on the default branch so the
-`.noai` check works; otherwise repository-content operations are denied
-(fail-closed). A token lacking that read access (fine-grained Repository: Read, or a
-classic token without read_api/api, or a project outside scope) yields a "forbidden"
-marker-check message naming repository read access and scope, including the numeric
-HTTP status. Provider errors surface their HTTP status too, and a forbidden error
-names the resource permission the operation needs (for example MR comments need
-Work Item: Create, rebase needs Merge Request: Update). Merge-request operations and
-repository listing are not affected by `.noai`.
+- Discovery derives search prefixes from the `repo:list` patterns (for example `devops/platform/**` →
+  `devops/platform`). Each prefix is tried **group-first** with
+  `GET /groups/:id/projects?include_subgroups=true` (which works for group-scoped fine-grained tokens),
+  falling back to the `/projects` search with `search_namespaces=true` when the term is not a group. An
+  explicit `search` argument is passed through verbatim.
+- `project_scope` controls breadth: `accessible` (default, all projects the token can see) or `membership`.
+- The `limit` argument bounds only discovered repositories (default 100, capped at 1000); literal
+  repositories are always returned. Results are deduplicated and sorted, and report `omitted` and
+  `truncated`.
+- Listing never checks the `.noai` marker, so a `.noai` repository may appear. An active `repo:list` topic
+  filter also applies to literal config repositories (their topics are fetched, fail-closed).
+
+### `.noai` marker
+
+The `.noai` file is checked on the repository default branch before any **repository-content** operation:
+`repo:read` (`read_file`) and `repo:write`. A marker check failure fails closed. The marker does **not**
+affect merge-request operations or `list_repositories`/`list_configured_rules`.
+
+## GitLab token permissions
+
+The token is read from the config `token` value (a literal or `${NAME}`). The resolved secret is never
+logged or returned. The config is git-ignored, so a real config with a literal token is not committed.
+
+Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **groups/projects** under
+"Group and project access", then grant the permissions for the operations you enable:
+
+| Capability / tool                     | Fine-grained permission                                     |
+|---------------------------------------|-------------------------------------------------------------|
+| `list_repositories` (`repo:list`)     | **Project: Read**                                           |
+| `read_file` (`repo:read`, `.noai`)    | **Repository: Read**                                        |
+| `mr:read` (list/get)                  | **Merge Request: Read**                                     |
+| `get_merge_request_diff` (`mr:diff`)  | **Merge Request: Read**                                     |
+| `rebase_merge_request` (`mr:rebase`)  | **Merge Request: Update** (+ role that can push to source)  |
+| `list_merge_request_notes`            | **Work Item: Read** (+ Merge Request: Read)                 |
+| `add_merge_request_note`              | **Work Item: Create** (+ Merge Request: Read)               |
+| `repo:write` (reserved)               | Repository: Create/Update/Delete                            |
+| `mr:write` (reserved)                 | Merge Request: Create/Update/Delete                         |
+
+Classic tokens: use the `api` scope (read+write) or `read_api` (read only). A rebase also needs at least
+the **Developer** role (push access to the source branch). The repository-files endpoint requires a `ref`;
+the server sends `HEAD` (default branch) when no ref is given.
+
+## Limitations
+
+- `list_merge_requests` enforces an active `mr:read` filter client-side from the labels returned by the
+  list endpoint; non-matching or unknown-label merge requests are omitted and counted in `omitted`.
+- `rebase_merge_request` triggers an **asynchronous** rebase. The outcome appears later via
+  `get_merge_request` (`rebase_in_progress`, `merge_error`, `has_conflicts`, `detailed_merge_status`). A
+  missing permission surfaces as a "forbidden" message naming the required permission; a non-rebaseable
+  merge request surfaces as "not in a rebaseable state".
+- No caching: labels, topics and markers are fetched on every operation.
+- `mr:diff` is not `.noai`-protected; diffs are repository content but follow their own capability.
+- `repo:write`/`mr:write` are reserved; only the capabilities listed above have tools.
 
 ## License
 
-TBD.
+[LICENSE](LICENSE) (MIT).
