@@ -3,6 +3,7 @@ package gitlab
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -159,14 +160,18 @@ func TestGetMergeRequestHTTP(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"iid":           42,
-			"title":         "Add feature",
-			"state":         "opened",
-			"source_branch": "feat",
-			"target_branch": "main",
-			"web_url":       "https://example.com/mr/42",
-			"author":        map[string]any{"username": "alice"},
-			"labels":        []string{"ai-reviewed", "backend"},
+			"iid":                   42,
+			"title":                 "Add feature",
+			"state":                 "opened",
+			"source_branch":         "feat",
+			"target_branch":         "main",
+			"web_url":               "https://example.com/mr/42",
+			"author":                map[string]any{"username": "alice"},
+			"labels":                []string{"ai-reviewed", "backend"},
+			"merge_error":           "rebase failed",
+			"rebase_in_progress":    true,
+			"has_conflicts":         true,
+			"detailed_merge_status": "conflict",
 		})
 	}))
 
@@ -183,6 +188,41 @@ func TestGetMergeRequestHTTP(t *testing.T) {
 	if !reflect.DeepEqual(mr.Labels, []string{"ai-reviewed", "backend"}) {
 		t.Errorf("Labels = %v, want [ai-reviewed backend]", mr.Labels)
 	}
+	if mr.MergeError != "rebase failed" || !mr.RebaseInProgress || !mr.HasConflicts || mr.DetailedMergeStatus != "conflict" {
+		t.Errorf("rebase/merge status not mapped: %+v", mr)
+	}
+}
+
+func TestMapErrorStatusMapping(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{"401 unauthorized", http.StatusUnauthorized, provider.ErrForbidden},
+		{"403 forbidden", http.StatusForbidden, provider.ErrForbidden},
+		{"400 bad request", http.StatusBadRequest, provider.ErrInvalidState},
+		{"405 method not allowed", http.StatusMethodNotAllowed, provider.ErrInvalidState},
+		{"409 conflict", http.StatusConflict, provider.ErrInvalidState},
+		{"404 not found", http.StatusNotFound, provider.ErrNotFound},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &gitlab.ErrorResponse{Response: &http.Response{StatusCode: tt.status}}
+			if got := mapError(err); !errors.Is(got, tt.want) {
+				t.Errorf("mapError(%d) = %v, want %v", tt.status, got, tt.want)
+			}
+		})
+	}
+	t.Run("500 generic", func(t *testing.T) {
+		err := &gitlab.ErrorResponse{Response: &http.Response{StatusCode: http.StatusInternalServerError}}
+		got := mapError(err)
+		for _, sentinel := range []error{provider.ErrNotFound, provider.ErrForbidden, provider.ErrInvalidState} {
+			if errors.Is(got, sentinel) {
+				t.Errorf("mapError(500) = %v, unexpectedly matches %v", got, sentinel)
+			}
+		}
+	})
 }
 
 func TestGetMergeRequestNotFoundHTTP(t *testing.T) {

@@ -114,8 +114,11 @@ Limitations:
   labels returned by the list endpoint: non-matching or unknown-label MRs are omitted
   and counted in `omitted`.
 - `rebase_merge_request` is a write operation: it triggers an **asynchronous** rebase
-  (the outcome appears later on the merge request) and requires push access to the
-  source branch. The token must have that access; the server fetches MR metadata for
+  and requires write access (write scope, MR Update permission, or a sufficient
+  project role). The outcome appears later via `get_merge_request`
+  (`rebase_in_progress`, `merge_error`, `has_conflicts`, `detailed_merge_status`). A
+  missing permission surfaces as an actionable "forbidden" message; a non-rebaseable
+  MR surfaces as "not in a rebaseable state". The server fetches MR metadata for
   authorization before requesting the rebase (fail-closed).
 - Repo filters are enforced on `read_file` (`repo:read`) and `list_repositories`
   (`repo:list`) using project topics. A `repo:read` filter fetches topics before

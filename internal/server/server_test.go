@@ -1576,3 +1576,42 @@ func TestRebaseMergeRequestAllowedOnNoAIRepo(t *testing.T) {
 		t.Errorf("RebaseMergeRequest called %d times, want 1", fake.rebaseCalls)
 	}
 }
+
+func TestRebaseMergeRequestForbiddenMessage(t *testing.T) {
+	fake := newFake()
+	fake.rebaseErr = provider.ErrForbidden
+	env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if !res.IsError {
+		t.Fatal("forbidden rebase did not surface as a tool error")
+	}
+	text := strings.ToLower(resultText(t, res))
+	if !strings.Contains(text, "forbidden") || !strings.Contains(text, "permission") {
+		t.Errorf("error = %q, want an actionable forbidden/permission message", resultText(t, res))
+	}
+}
+
+func TestGetMergeRequestExposesRebaseStatus(t *testing.T) {
+	fake := newFake()
+	fake.mrs[0].MergeError = "rebase failed"
+	fake.mrs[0].RebaseInProgress = true
+	fake.mrs[0].HasConflicts = true
+	fake.mrs[0].DetailedMergeStatus = "conflict"
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if res.IsError {
+		t.Fatalf("get_merge_request: %s", resultText(t, res))
+	}
+	var out mergeRequestJSON
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !out.RebaseInProgress || out.MergeError != "rebase failed" || !out.HasConflicts || out.DetailedMergeStatus != "conflict" {
+		t.Errorf("rebase status not exposed: %+v", out)
+	}
+	if strings.Contains(strings.ToLower(resultText(t, res)), "label") {
+		t.Errorf("labels leaked in output: %s", resultText(t, res))
+	}
+}

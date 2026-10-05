@@ -141,6 +141,8 @@ func (c *Client) GetMergeRequest(ctx context.Context, repo string, number int64)
 		return nil, mapError(err)
 	}
 	out := mapBasicMergeRequest(&mr.BasicMergeRequest)
+	out.MergeError = mr.MergeError
+	out.RebaseInProgress = mr.RebaseInProgress
 	return &out, nil
 }
 
@@ -230,15 +232,17 @@ func decodeFile(file *gitlab.File) ([]byte, error) {
 // `null`/absent yields nil), so unknown labels still fail closed.
 func mapBasicMergeRequest(m *gitlab.BasicMergeRequest) provider.MergeRequest {
 	out := provider.MergeRequest{
-		Number:       m.IID,
-		Title:        m.Title,
-		Description:  m.Description,
-		State:        m.State,
-		SourceBranch: m.SourceBranch,
-		TargetBranch: m.TargetBranch,
-		WebURL:       m.WebURL,
-		Labels:       append([]string(nil), m.Labels...),
-		LabelsKnown:  m.Labels != nil,
+		Number:              m.IID,
+		Title:               m.Title,
+		Description:         m.Description,
+		State:               m.State,
+		SourceBranch:        m.SourceBranch,
+		TargetBranch:        m.TargetBranch,
+		WebURL:              m.WebURL,
+		Labels:              append([]string(nil), m.Labels...),
+		LabelsKnown:         m.Labels != nil,
+		HasConflicts:        m.HasConflicts,
+		DetailedMergeStatus: m.DetailedMergeStatus,
 	}
 	if m.Author != nil {
 		out.Author = m.Author.Username
@@ -263,8 +267,16 @@ func isNotFound(err error) bool {
 }
 
 func mapError(err error) error {
-	if isNotFound(err) {
+	switch {
+	case isNotFound(err):
 		return provider.ErrNotFound
+	case gitlab.HasStatusCode(err, http.StatusUnauthorized), gitlab.HasStatusCode(err, http.StatusForbidden):
+		return provider.ErrForbidden
+	case gitlab.HasStatusCode(err, http.StatusBadRequest),
+		gitlab.HasStatusCode(err, http.StatusMethodNotAllowed),
+		gitlab.HasStatusCode(err, http.StatusConflict):
+		return provider.ErrInvalidState
+	default:
+		return errors.New("gitlab: request failed")
 	}
-	return errors.New("gitlab: request failed")
 }

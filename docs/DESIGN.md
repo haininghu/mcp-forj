@@ -1,8 +1,19 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.9** (`list_merge_requests` enforces label filters client-side)
+Status: **Draft v0.10** (status-based provider errors; MR rebase status exposed)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing + rebase)
+
+## Changelog vs. v0.9
+
+- **AA1** Provider errors are mapped to safe, **status-based** sentinels:
+  `ErrForbidden` (401/403), `ErrInvalidState` (400/405/409), `ErrNotFound` (404).
+  The server turns these into actionable messages instead of a generic
+  "provider request failed", so a missing scope/role (403) or a non-rebaseable MR
+  (405/409) is distinguishable. Raw response bodies are never surfaced.
+- **AA2** `get_merge_request` now exposes `rebase_in_progress`, `merge_error`,
+  `has_conflicts` and `detailed_merge_status` (the rebase outcome). Labels are still
+  never returned.
 
 ## Changelog vs. v0.8
 
@@ -454,12 +465,21 @@ on it are accepted but inert.
 ³ **`rebase_merge_request`** is a **write** operation. It requires the `mr:rebase`
 capability and triggers an **asynchronous** GitLab rebase of the source branch onto
 the target branch; the call returns a `"rebase requested"` acknowledgement and the
-outcome is visible later on the merge request. The provider token must have push
-access to the source branch (GitLab returns 403 otherwise, surfaced as a safe
-provider error). MR **tag filters** apply: the server fetches the MR metadata first
-as an internal authorization input (`Guard.AuthorizeRepoCapability` pre-check →
-`GetMergeRequest` → `Guard.AuthorizeWithTags`), and a metadata-fetch failure denies
-the rebase (fail-closed).
+outcome is visible later via `get_merge_request` (`merge_error`,
+`rebase_in_progress`, `has_conflicts`, `detailed_merge_status`). The provider token
+must have write access (write scope, MR Update permission, or a sufficient project
+role); a 401/403 is surfaced as an actionable forbidden message. MR **tag filters**
+apply: the server fetches the MR metadata first as an internal authorization input
+(`Guard.AuthorizeRepoCapability` pre-check → `GetMergeRequest` →
+`Guard.AuthorizeWithTags`), and a metadata-fetch failure denies the rebase
+(fail-closed).
+
+**Provider errors** are mapped to safe, status-based messages and never include raw
+response bodies: 401/403 → "forbidden: the provider token lacks the required
+permission …", 400/405/409 → "the merge request is not in a rebaseable state",
+404 → "not found", anything else → a generic "provider request failed".
+`get_merge_request` returns the MR metadata including `rebase_in_progress`,
+`merge_error`, `has_conflicts` and `detailed_merge_status`; it never returns labels.
 
 `list_configured_rules` is config-only (no remote call, no secrets) and returns each
 configured rule with its **configured** capabilities, including any tag filters as
@@ -558,8 +578,10 @@ Tool arguments are validated with explicit bounds:
 - **Audit logging**: every authorization decision is logged with structured fields
   (`provider`, `repo`, `capability`, `decision`, `reason`). The `.noai` check result
   is logged as well. Logs never contain tokens or full request bodies.
-- **Error hygiene**: provider errors are mapped to safe messages; raw HTTP bodies
-  are not leaked to the MCP client.
+- **Error hygiene**: provider errors are mapped to safe, status-based messages
+  (401/403 forbidden, 400/405/409 invalid state, 404 not found); raw HTTP bodies are
+  never leaked to the MCP client. Actionable diagnostics (e.g. a missing scope or
+  role) come from these status classes, not from response content.
 
 ## 10. Testing Strategy
 
@@ -587,14 +609,18 @@ Tool arguments are validated with explicit bounds:
   argument validation, MR label enforcement, repo topic enforcement (`read_file`
   allowed/denied on topics, topic-fetch error denies, no topic call without a filter;
   `list_repositories` static and discovered filtering, omitted counting, and `.noai`
-  still denying `read_file` when topics pass), and rebase enforcement (allowed with
+  still denying `read_file` when topics pass), rebase enforcement (allowed with
   `mr:rebase`, denied without it, tag filter matching/excluded/unknown, metadata-fetch
-  error denies with no rebase call, provider error mapped safely, rebase allowed on a
-  `.noai` repo).
+  error denies with no rebase call, `ErrForbidden` yields an actionable message,
+  rebase allowed on a `.noai` repo), and `get_merge_request` exposing
+  `rebase_in_progress`/`merge_error`/`has_conflicts`/`detailed_merge_status` without
+  labels.
 - `internal/provider/gitlab`: mapping logic plus `httptest`-based client tests;
-  `GetMergeRequest` maps labels (and sets `LabelsKnown`), `ListRepositories` maps
-  topics (and sets `TopicsKnown`), `GetRepositoryTopics` returns topics / maps 404,
-  and `RebaseMergeRequest` issues a `PUT .../rebase` and maps errors.
+  `GetMergeRequest` maps labels (and sets `LabelsKnown`) and the rebase/merge status
+  fields, `ListRepositories` maps topics (and sets `TopicsKnown`),
+  `GetRepositoryTopics` returns topics / maps 404, `RebaseMergeRequest` issues a
+  `PUT .../rebase`, and `mapError` maps 401/403 → `ErrForbidden`, 400/405/409 →
+  `ErrInvalidState`, 404 → `ErrNotFound`, else generic.
 
 ### Security-critical tests (mandatory)
 
@@ -643,6 +669,10 @@ Tool arguments are validated with explicit bounds:
     an excluded or unknown label denies, a metadata-fetch error denies without
     calling the provider, a provider error maps to a safe message, and `.noai` does
     **not** block it.
+15. Diagnostics: `mapError` maps HTTP 401/403 → `ErrForbidden`, 400/405/409 →
+    `ErrInvalidState`, 404 → `ErrNotFound` (errors.Is, no raw bodies); the server
+    returns actionable messages for these and `get_merge_request` exposes
+    `rebase_in_progress`/`merge_error`/`has_conflicts`/`detailed_merge_status`.
 
 ## 11. Dependencies
 
@@ -773,3 +803,12 @@ Makefile                        build/test/lint targets
    `omitted` for MRs that matched a rule but were filtered out or had unknown labels.
 2. **Fail-closed on unknown labels**: a MR whose `labels` field is absent or `null`
    has `LabelsKnown=false`; under an active filter it is omitted (and counted).
+
+## 22. Resolved Questions (v0.10)
+
+1. **Status-based errors**: providers map HTTP status to sentinels
+   (`ErrForbidden` 401/403, `ErrInvalidState` 400/405/409, `ErrNotFound` 404). The
+   server maps these to safe, actionable messages; raw bodies are never surfaced.
+2. **Rebase status**: `get_merge_request` exposes `rebase_in_progress`,
+   `merge_error`, `has_conflicts` and `detailed_merge_status`, so callers can see
+   the asynchronous rebase outcome. Labels remain an authorization input only.

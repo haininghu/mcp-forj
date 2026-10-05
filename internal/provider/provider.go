@@ -9,9 +9,18 @@ import (
 	"time"
 )
 
-// ErrNotFound is the sentinel returned by providers when a requested resource
-// does not exist. Callers should use errors.Is.
-var ErrNotFound = errors.New("not found")
+// Provider sentinel errors. Callers should use errors.Is to distinguish the
+// failure modes.
+var (
+	// ErrNotFound is returned when a requested resource does not exist.
+	ErrNotFound = errors.New("not found")
+	// ErrForbidden is returned when the token lacks the required permission
+	// (HTTP 401/403).
+	ErrForbidden = errors.New("forbidden")
+	// ErrInvalidState is returned when the resource is not in a state that
+	// permits the operation (HTTP 400/405/409).
+	ErrInvalidState = errors.New("invalid state")
+)
 
 // Repository identifies a repository at a provider.
 type Repository struct {
@@ -53,6 +62,15 @@ type MergeRequest struct {
 	// LabelsKnown reports whether Labels could be determined. When false, any
 	// active tag filter fails closed.
 	LabelsKnown bool
+	// MergeError is a provider-reported merge/rebase error message, if any.
+	MergeError string
+	// RebaseInProgress reports whether a rebase is currently running.
+	RebaseInProgress bool
+	// HasConflicts reports whether the merge request has conflicts with its
+	// target branch.
+	HasConflicts bool
+	// DetailedMergeStatus is the provider's detailed mergeability status.
+	DetailedMergeStatus string
 }
 
 // Note is a provider-neutral comment on a merge request.

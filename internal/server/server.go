@@ -78,7 +78,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "rebase_merge_request",
-		Description: "Trigger an asynchronous rebase of a merge request's source branch onto its target branch. Requires the mr:rebase capability.",
+		Description: "Trigger an asynchronous rebase of a merge request's source branch onto its target branch. The outcome is visible later via get_merge_request (merge_error, rebase_in_progress). Requires the mr:rebase capability.",
 	}, s.rebaseMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -166,14 +166,18 @@ type listRepositoriesOutput struct {
 }
 
 type mergeRequestJSON struct {
-	Number       int64  `json:"number"`
-	Title        string `json:"title"`
-	Description  string `json:"description"`
-	State        string `json:"state"`
-	Author       string `json:"author"`
-	SourceBranch string `json:"source_branch"`
-	TargetBranch string `json:"target_branch"`
-	WebURL       string `json:"web_url"`
+	Number              int64  `json:"number"`
+	Title               string `json:"title"`
+	Description         string `json:"description"`
+	State               string `json:"state"`
+	Author              string `json:"author"`
+	SourceBranch        string `json:"source_branch"`
+	TargetBranch        string `json:"target_branch"`
+	WebURL              string `json:"web_url"`
+	RebaseInProgress    bool   `json:"rebase_in_progress"`
+	MergeError          string `json:"merge_error,omitempty"`
+	HasConflicts        bool   `json:"has_conflicts"`
+	DetailedMergeStatus string `json:"detailed_merge_status,omitempty"`
 }
 
 type listMergeRequestsOutput struct {
@@ -609,10 +613,16 @@ func mapAuthError(err error, providerName, repo string) error {
 }
 
 func mapProviderError(err error) error {
-	if errors.Is(err, provider.ErrNotFound) {
+	switch {
+	case errors.Is(err, provider.ErrNotFound):
 		return errors.New("not found")
+	case errors.Is(err, provider.ErrForbidden):
+		return errors.New("forbidden: the provider token lacks the required permission (write scope, merge-request Update permission, or sufficient project role)")
+	case errors.Is(err, provider.ErrInvalidState):
+		return errors.New("the merge request is not in a rebaseable state")
+	default:
+		return errors.New("provider request failed")
 	}
-	return errors.New("provider request failed")
 }
 
 // validatePath applies the ordered path-traversal checks from the design. It
@@ -649,14 +659,18 @@ func validatePath(p string) (string, error) {
 
 func toMergeRequestJSON(mr provider.MergeRequest) mergeRequestJSON {
 	return mergeRequestJSON{
-		Number:       mr.Number,
-		Title:        mr.Title,
-		Description:  truncateText(mr.Description, maxTextBytes),
-		State:        mr.State,
-		Author:       mr.Author,
-		SourceBranch: mr.SourceBranch,
-		TargetBranch: mr.TargetBranch,
-		WebURL:       mr.WebURL,
+		Number:              mr.Number,
+		Title:               mr.Title,
+		Description:         truncateText(mr.Description, maxTextBytes),
+		State:               mr.State,
+		Author:              mr.Author,
+		SourceBranch:        mr.SourceBranch,
+		TargetBranch:        mr.TargetBranch,
+		WebURL:              mr.WebURL,
+		RebaseInProgress:    mr.RebaseInProgress,
+		MergeError:          truncateText(mr.MergeError, maxTextBytes),
+		HasConflicts:        mr.HasConflicts,
+		DetailedMergeStatus: mr.DetailedMergeStatus,
 	}
 }
 
