@@ -56,10 +56,20 @@ func run() error {
 
 		specs := make([]policy.RuleSpec, len(pc.Rules))
 		for j, rule := range pc.Rules {
+			caps := make([]policy.CapabilityGrant, len(rule.Capabilities))
+			for k, grant := range rule.Capabilities {
+				caps[k] = policy.CapabilityGrant{
+					Name: policy.Capability(grant.Name),
+					Filter: policy.TagFilter{
+						Require: grant.Require,
+						Exclude: grant.Exclude,
+					},
+				}
+			}
 			specs[j] = policy.RuleSpec{
 				Repositories: rule.Repositories,
 				Effect:       rule.Effect,
-				Capabilities: rule.Capabilities,
+				Capabilities: caps,
 			}
 		}
 		pol, err := policy.Build(specs)

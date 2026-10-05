@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -37,7 +38,10 @@ func TestMapBasicMergeRequest(t *testing.T) {
 		TargetBranch: "main",
 		WebURL:       "https://gitlab.example.com/team/app/-/merge_requests/42",
 	}
-	if got != want {
+	if got.LabelsKnown {
+		t.Error("mapBasicMergeRequest set LabelsKnown, want false")
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("mapBasicMergeRequest = %+v, want %+v", got, want)
 	}
 }
@@ -162,6 +166,7 @@ func TestGetMergeRequestHTTP(t *testing.T) {
 			"target_branch": "main",
 			"web_url":       "https://example.com/mr/42",
 			"author":        map[string]any{"username": "alice"},
+			"labels":        []string{"ai-reviewed", "backend"},
 		})
 	}))
 
@@ -171,6 +176,12 @@ func TestGetMergeRequestHTTP(t *testing.T) {
 	}
 	if mr.Number != 42 || mr.Author != "alice" || mr.Title != "Add feature" {
 		t.Errorf("unexpected merge request: %+v", mr)
+	}
+	if !mr.LabelsKnown {
+		t.Error("LabelsKnown = false, want true for GetMergeRequest")
+	}
+	if !reflect.DeepEqual(mr.Labels, []string{"ai-reviewed", "backend"}) {
+		t.Errorf("Labels = %v, want [ai-reviewed backend]", mr.Labels)
 	}
 }
 

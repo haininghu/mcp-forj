@@ -125,11 +125,17 @@ type readFileInput struct {
 	Ref      string `json:"ref,omitempty" jsonschema:"optional git ref; defaults to the default branch"`
 }
 
+type configuredCapability struct {
+	Name    string   `json:"name"`
+	Require []string `json:"require,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
 type configuredRepository struct {
-	Provider               string   `json:"provider"`
-	Repositories           []string `json:"repositories"`
-	Effect                 string   `json:"effect"`
-	ConfiguredCapabilities []string `json:"configured_capabilities"`
+	Provider               string                 `json:"provider"`
+	Repositories           []string               `json:"repositories"`
+	Effect                 string                 `json:"effect"`
+	ConfiguredCapabilities []configuredCapability `json:"configured_capabilities"`
 }
 
 type listConfiguredRulesOutput struct {
@@ -189,9 +195,13 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 	rules := s.guard.ConfiguredRules()
 	repos := make([]configuredRepository, 0, len(rules))
 	for _, rule := range rules {
-		caps := make([]string, len(rule.Capabilities))
-		for i, c := range rule.Capabilities {
-			caps[i] = string(c)
+		caps := make([]configuredCapability, len(rule.Capabilities))
+		for i, grant := range rule.Capabilities {
+			caps[i] = configuredCapability{
+				Name:    string(grant.Name),
+				Require: grant.Filter.Require,
+				Exclude: grant.Filter.Exclude,
+			}
 		}
 		repos = append(repos, configuredRepository{
 			Provider:               rule.Provider,
@@ -284,6 +294,10 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
 }
 
+// listMergeRequests lists merge request metadata. The list API returns no
+// labels, so tag filters cannot be evaluated here: resolveAuthorized evaluates
+// the policy with unknown tags, which fails closed when an active mr:read tag
+// filter is configured.
 func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, in listMergeRequestsInput) (*mcp.CallToolResult, any, error) {
 	p, err := s.resolveAuthorized(ctx, in.Provider, in.Repo, policy.CapMRRead)
 	if err != nil {
@@ -313,13 +327,19 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	if in.Number <= 0 {
 		return nil, nil, errors.New("number must be positive")
 	}
-	p, err := s.resolveAuthorized(ctx, in.Provider, in.Repo, policy.CapMRRead)
+	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
 	if err != nil {
 		return nil, nil, mapProviderError(err)
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRRead, tagSetFromMR(*mr)); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	return jsonResult(toMergeRequestJSON(*mr))
 }
@@ -328,9 +348,19 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	if in.Number <= 0 {
 		return nil, nil, errors.New("number must be positive")
 	}
-	p, err := s.resolveAuthorized(ctx, in.Provider, in.Repo, policy.CapMRRead)
+	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRRead, tagSetFromMR(*mr)); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	limit := maxListResults
 	notes, err := p.ListMergeRequestNotes(ctx, in.Repo, in.Number, provider.ListOptions{Limit: limit + 1})
@@ -359,15 +389,41 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 	if len(in.Body) > maxTextBytes {
 		return nil, nil, fmt.Errorf("body exceeds the %d byte limit", maxTextBytes)
 	}
-	p, err := s.resolveAuthorized(ctx, in.Provider, in.Repo, policy.CapMRComment)
+	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(ctx, in.Provider, in.Repo, policy.CapMRComment); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	// The merge request metadata is an internal authorization input. If it
+	// cannot be fetched, the post is denied (fail-closed).
+	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err)
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRComment, tagSetFromMR(*mr)); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	note, err := p.AddMergeRequestNote(ctx, in.Repo, in.Number, in.Body)
 	if err != nil {
 		return nil, nil, mapProviderError(err)
 	}
 	return jsonResult(toNoteJSON(*note))
+}
+
+// resolveProvider resolves a provider by name without authorization.
+func (s *Server) resolveProvider(providerName string) (provider.Provider, error) {
+	p, ok := s.registry.Get(providerName)
+	if !ok {
+		return nil, fmt.Errorf("unknown provider %q", providerName)
+	}
+	return p, nil
+}
+
+// tagSetFromMR converts merge request labels into a policy tag set.
+func tagSetFromMR(mr provider.MergeRequest) policy.TagSet {
+	return policy.TagSet{Known: mr.LabelsKnown, Values: mr.Labels}
 }
 
 func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFileInput) (*mcp.CallToolResult, any, error) {

@@ -71,6 +71,34 @@ are returned and the call still succeeds. The `limit` argument bounds only the
 discovered repositories. Listing does not check the `.noai` marker, so a `.noai`
 repository may appear in a listing; the marker still blocks every operation on it.
 
+### Tag filters
+
+An MR capability may optionally carry a tag filter (GitLab MR labels), written as a
+single-key mapping in the `capabilities` list:
+
+```yaml
+capabilities:
+  - mr:read
+  - mr:comment:
+      require: [ai-reviewed]      # MR must have ALL of these labels
+      exclude: [do-not-touch]     # MR must have NONE of these labels
+```
+
+Tags are matched by exact, case-sensitive equality. A missing label evaluation (for
+example, labels could not be fetched) fails closed.
+
+v1 limitations:
+
+- Tag filters are supported only for MR capabilities (`mr:read`, `mr:diff`,
+  `mr:comment`, `mr:write`). Filters on `repo:*` capabilities are rejected at config
+  load.
+- Filters are enforced on `get_merge_request`, `list_merge_request_notes` (both
+  `mr:read`) and `add_merge_request_note` (`mr:comment`). These tools fetch the merge
+  request metadata to evaluate labels.
+- `list_merge_requests` does **not** evaluate labels (the list API returns none), so
+  it fails closed when an `mr:read` tag filter is active.
+- No repository-topic filters, no caching, and no glob/regex matching.
+
 The `token` field accepts either a literal secret or `${NAME}` references expanded
 from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is
 never logged. It must be able to read repository files on the default branch so the

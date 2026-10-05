@@ -29,7 +29,12 @@ providers:
         effect: allow
         capabilities:
           - mr:read
-          - mr:comment
+          # A capability may carry a tag filter (GitLab labels). The merge
+          # request must have ALL `require` labels and NONE of the `exclude`
+          # labels. Tag filters are only supported for MR capabilities.
+          - mr:comment:
+              require: [ai-reviewed]
+              exclude: [do-not-touch]
 
       # Read-only access to all other repositories in this group.
       - repositories:

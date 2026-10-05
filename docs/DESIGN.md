@@ -1,8 +1,24 @@
 # Design: `mcp-forj` — Policy-Governed MCP Server for Code Hosting Providers
 
-Status: **Draft v0.3** (adds `repo:list` and inline/env token config)
+Status: **Draft v0.4** (adds tag-scoped MR capabilities)
 Author: orchestrator
 Scope: first iteration (GitLab only; MR metadata + comments + repo listing)
+
+## Changelog vs. v0.3
+
+- **U1** Added optional **tag filters** to MR capabilities, written as a
+  single-key mapping in the `capabilities` list (`mr:comment: {require: [...],
+  exclude: [...]}`). Tags are GitLab MR labels, matched by exact, case-sensitive
+  equality.
+- **U2** Tag filters are only supported for `mr:read`, `mr:diff`, `mr:comment` and
+  `mr:write`; filters on `repo:*` capabilities and on `deny` rules are rejected at
+  config load.
+- **U3** `get_merge_request`, `list_merge_request_notes` and
+  `add_merge_request_note` evaluate tags against the fetched merge request.
+  `list_merge_requests` does not (the list API returns no labels) and **fails
+  closed** when an `mr:read` filter is active.
+- **U4** Tags are an authorization input only: never cached, never returned in tool
+  output. Unknown tag information fails closed.
 
 ## Changelog vs. v0.2
 
@@ -145,6 +161,30 @@ viewing MRs and is accepted; it is not the same as granting repository read acce
 **Independence:** `mr:comment` does not imply `mr:read`. Posting a note does not
 require reading the merge request, so a repository may grant comment-only access.
 
+### Tag-scoped capabilities (v0.4)
+
+An MR capability may optionally carry a **tag filter** (GitLab MR labels). In the
+configuration the filter is merged into the `capabilities` list as a compact
+single-key mapping:
+
+```yaml
+capabilities:
+  - mr:read
+  - mr:comment:
+      require: [ai-reviewed]      # MR must have ALL of these labels
+      exclude: [do-not-touch]     # MR must have NONE of these labels
+```
+
+- Matching is **exact and case-sensitive**; there is no glob/regex support.
+- Filters are only supported for MR capabilities (`mr:read`, `mr:diff`,
+  `mr:comment`, `mr:write`). A filter on a `repo:*` capability is rejected at config
+  load as "not supported yet", and a filter on a `deny` rule is rejected.
+- A tag may not appear in both `require` and `exclude`; tags must be non-empty after
+  trimming; a capability may not be listed twice in the same rule.
+- Tags are an **authorization input only**: they are never cached and never returned
+  in tool output. When tag information cannot be determined for an active filter,
+  the decision fails closed.
+
 ## 6. Configuration
 
 YAML, path passed via `-config` (default `configs/config.yaml`), overridable by
@@ -167,7 +207,12 @@ providers:
     rules:
       - repositories: ["team/service-a", "team/service-b"]
         effect: allow
-        capabilities: [mr:read, mr:comment]
+        capabilities:
+          - mr:read
+          # Compact form: capability name mapping to an optional tag filter.
+          - mr:comment:
+              require: [ai-reviewed]
+              exclude: [do-not-touch]
       - repositories: ["team/*"]
         effect: allow
         capabilities: [mr:read]
@@ -177,6 +222,11 @@ providers:
       - repositories: ["legacy/**"]
         effect: deny
 ```
+
+The `capabilities` entries accept two forms: a plain scalar (`mr:read`) or a
+single-key mapping whose value is `null`/omitted or a mapping with only the optional
+keys `require` and `exclude`. Unknown filter keys and mappings with more than one
+capability key are rejected. See §5 for the tag-filter rules.
 
 ### Token handling
 
@@ -290,13 +340,24 @@ exhausted. If more repositories exist than the limit allows, the server reports
 | `list_configured_rules`     | none         | — (from config)             |
 | `list_repositories`         | `repo:list`  | `ListRepositories`          |
 | `list_merge_requests`       | `mr:read`    | `ListMergeRequests`         |
-| `get_merge_request`         | `mr:read`    | `GetMergeRequest`           |
-| `list_merge_request_notes`  | `mr:read`    | `ListMergeRequestNotes`     |
-| `add_merge_request_note`    | `mr:comment` | `AddMergeRequestNote`       |
+| `get_merge_request`         | `mr:read`¹   | `GetMergeRequest`           |
+| `list_merge_request_notes`  | `mr:read`¹   | `ListMergeRequestNotes`     |
+| `add_merge_request_note`    | `mr:comment`¹| `AddMergeRequestNote`       |
 | `read_file`                 | `repo:read`  | `ReadFile`                  |
 
+¹ **Tag filters** (§5) are evaluated against the fetched merge request.
+`get_merge_request` and `list_merge_request_notes` enforce an active `mr:read`
+filter; `add_merge_request_note` enforces an active `mr:comment` filter. These tools
+perform a policy-only pre-check (`Guard.AuthorizeRepoCapability`), fetch the merge
+request metadata, then call `Guard.AuthorizeWithTags` with the MR labels. For
+`add_merge_request_note` the metadata fetch is an internal authorization input: if it
+fails, the post is denied (fail-closed). `list_merge_requests` does **not** evaluate
+labels (the list API returns none) and therefore **fails closed** whenever an
+`mr:read` tag filter is active.
+
 `list_configured_rules` is config-only (no remote call, no secrets) and returns each
-configured rule with its **configured** capabilities. It requires no capability and
+configured rule with its **configured** capabilities, including any tag filters as
+`{"name": ..., "require": [...], "exclude": [...]}`. It requires no capability and
 is the discoverability entry point. It does **not** claim the capabilities are
 effective and does not reveal `.noai` state.
 
@@ -349,6 +410,12 @@ Tool arguments are validated with explicit bounds:
   checks the marker, so a `.noai` repository may appear in a listing. Listing only
   reflects configured visibility; the marker still blocks every attempt to operate on
   that repository.
+- **Tags are an authorization input only.** Tag filters (§5) are evaluated against
+  merge request labels fetched per operation; labels are never cached and never
+  returned in tool output (the server's JSON output structs deliberately omit them).
+  When labels cannot be determined for an active filter, the decision fails closed
+  (`tag information unavailable`). `list_merge_requests` cannot evaluate labels and
+  fails closed under an active `mr:read` filter.
 - **`list_configured_rules` exposes the policy** (patterns and effects) to the
   caller. This is intentional in the single-trusted-agent model and reveals no
   secrets; revisit if per-client identities are ever added.
@@ -381,14 +448,24 @@ Tool arguments are validated with explicit bounds:
   `token`, literal token (including one containing `$`), whole-string `${VAR}`
   resolution, unset/empty `${VAR}` rejection, whitespace trimming, duplicate
   provider names, empty rules, and a redaction assertion that `fmt.Sprintf("%+v",
-  cfg)` / `Secret.String()` never contains the resolved value.
+  cfg)` / `Secret.String()` never contains the resolved value. Capability-grant
+  parsing: scalar form, compact mapping form (require/exclude), null value, and
+  rejection of unknown filter keys, more than one capability key, a tag in both
+  lists, empty tags, duplicate capabilities, filters on `repo:*`, and filters on
+  `deny` rules.
 - `internal/policy`: rule precedence, `*` vs `**` glob matching, default deny,
-  capability subset, deny override.
+  capability subset, deny override, `EvaluateWithTags` (require-all, exclude-any,
+  fail-closed on unknown tags, zero filter unaffected), `CapabilityGranted`
+  semantics, and `GrantsAnywhere` with filters.
 - `internal/policy/noai`: marker present/absent, provider error (always deny).
 - `internal/server`: end-to-end tool calls against a **fake provider** using the
   SDK's in-memory transports; assert allow, capability denial, `.noai` denial, repo
-  listing filtering, and argument validation.
-- `internal/provider/gitlab`: mapping logic plus an `httptest`-based client test.
+  listing filtering, argument validation, and tag enforcement (allowed for a matching
+  label, denied for an excluded label, denied when labels are unknown, denied when an
+  active `mr:read` filter blocks `list_merge_requests`, and a metadata-fetch error
+  denying a note).
+- `internal/provider/gitlab`: mapping logic plus an `httptest`-based client test;
+  `GetMergeRequest` maps labels and sets `LabelsKnown`.
 
 ### Security-critical tests (mandatory)
 
@@ -417,6 +494,11 @@ Tool arguments are validated with explicit bounds:
     is not an error and yields static repositories only; unknown provider is an error
     and an omitted `provider` is rejected by the schema; duplicates between static and
     dynamic lists are removed; `truncated` is set when the cap or fetch window is hit.
+12. Tag filters: a matching label allows, an excluded/missing label denies, unknown
+    labels fail closed; `get_merge_request` and `list_merge_request_notes` enforce
+    `mr:read` filters, `add_merge_request_note` enforces `mr:comment` filters and
+    denies when the metadata fetch fails, `list_merge_requests` fails closed under an
+    active `mr:read` filter, and `list_configured_rules` exposes the filters.
 
 ## 11. Dependencies
 
@@ -478,3 +560,17 @@ Makefile                        build/test/lint targets
 3. **Listing pagination**: the provider maps the limit to `PerPage` and follows pages
    up to the limit, reporting `truncated`. Derived-prefix querying was cut; `search`
    is a caller-controlled passthrough.
+
+## 16. Resolved Questions (v0.4)
+
+1. **Tag syntax**: filters are merged into the `capabilities` list as a compact
+   single-key mapping (`mr:comment: {require: [...], exclude: [...]}`). Scalars remain
+   valid. Tag equality is exact and case-sensitive.
+2. **Tag scope**: only MR capabilities may carry filters; `repo:*` filters and
+   filters on `deny` rules are rejected at config load.
+3. **Enforcement**: `get_merge_request`, `list_merge_request_notes` and
+   `add_merge_request_note` evaluate tags after fetching the MR. `list_merge_requests`
+   cannot (list API returns no labels) and fails closed under an active `mr:read`
+   filter. Unknown labels fail closed everywhere.
+4. **Tags are never returned**: labels are an authorization input only and are never
+   included in tool output.

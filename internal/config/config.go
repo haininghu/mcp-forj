@@ -73,8 +73,83 @@ type RuleConfig struct {
 	Repositories []string `yaml:"repositories"`
 	// Effect is "allow" or "deny".
 	Effect string `yaml:"effect"`
-	// Capabilities are granted by an "allow" rule.
-	Capabilities []string `yaml:"capabilities"`
+	// Capabilities are granted by an "allow" rule, optionally with tag filters.
+	Capabilities []CapabilityGrant `yaml:"capabilities"`
+}
+
+// CapabilityGrant is a configured capability. It is either a scalar capability
+// name or a single-key mapping from capability name to an optional tag filter:
+//
+//	capabilities:
+//	  - mr:read
+//	  - mr:comment:
+//	      require: [ai-reviewed]
+//	      exclude: [do-not-touch]
+type CapabilityGrant struct {
+	// Name is the capability name.
+	Name string
+	// Require lists tags the merge request must all carry.
+	Require []string
+	// Exclude lists tags the merge request must not carry.
+	Exclude []string
+}
+
+// UnmarshalYAML implements yaml.Unmarshaler for the compact capability form.
+func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Tag == "!!null" {
+			return fmt.Errorf("capability must not be null")
+		}
+		var name string
+		if err := value.Decode(&name); err != nil {
+			return err
+		}
+		return g.setScalar(name)
+	case yaml.MappingNode:
+		if len(value.Content) != 2 {
+			return fmt.Errorf("capability mapping must contain exactly one capability key")
+		}
+		var name string
+		if err := value.Content[0].Decode(&name); err != nil {
+			return err
+		}
+		filter := value.Content[1]
+		if filter.Tag == "!!null" {
+			return g.setScalar(name)
+		}
+		if filter.Kind != yaml.MappingNode {
+			return fmt.Errorf("capability %q filter must be a mapping or null", name)
+		}
+		g.Name = name
+		for i := 0; i+1 < len(filter.Content); i += 2 {
+			key := filter.Content[i].Value
+			val := filter.Content[i+1]
+			switch key {
+			case "require":
+				if err := val.Decode(&g.Require); err != nil {
+					return fmt.Errorf("capability %q: require: %w", name, err)
+				}
+			case "exclude":
+				if err := val.Decode(&g.Exclude); err != nil {
+					return fmt.Errorf("capability %q: exclude: %w", name, err)
+				}
+			default:
+				return fmt.Errorf("capability %q: unknown filter key %q", name, key)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("capability must be a string or a single-key mapping")
+	}
+}
+
+func (g *CapabilityGrant) setScalar(name string) error {
+	if name == "" {
+		return fmt.Errorf("capability must not be empty")
+	}
+	g.Name = name
+	return nil
 }
 
 // Secret is a configuration secret. Its formatting methods always redact the
@@ -223,14 +298,59 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("config: provider %q rule %d: empty repository pattern", p.Name, j)
 				}
 			}
-			for _, capability := range rule.Capabilities {
-				if !policy.IsKnownCapability(capability) {
-					return fmt.Errorf("config: provider %q rule %d: unknown capability %q", p.Name, j, capability)
+			seenCaps := make(map[string]bool, len(rule.Capabilities))
+			for k := range rule.Capabilities {
+				grant := &rule.Capabilities[k]
+				if !policy.IsKnownCapability(grant.Name) {
+					return fmt.Errorf("config: provider %q rule %d: unknown capability %q", p.Name, j, grant.Name)
+				}
+				if seenCaps[grant.Name] {
+					return fmt.Errorf("config: provider %q rule %d: duplicate capability %q", p.Name, j, grant.Name)
+				}
+				seenCaps[grant.Name] = true
+
+				require, err := normalizeTags(p.Name, j, grant.Name, "require", grant.Require)
+				if err != nil {
+					return err
+				}
+				exclude, err := normalizeTags(p.Name, j, grant.Name, "exclude", grant.Exclude)
+				if err != nil {
+					return err
+				}
+				grant.Require, grant.Exclude = require, exclude
+
+				if len(require) == 0 && len(exclude) == 0 {
+					continue
+				}
+				if !policy.IsMRCapability(policy.Capability(grant.Name)) {
+					return fmt.Errorf("config: provider %q rule %d: tag filters are not supported yet for capability %q", p.Name, j, grant.Name)
+				}
+				if rule.Effect == string(policy.EffectDeny) {
+					return fmt.Errorf("config: provider %q rule %d: tag filters are not allowed on deny rules", p.Name, j)
+				}
+				for _, required := range require {
+					for _, excluded := range exclude {
+						if required == excluded {
+							return fmt.Errorf("config: provider %q rule %d: tag %q appears in both require and exclude", p.Name, j, required)
+						}
+					}
 				}
 			}
 		}
 	}
 	return nil
+}
+
+func normalizeTags(providerName string, ruleIndex int, capability, field string, tags []string) ([]string, error) {
+	out := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		trimmed := strings.TrimSpace(tag)
+		if trimmed == "" {
+			return nil, fmt.Errorf("config: provider %q rule %d: capability %q %s: tag must not be empty", providerName, ruleIndex, capability, field)
+		}
+		out = append(out, trimmed)
+	}
+	return out, nil
 }
 
 // ProviderByName returns the provider with the given logical name.

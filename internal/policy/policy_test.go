@@ -11,11 +11,20 @@ func mustBuild(t *testing.T, specs []RuleSpec) *Policy {
 	return p
 }
 
+// grants builds unfiltered capability grants from names.
+func grants(names ...Capability) []CapabilityGrant {
+	out := make([]CapabilityGrant, len(names))
+	for i, name := range names {
+		out[i] = CapabilityGrant{Name: name}
+	}
+	return out
+}
+
 func TestEvaluate(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
-		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []string{"mr:read"}},
-		{Repositories: []string{"org/**"}, Effect: "allow", Capabilities: []string{"repo:read"}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+		{Repositories: []string{"org/**"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
 	})
 
 	tests := []struct {
@@ -54,20 +63,63 @@ func TestEvaluateDefaultDeny(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithTags(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRRead},
+			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}}},
+		}},
+	})
+
+	tests := []struct {
+		name                  string
+		repo                  string
+		capability            Capability
+		tags                  TagSet
+		wantAllowed           bool
+		wantCapabilityGranted bool
+		wantMatched           bool
+		wantReason            string
+	}{
+		{"zero filter unaffected by unknown tags", "team/app", CapMRRead, TagSet{}, true, true, true, "capability granted"},
+		{"active filter fails closed on unknown tags", "team/app", CapMRComment, TagSet{}, false, true, true, "tag information unavailable"},
+		{"require all present", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "other"}}, true, true, true, "capability granted"},
+		{"require missing", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"other"}}, false, true, true, "tag requirement not met"},
+		{"exclude present", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "do-not-touch"}}, false, true, true, "excluded tag present"},
+		{"capability not granted by allow rule", "team/app", CapMRWrite, TagSet{Known: true}, false, false, true, "capability mr:write not granted"},
+		{"deny rule", "team/secret", CapMRRead, TagSet{Known: true, Values: []string{"ai-reviewed"}}, false, false, true, "denied by rule"},
+		{"unknown repository", "other/x", CapMRRead, TagSet{Known: true}, false, false, false, "no matching rule"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := p.EvaluateWithTags(tt.repo, tt.capability, tt.tags)
+			if got.Allowed != tt.wantAllowed || got.CapabilityGranted != tt.wantCapabilityGranted ||
+				got.Matched != tt.wantMatched || got.Reason != tt.wantReason {
+				t.Errorf("EvaluateWithTags = %+v, want {Allowed:%v CapabilityGranted:%v Matched:%v Reason:%q}",
+					got, tt.wantAllowed, tt.wantCapabilityGranted, tt.wantMatched, tt.wantReason)
+			}
+		})
+	}
+}
+
 func TestRulesReturnsCopy(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRRead, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+		}},
 	})
 	rules := p.Rules()
 	rules[0].Repositories[0] = "mutated"
-	rules[0].Capabilities[CapMRRead] = false
+	rules[0].Capabilities[CapMRRead] = TagFilter{Require: []string{"mutated"}}
 
 	again := p.Rules()
 	if again[0].Repositories[0] != "team/*" {
 		t.Error("Rules did not return a copy of repositories")
 	}
-	if !again[0].Capabilities[CapMRRead] {
-		t.Error("Rules did not return a copy of capabilities")
+	filter := again[0].Capabilities[CapMRRead]
+	if len(filter.Require) != 1 || filter.Require[0] != "ai-reviewed" {
+		t.Errorf("Rules did not return a copy of capabilities: %+v", filter)
 	}
 }
 
@@ -79,7 +131,7 @@ func TestBuildValidation(t *testing.T) {
 		{"unknown effect", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "maybe"}}},
 		{"empty repositories", []RuleSpec{{Effect: "allow"}}},
 		{"empty pattern", []RuleSpec{{Repositories: []string{""}, Effect: "allow"}}},
-		{"unknown capability", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []string{"repo:teleport"}}}},
+		{"unknown capability", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: grants("repo:teleport")}}},
 		{"invalid pattern", []RuleSpec{{Repositories: []string{"a/["}, Effect: "allow"}}},
 	}
 	for _, tt := range tests {
@@ -106,10 +158,23 @@ func TestKnownCapabilities(t *testing.T) {
 	}
 }
 
+func TestIsMRCapability(t *testing.T) {
+	for _, c := range []Capability{CapMRRead, CapMRDiff, CapMRComment, CapMRWrite} {
+		if !IsMRCapability(c) {
+			t.Errorf("IsMRCapability(%s) = false, want true", c)
+		}
+	}
+	for _, c := range []Capability{CapRepoList, CapRepoRead, CapRepoWrite} {
+		if IsMRCapability(c) {
+			t.Errorf("IsMRCapability(%s) = true, want false", c)
+		}
+	}
+}
+
 func TestClassify(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
-		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
 	if matched, effect := p.Classify("team/secret"); !matched || effect != EffectDeny {
 		t.Errorf("Classify(team/secret) = (%v, %q), want (true, deny)", matched, effect)
@@ -125,7 +190,7 @@ func TestClassify(t *testing.T) {
 func TestStaticRepositories(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
-		{Repositories: []string{"team/app", "archive/**", "team/secret", "legacy/lit"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+		{Repositories: []string{"team/app", "archive/**", "team/secret", "legacy/lit"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 	})
 	got := p.StaticRepositories()
 	want := []string{"team/app", "legacy/lit"}
@@ -156,7 +221,7 @@ func TestIsLiteralPattern(t *testing.T) {
 
 func TestGrantsAnywhere(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 		{Repositories: []string{"team/**"}, Effect: "deny"},
 	})
 	if !p.GrantsAnywhere(CapRepoList) {
@@ -167,5 +232,19 @@ func TestGrantsAnywhere(t *testing.T) {
 	}
 	if p.GrantsAnywhere(CapMRRead) {
 		t.Error("GrantsAnywhere(mr:read) = true, want false")
+	}
+}
+
+func TestGrantsAnywhereWithFilter(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRRead, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+		}},
+	})
+	if !p.GrantsAnywhere(CapMRRead) {
+		t.Error("GrantsAnywhere(mr:read) = false, want true even with an active filter")
+	}
+	if p.GrantsAnywhere(CapMRComment) {
+		t.Error("GrantsAnywhere(mr:comment) = true, want false")
 	}
 }

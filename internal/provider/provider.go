@@ -41,6 +41,12 @@ type MergeRequest struct {
 	TargetBranch string
 	// WebURL is the human-facing merge request URL.
 	WebURL string
+	// Labels are the tags attached to the merge request. They are only
+	// meaningful when LabelsKnown is true.
+	Labels []string
+	// LabelsKnown reports whether Labels could be determined. When false, any
+	// active tag filter fails closed.
+	LabelsKnown bool
 }
 
 // Note is a provider-neutral comment on a merge request.

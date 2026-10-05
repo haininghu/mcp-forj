@@ -21,8 +21,8 @@ func (f fakeChecker) FileExists(context.Context, string, string, string) (bool, 
 func testGuard(t *testing.T, checker FileChecker) (*Guard, *bytes.Buffer) {
 	t.Helper()
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []string{"mr:read", "mr:comment"}},
-		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead, CapMRComment)},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -90,10 +90,10 @@ func TestGuardDeniedCapability(t *testing.T) {
 
 func TestAuthorizeList(t *testing.T) {
 	granted := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 	})
 	notGranted := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
@@ -122,7 +122,7 @@ func TestAuthorizeList(t *testing.T) {
 
 func TestGuardStaticRepositoriesAndEvaluate(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"team/app", "archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+		{Repositories: []string{"team/app", "archive/**"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{}, ".noai", nil)
 
@@ -150,8 +150,68 @@ func TestGuardStaticRepositoriesAndEvaluate(t *testing.T) {
 	}
 }
 
+func TestAuthorizeWithTags(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{}}, ".noai", nil)
+	ctx := context.Background()
+
+	// Unknown tags fail closed.
+	if err := g.AuthorizeWithTags(ctx, "fake", "team/app", CapMRComment, TagSet{}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("unknown tags error = %v, want ErrDenied", err)
+	}
+	// Matching tags allow.
+	if err := g.AuthorizeWithTags(ctx, "fake", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed"}}); err != nil {
+		t.Fatalf("matching tags error = %v, want nil", err)
+	}
+	// Excluded tag denies.
+	if err := g.AuthorizeWithTags(ctx, "fake", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "do-not-touch"}}); !errors.Is(err, ErrDenied) {
+		t.Fatalf("excluded tag error = %v, want ErrDenied", err)
+	}
+}
+
+func TestAuthorizeWithTagsMarkerStillApplies(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
+	err := g.AuthorizeWithTags(context.Background(), "fake", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed"}})
+	if !errors.Is(err, ErrNoAI) {
+		t.Fatalf("error = %v, want ErrNoAI even when tags match", err)
+	}
+}
+
+func TestAuthorizeRepoCapability(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
+	ctx := context.Background()
+
+	// Ignores the tag filter and the marker, but requires the capability.
+	if err := g.AuthorizeRepoCapability(ctx, "fake", "team/app", CapMRComment); err != nil {
+		t.Fatalf("AuthorizeRepoCapability = %v, want nil", err)
+	}
+	if err := g.AuthorizeRepoCapability(ctx, "fake", "team/app", CapMRRead); !errors.Is(err, ErrDenied) {
+		t.Fatalf("AuthorizeRepoCapability(unGranted) = %v, want ErrDenied", err)
+	}
+	if err := g.AuthorizeRepoCapability(ctx, "fake", "other/repo", CapMRComment); !errors.Is(err, ErrUnknownRepository) {
+		t.Fatalf("AuthorizeRepoCapability(unknown repo) = %v, want ErrUnknownRepository", err)
+	}
+	if err := g.AuthorizeRepoCapability(ctx, "missing", "team/app", CapMRComment); !errors.Is(err, ErrUnknownProvider) {
+		t.Fatalf("AuthorizeRepoCapability(missing provider) = %v, want ErrUnknownProvider", err)
+	}
+}
+
 func TestConfiguredRulesSortedByProvider(t *testing.T) {
-	p1 := mustBuild(t, []RuleSpec{{Repositories: []string{"a/*"}, Effect: "allow", Capabilities: []string{"mr:read"}}})
+	p1 := mustBuild(t, []RuleSpec{{Repositories: []string{"a/*"}, Effect: "allow", Capabilities: grants(CapMRRead)}})
 	p2 := mustBuild(t, []RuleSpec{{Repositories: []string{"b/*"}, Effect: "deny"}})
 	g := NewGuard(
 		map[string]*Policy{"zebra": p1, "alpha": p2},
@@ -166,7 +226,7 @@ func TestConfiguredRulesSortedByProvider(t *testing.T) {
 	if rules[0].Provider != "alpha" || rules[1].Provider != "zebra" {
 		t.Errorf("providers out of order: %s, %s", rules[0].Provider, rules[1].Provider)
 	}
-	if len(rules[1].Capabilities) != 1 || rules[1].Capabilities[0] != CapMRRead {
+	if len(rules[1].Capabilities) != 1 || rules[1].Capabilities[0].Name != CapMRRead {
 		t.Errorf("capabilities = %v, want [mr:read]", rules[1].Capabilities)
 	}
 }

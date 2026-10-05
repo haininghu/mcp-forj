@@ -64,7 +64,7 @@ func TestParseValid(t *testing.T) {
 	if p.RequestTimeout != Duration(45*time.Second) {
 		t.Errorf("request timeout = %s, want 45s", p.RequestTimeout)
 	}
-	if got := p.Rules[0].Capabilities; len(got) != 2 || got[0] != "mr:read" {
+	if got := p.Rules[0].Capabilities; len(got) != 2 || got[0].Name != "mr:read" || got[1].Name != "mr:comment" {
 		t.Errorf("capabilities = %v", got)
 	}
 	if p.Token.Value() != "literal-secret" {
@@ -297,7 +297,6 @@ providers:
 		specs = append(specs, policy.RuleSpec{
 			Repositories: rule.Repositories,
 			Effect:       rule.Effect,
-			Capabilities: rule.Capabilities,
 		})
 	}
 	pol, err := policy.Build(specs)
@@ -435,5 +434,232 @@ server:
 `
 	if _, err := Parse([]byte(yaml)); err == nil {
 		t.Fatal("Parse accepted an unknown field")
+	}
+}
+
+// configWithCaps wraps a capabilities block into a valid provider rule.
+func configWithCaps(caps string) string {
+	return `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+` + caps
+}
+
+func TestCapabilityGrantScalarForm(t *testing.T) {
+	cfg, err := Parse([]byte(configWithCaps("        capabilities: [mr:read, mr:comment]\n")))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := cfg.Providers[0].Rules[0].Capabilities
+	if len(got) != 2 || got[0].Name != "mr:read" || got[1].Name != "mr:comment" {
+		t.Fatalf("capabilities = %+v", got)
+	}
+	if len(got[0].Require) != 0 || len(got[0].Exclude) != 0 {
+		t.Errorf("scalar capability carries a filter: %+v", got[0])
+	}
+}
+
+func TestCapabilityGrantCompactForm(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:read
+          - mr:comment:
+              require: [ai-reviewed]
+              exclude: [do-not-touch]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := cfg.Providers[0].Rules[0].Capabilities
+	if len(got) != 2 {
+		t.Fatalf("capabilities = %+v", got)
+	}
+	if got[0].Name != "mr:read" || len(got[0].Require) != 0 {
+		t.Errorf("grant[0] = %+v, want plain mr:read", got[0])
+	}
+	if got[1].Name != "mr:comment" {
+		t.Fatalf("grant[1].Name = %q, want mr:comment", got[1].Name)
+	}
+	if len(got[1].Require) != 1 || got[1].Require[0] != "ai-reviewed" {
+		t.Errorf("grant[1].Require = %v", got[1].Require)
+	}
+	if len(got[1].Exclude) != 1 || got[1].Exclude[0] != "do-not-touch" {
+		t.Errorf("grant[1].Exclude = %v", got[1].Exclude)
+	}
+}
+
+func TestCapabilityGrantNullValue(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:comment:
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	grant := cfg.Providers[0].Rules[0].Capabilities[0]
+	if grant.Name != "mr:comment" || len(grant.Require) != 0 || len(grant.Exclude) != 0 {
+		t.Fatalf("grant = %+v, want plain mr:comment", grant)
+	}
+}
+
+func TestCapabilityGrantRejections(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "unknown filter key",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:comment:
+              bogus: [x]
+`,
+			wantErr: "unknown filter key",
+		},
+		{
+			name: "more than one capability key",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:read: null
+            mr:comment: null
+`,
+			wantErr: "exactly one capability key",
+		},
+		{
+			name: "tag in both lists",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:comment:
+              require: [ai-reviewed]
+              exclude: [ai-reviewed]
+`,
+			wantErr: "both require and exclude",
+		},
+		{
+			name: "empty tag",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:comment:
+              require: ["   "]
+`,
+			wantErr: "tag must not be empty",
+		},
+		{
+			name: "duplicate capability",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read, mr:read]
+`,
+			wantErr: "duplicate capability",
+		},
+		{
+			name: "filter on repo capability",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:list:
+              require: [x]
+`,
+			wantErr: "not supported yet",
+		},
+		{
+			name: "filter on deny rule",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: deny
+        capabilities:
+          - mr:comment:
+              require: [x]
+`,
+			wantErr: "not allowed on deny rules",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(tt.yaml))
+			if err == nil {
+				t.Fatal("Parse succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }

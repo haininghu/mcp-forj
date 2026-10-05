@@ -57,17 +57,24 @@ func NewGuard(policies map[string]*Policy, checkers map[string]FileChecker, mark
 	}
 }
 
-// Authorize checks whether capability c may be used on repo at providerName.
-// It evaluates the provider's policy first, then performs the .noai marker
-// check. Every decision is logged; tokens and request bodies are never logged.
+// Authorize checks whether capability c may be used on repo at providerName
+// with unknown tags. It is equivalent to AuthorizeWithTags(..., TagSet{}).
 func (g *Guard) Authorize(ctx context.Context, providerName, repo string, c Capability) error {
+	return g.AuthorizeWithTags(ctx, providerName, repo, c, TagSet{})
+}
+
+// AuthorizeWithTags checks whether capability c may be used on repo at
+// providerName with the observed tags. It evaluates the provider's policy
+// first, then performs the .noai marker check. Every decision is logged; tokens
+// and request bodies are never logged.
+func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string, c Capability, tags TagSet) error {
 	p, ok := g.policies[providerName]
 	if !ok {
 		g.logDecision(providerName, repo, c, "deny", "unknown provider")
 		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
 	}
 
-	decision := p.Evaluate(repo, c)
+	decision := p.EvaluateWithTags(repo, c, tags)
 	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
 
 	if !decision.Matched {
@@ -77,6 +84,31 @@ func (g *Guard) Authorize(ctx context.Context, providerName, repo string, c Capa
 		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
 	}
 
+	return g.checkMarker(ctx, providerName, repo)
+}
+
+// AuthorizeRepoCapability is a policy-only pre-check that ignores tag filters
+// and the .noai marker. It succeeds when the first matching rule allows the
+// capability (regardless of any active tag filter) and is used before a
+// privileged metadata fetch whose result is needed to evaluate the tags.
+func (g *Guard) AuthorizeRepoCapability(ctx context.Context, providerName, repo string, c Capability) error {
+	p, ok := g.policies[providerName]
+	if !ok {
+		g.logDecision(providerName, repo, c, "deny", "unknown provider")
+		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	decision := p.Evaluate(repo, c)
+	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
+	if !decision.Matched {
+		return fmt.Errorf("%w: %s", ErrUnknownRepository, repo)
+	}
+	if !decision.CapabilityGranted {
+		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
+	}
+	return nil
+}
+
+func (g *Guard) checkMarker(ctx context.Context, providerName, repo string) error {
 	checker, ok := g.checkers[providerName]
 	if !ok || checker == nil {
 		g.logger.Info("marker check", "provider", providerName, "repo", repo, "result", "error")
@@ -148,8 +180,8 @@ type ConfiguredRule struct {
 	Repositories []string
 	// Effect is the rule outcome.
 	Effect Effect
-	// Capabilities are the configured capabilities.
-	Capabilities []Capability
+	// Capabilities are the configured capabilities with their filters.
+	Capabilities []CapabilityGrant
 }
 
 // ConfiguredRules returns every configured rule, sorted by provider name for

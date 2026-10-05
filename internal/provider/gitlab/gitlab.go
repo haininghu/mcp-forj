@@ -128,7 +128,7 @@ func (c *Client) GetMergeRequest(ctx context.Context, repo string, number int64)
 	if err != nil {
 		return nil, mapError(err)
 	}
-	out := mapBasicMergeRequest(&mr.BasicMergeRequest)
+	out := mapDetailedMergeRequest(mr)
 	return &out, nil
 }
 
@@ -214,6 +214,16 @@ func mapBasicMergeRequest(m *gitlab.BasicMergeRequest) provider.MergeRequest {
 	if m.Author != nil {
 		out.Author = m.Author.Username
 	}
+	return out
+}
+
+// mapDetailedMergeRequest maps a full GitLab merge request, including labels.
+// The list endpoint does not populate labels, so only this path sets
+// LabelsKnown.
+func mapDetailedMergeRequest(m *gitlab.MergeRequest) provider.MergeRequest {
+	out := mapBasicMergeRequest(&m.BasicMergeRequest)
+	out.Labels = append([]string(nil), m.Labels...)
+	out.LabelsKnown = true
 	return out
 }
 

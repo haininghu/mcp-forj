@@ -223,11 +223,20 @@ func resultText(t *testing.T, res *mcp.CallToolResult) string {
 	return text.Text
 }
 
-func allowRules(caps ...string) []policy.RuleSpec {
+// grants builds unfiltered capability grants from names.
+func grants(names ...policy.Capability) []policy.CapabilityGrant {
+	out := make([]policy.CapabilityGrant, len(names))
+	for i, name := range names {
+		out[i] = policy.CapabilityGrant{Name: name}
+	}
+	return out
+}
+
+func allowRules(caps ...policy.Capability) []policy.RuleSpec {
 	return []policy.RuleSpec{{
 		Repositories: []string{"team/app"},
 		Effect:       "allow",
-		Capabilities: caps,
+		Capabilities: grants(caps...),
 	}}
 }
 
@@ -420,7 +429,7 @@ func listReposRules(patterns ...string) []policy.RuleSpec {
 	return []policy.RuleSpec{{
 		Repositories: patterns,
 		Effect:       "allow",
-		Capabilities: []string{"repo:list"},
+		Capabilities: grants("repo:list"),
 	}}
 }
 
@@ -463,7 +472,7 @@ func TestListRepositoriesStaticDeniedExcluded(t *testing.T) {
 	fake := newFake()
 	rules := []policy.RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
-		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []string{"mr:read"}},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants("mr:read")},
 	}
 	env := newTestEnv(t, rules, fake)
 
@@ -484,7 +493,7 @@ func TestListRepositoriesStaticNoAIIncluded(t *testing.T) {
 	rules := []policy.RuleSpec{{
 		Repositories: []string{"team/noai"},
 		Effect:       "allow",
-		Capabilities: []string{"mr:read"},
+		Capabilities: grants("mr:read"),
 	}}
 	env := newTestEnv(t, rules, fake)
 
@@ -504,7 +513,7 @@ func TestListRepositoriesDynamicRequiresRepoList(t *testing.T) {
 	rules := []policy.RuleSpec{{
 		Repositories: []string{"team/app", "archive/**"},
 		Effect:       "allow",
-		Capabilities: []string{"mr:read"},
+		Capabilities: grants("mr:read"),
 	}}
 	env := newTestEnv(t, rules, fake)
 
@@ -556,7 +565,7 @@ func TestListRepositoriesDenyBeforeAllow(t *testing.T) {
 	}
 	rules := []policy.RuleSpec{
 		{Repositories: []string{"archive/secret"}, Effect: "deny"},
-		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: []string{"repo:list"}},
+		{Repositories: []string{"archive/**"}, Effect: "allow", Capabilities: grants("repo:list")},
 	}
 	env := newTestEnv(t, rules, fake)
 
@@ -626,7 +635,7 @@ func TestListRepositoriesDedupesStaticAndDynamic(t *testing.T) {
 	rules := []policy.RuleSpec{{
 		Repositories: []string{"archive/a", "archive/**"},
 		Effect:       "allow",
-		Capabilities: []string{"repo:list"},
+		Capabilities: grants("repo:list"),
 	}}
 	env := newTestEnv(t, rules, fake)
 
@@ -886,5 +895,160 @@ func TestUnknownProviderAndRepository(t *testing.T) {
 	res = env.call(t, "list_merge_requests", map[string]any{"provider": "fake", "repo": "other/repo"})
 	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
 		t.Errorf("unknown repository result = %q (isError=%v)", resultText(t, res), res.IsError)
+	}
+}
+
+func filteredReadRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRRead,
+			Filter: policy.TagFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+		}},
+	}}
+}
+
+func filteredCommentRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRComment,
+			Filter: policy.TagFilter{Require: []string{"ai-reviewed"}},
+		}},
+	}}
+}
+
+func setLabels(f *fakeProvider, known bool, labels ...string) {
+	f.mrs[0].LabelsKnown = known
+	f.mrs[0].Labels = labels
+}
+
+func TestGetMergeRequestTagFilter(t *testing.T) {
+	fake := newFake()
+	setLabels(fake, true, "ai-reviewed")
+	env := newTestEnv(t, filteredReadRules(), fake)
+
+	res := env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if res.IsError {
+		t.Fatalf("matching label denied: %s", resultText(t, res))
+	}
+}
+
+func TestGetMergeRequestExcludedTag(t *testing.T) {
+	fake := newFake()
+	setLabels(fake, true, "ai-reviewed", "do-not-touch")
+	env := newTestEnv(t, filteredReadRules(), fake)
+
+	res := env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if !res.IsError {
+		t.Fatal("excluded tag allowed, want denial")
+	}
+}
+
+func TestGetMergeRequestUnknownLabelsFailClosed(t *testing.T) {
+	fake := newFake()
+	setLabels(fake, false, "ai-reviewed")
+	env := newTestEnv(t, filteredReadRules(), fake)
+
+	res := env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if !res.IsError {
+		t.Fatal("unknown labels allowed an active filter, want denial")
+	}
+}
+
+func TestListMergeRequestNotesTagFilter(t *testing.T) {
+	fake := newFake()
+	setLabels(fake, true, "ai-reviewed")
+	env := newTestEnv(t, filteredReadRules(), fake)
+
+	res := env.call(t, "list_merge_request_notes", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if res.IsError {
+		t.Fatalf("matching label denied: %s", resultText(t, res))
+	}
+
+	setLabels(fake, true)
+	res = env.call(t, "list_merge_request_notes", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if !res.IsError {
+		t.Fatal("missing required tag allowed, want denial")
+	}
+}
+
+func TestAddMergeRequestNoteTagFilter(t *testing.T) {
+	fake := newFake()
+	setLabels(fake, true, "ai-reviewed")
+	env := newTestEnv(t, filteredCommentRules(), fake)
+
+	res := env.call(t, "add_merge_request_note", map[string]any{
+		"provider": "fake", "repo": "team/app", "number": 1, "body": "hello",
+	})
+	if res.IsError {
+		t.Fatalf("matching label denied: %s", resultText(t, res))
+	}
+	if len(fake.added) != 1 {
+		t.Fatalf("added = %v, want one note", fake.added)
+	}
+
+	setLabels(fake, true)
+	res = env.call(t, "add_merge_request_note", map[string]any{
+		"provider": "fake", "repo": "team/app", "number": 1, "body": "second",
+	})
+	if !res.IsError {
+		t.Fatal("missing required tag allowed a note, want denial")
+	}
+	if len(fake.added) != 1 {
+		t.Errorf("added = %v, want no extra note", fake.added)
+	}
+}
+
+func TestAddMergeRequestNoteMetadataErrorDenies(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = errors.New("metadata unavailable")
+	env := newTestEnv(t, filteredCommentRules(), fake)
+
+	res := env.call(t, "add_merge_request_note", map[string]any{
+		"provider": "fake", "repo": "team/app", "number": 1, "body": "hello",
+	})
+	if !res.IsError {
+		t.Fatal("metadata fetch error did not deny the post")
+	}
+	if len(fake.added) != 0 {
+		t.Errorf("added = %v, want no note on fail-closed", fake.added)
+	}
+}
+
+func TestListMergeRequestsFailsClosedWithReadFilter(t *testing.T) {
+	env := newTestEnv(t, filteredReadRules(), newFake())
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if !res.IsError {
+		t.Fatal("list_merge_requests allowed an active mr:read tag filter, want denial")
+	}
+}
+
+func TestListConfiguredRulesExposesFilters(t *testing.T) {
+	env := newTestEnv(t, filteredReadRules(), newFake())
+
+	res := env.call(t, "list_configured_rules", map[string]any{})
+	if res.IsError {
+		t.Fatalf("list_configured_rules: %s", resultText(t, res))
+	}
+	var out listConfiguredRulesOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Repositories) != 1 || len(out.Repositories[0].ConfiguredCapabilities) != 1 {
+		t.Fatalf("configured rules = %+v", out)
+	}
+	cap := out.Repositories[0].ConfiguredCapabilities[0]
+	if cap.Name != "mr:read" {
+		t.Errorf("capability name = %q, want mr:read", cap.Name)
+	}
+	if len(cap.Require) != 1 || cap.Require[0] != "ai-reviewed" {
+		t.Errorf("require = %v, want [ai-reviewed]", cap.Require)
+	}
+	if len(cap.Exclude) != 1 || cap.Exclude[0] != "do-not-touch" {
+		t.Errorf("exclude = %v, want [do-not-touch]", cap.Exclude)
 	}
 }
