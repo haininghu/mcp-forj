@@ -271,12 +271,17 @@ func mrArgs() map[string]any {
 	return map[string]any{"provider": "fake", "repo": "team/app"}
 }
 
-func TestNoAIDeniesCapabilityTools(t *testing.T) {
+func TestNoAIProtectsOnlyReadFile(t *testing.T) {
 	fake := newFake()
 	fake.marker = true
 	env := newTestEnv(t, allowRules("mr:read", "mr:comment", "repo:read"), fake)
 
-	calls := []struct {
+	res := env.call(t, "read_file", readFileArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("read_file result = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	}
+
+	allowed := []struct {
 		name string
 		args map[string]any
 	}{
@@ -284,29 +289,36 @@ func TestNoAIDeniesCapabilityTools(t *testing.T) {
 		{"get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1}},
 		{"list_merge_request_notes", map[string]any{"provider": "fake", "repo": "team/app", "number": 1}},
 		{"add_merge_request_note", map[string]any{"provider": "fake", "repo": "team/app", "number": 1, "body": "hi"}},
-		{"read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": "README.md"}},
 	}
-	for _, c := range calls {
+	for _, c := range allowed {
 		t.Run(c.name, func(t *testing.T) {
 			res := env.call(t, c.name, c.args)
-			if !res.IsError {
-				t.Fatalf("%s succeeded, want .noai denial", c.name)
-			}
-			if !strings.Contains(resultText(t, res), ".noai") {
-				t.Errorf("%s error = %q, want mention of .noai", c.name, resultText(t, res))
+			if res.IsError {
+				t.Fatalf("%s denied on a .noai repo: %s", c.name, resultText(t, res))
 			}
 		})
 	}
 }
 
-func TestMarkerCheckErrorDenies(t *testing.T) {
+func TestListMergeRequestsWorksOnNoAIRepo(t *testing.T) {
 	fake := newFake()
-	fake.markerErr = errors.New("network down")
+	fake.marker = true
 	env := newTestEnv(t, allowRules("mr:read"), fake)
 
 	res := env.call(t, "list_merge_requests", mrArgs())
+	if res.IsError {
+		t.Fatalf("list_merge_requests denied on a .noai repo: %s", resultText(t, res))
+	}
+}
+
+func TestMarkerCheckErrorDeniesReadFile(t *testing.T) {
+	fake := newFake()
+	fake.markerErr = errors.New("network down")
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	res := env.call(t, "read_file", readFileArgs())
 	if !res.IsError {
-		t.Fatal("list_merge_requests succeeded despite marker check error")
+		t.Fatal("read_file succeeded despite marker check error")
 	}
 	if !strings.Contains(resultText(t, res), "marker") {
 		t.Errorf("error = %q, want mention of the marker", resultText(t, res))
@@ -1456,16 +1468,16 @@ func TestRebaseMergeRequestProviderErrorIsSafe(t *testing.T) {
 	}
 }
 
-func TestRebaseMergeRequestNoAIDenies(t *testing.T) {
+func TestRebaseMergeRequestAllowedOnNoAIRepo(t *testing.T) {
 	fake := newFake()
 	fake.marker = true
 	env := newTestEnv(t, allowRules("mr:rebase"), fake)
 
 	res := env.call(t, "rebase_merge_request", rebaseArgs())
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("result = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	if res.IsError {
+		t.Fatalf("rebase_merge_request denied on a .noai repo: %s", resultText(t, res))
 	}
-	if fake.rebaseCalls != 0 {
-		t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
+	if fake.rebaseCalls != 1 {
+		t.Errorf("RebaseMergeRequest called %d times, want 1", fake.rebaseCalls)
 	}
 }

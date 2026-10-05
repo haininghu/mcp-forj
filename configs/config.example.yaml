@@ -8,10 +8,12 @@ server:
   name: mcp-forj
   log_level: info          # debug | info | warn | error
   noai:
-    marker_file: .noai     # repository marker that disables all access
-    # The marker is checked on every operation (fail-closed, no caching).
+    marker_file: .noai     # repository marker that blocks repository file reads
+    # The marker protects ONLY read_file (repo:read). Merge-request operations
+    # follow their own capabilities and still work on .noai repositories.
+    # The marker is checked on every read_file (fail-closed, no caching).
     # The provider token below MUST be able to read repository files on the
-    # default branch, otherwise the check fails and everything is denied.
+    # default branch, otherwise read_file is denied.
 
 providers:
   # A GitLab instance. Add more entries for more instances.
@@ -60,7 +62,8 @@ providers:
               require: [ai-ok]
           - mr:read
 
-      # Explicit denial (overrides anything broader that might follow).
+      # Explicit denial (overrides anything broader that might follow). Deny
+      # rules must not list capabilities.
       - repositories:
           - "legacy/**"
         effect: deny

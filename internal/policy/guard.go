@@ -65,8 +65,9 @@ func (g *Guard) Authorize(ctx context.Context, providerName, repo string, c Capa
 
 // AuthorizeWithTags checks whether capability c may be used on repo at
 // providerName with the observed tags. It evaluates the provider's policy
-// first, then performs the .noai marker check. Every decision is logged; tokens
-// and request bodies are never logged.
+// first and, only for marker-protected capabilities (see IsMarkerProtected),
+// then performs the .noai marker check. Every decision is logged; tokens and
+// request bodies are never logged.
 func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string, c Capability, tags TagSet) error {
 	p, ok := g.policies[providerName]
 	if !ok {
@@ -84,6 +85,11 @@ func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string
 		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
 	}
 
+	// The .noai marker protects only repository file reads; every other
+	// granted capability works on .noai repositories.
+	if !IsMarkerProtected(c) {
+		return nil
+	}
 	return g.checkMarker(ctx, providerName, repo)
 }
 

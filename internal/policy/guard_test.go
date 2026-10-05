@@ -21,7 +21,7 @@ func (f fakeChecker) FileExists(context.Context, string, string, string) (bool, 
 func testGuard(t *testing.T, checker FileChecker) (*Guard, *bytes.Buffer) {
 	t.Helper()
 	p := mustBuild(t, []RuleSpec{
-		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead, CapMRComment)},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead, CapMRComment, CapRepoRead)},
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
 	var buf bytes.Buffer
@@ -37,7 +37,7 @@ func testGuard(t *testing.T, checker FileChecker) (*Guard, *bytes.Buffer) {
 
 func TestGuardAllowsWhenMarkerAbsent(t *testing.T) {
 	g, logs := testGuard(t, fakeChecker{exists: false})
-	if err := g.Authorize(context.Background(), "fake", "team/app", CapMRRead); err != nil {
+	if err := g.Authorize(context.Background(), "fake", "team/app", CapRepoRead); err != nil {
 		t.Fatalf("Authorize: %v", err)
 	}
 	if !strings.Contains(logs.String(), "decision=allow") {
@@ -47,7 +47,7 @@ func TestGuardAllowsWhenMarkerAbsent(t *testing.T) {
 
 func TestGuardDeniesWhenMarkerPresent(t *testing.T) {
 	g, logs := testGuard(t, fakeChecker{exists: true})
-	err := g.Authorize(context.Background(), "fake", "team/app", CapMRRead)
+	err := g.Authorize(context.Background(), "fake", "team/app", CapRepoRead)
 	if !errors.Is(err, ErrNoAI) {
 		t.Fatalf("error = %v, want ErrNoAI", err)
 	}
@@ -58,7 +58,7 @@ func TestGuardDeniesWhenMarkerPresent(t *testing.T) {
 
 func TestGuardFailsClosedOnCheckerError(t *testing.T) {
 	g, _ := testGuard(t, fakeChecker{err: errors.New("network down")})
-	err := g.Authorize(context.Background(), "fake", "team/app", CapMRRead)
+	err := g.Authorize(context.Background(), "fake", "team/app", CapRepoRead)
 	if !errors.Is(err, ErrMarkerCheck) {
 		t.Fatalf("error = %v, want ErrMarkerCheck", err)
 	}
@@ -82,7 +82,7 @@ func TestGuardUnknownRepository(t *testing.T) {
 
 func TestGuardDeniedCapability(t *testing.T) {
 	g, _ := testGuard(t, fakeChecker{})
-	err := g.Authorize(context.Background(), "fake", "team/app", CapRepoRead)
+	err := g.Authorize(context.Background(), "fake", "team/app", CapRepoList)
 	if !errors.Is(err, ErrDenied) {
 		t.Fatalf("error = %v, want ErrDenied", err)
 	}
@@ -176,13 +176,26 @@ func TestAuthorizeWithTags(t *testing.T) {
 func TestAuthorizeWithTagsMarkerStillApplies(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
-			{Name: CapMRComment, Filter: TagFilter{Require: []string{"ai-reviewed"}}},
+			{Name: CapRepoRead, Filter: TagFilter{Require: []string{"ai-ok"}}},
 		}},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
-	err := g.AuthorizeWithTags(context.Background(), "fake", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed"}})
+	err := g.AuthorizeWithTags(context.Background(), "fake", "team/app", CapRepoRead, TagSet{Known: true, Values: []string{"ai-ok"}})
 	if !errors.Is(err, ErrNoAI) {
 		t.Fatalf("error = %v, want ErrNoAI even when tags match", err)
+	}
+}
+
+func TestMarkerDoesNotProtectOtherCapabilities(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead, CapMRComment, CapRebase)},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
+	ctx := context.Background()
+	for _, c := range []Capability{CapMRRead, CapMRComment, CapRebase} {
+		if err := g.Authorize(ctx, "fake", "team/app", c); err != nil {
+			t.Errorf("Authorize(%s) on .noai repo = %v, want nil", c, err)
+		}
 	}
 }
 

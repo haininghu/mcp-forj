@@ -667,7 +667,22 @@ providers:
 			wantErr: "duplicate capability",
 		},
 		{
-			name: "filter on deny rule",
+			name: "plain capability on deny rule",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: deny
+        capabilities: [mr:read]
+`,
+			wantErr: "capabilities are not allowed on deny rules",
+		},
+		{
+			name: "filtered capability on deny rule",
 			yaml: `
 providers:
   - name: p
@@ -681,7 +696,7 @@ providers:
           - mr:comment:
               require: [x]
 `,
-			wantErr: "not allowed on deny rules",
+			wantErr: "capabilities are not allowed on deny rules",
 		},
 	}
 	for _, tt := range tests {

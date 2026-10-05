@@ -295,6 +295,9 @@ func (c *Config) Validate() error {
 			if rule.Effect != string(policy.EffectAllow) && rule.Effect != string(policy.EffectDeny) {
 				return fmt.Errorf("config: provider %q rule %d: effect must be %q or %q", p.Name, j, policy.EffectAllow, policy.EffectDeny)
 			}
+			if rule.Effect == string(policy.EffectDeny) && len(rule.Capabilities) > 0 {
+				return fmt.Errorf("config: provider %q rule %d: capabilities are not allowed on deny rules", p.Name, j)
+			}
 			if len(rule.Repositories) == 0 {
 				return fmt.Errorf("config: provider %q rule %d: repositories must not be empty", p.Name, j)
 			}
@@ -326,9 +329,6 @@ func (c *Config) Validate() error {
 
 				if len(require) == 0 && len(exclude) == 0 {
 					continue
-				}
-				if rule.Effect == string(policy.EffectDeny) {
-					return fmt.Errorf("config: provider %q rule %d: tag filters are not allowed on deny rules", p.Name, j)
 				}
 				for _, required := range require {
 					for _, excluded := range exclude {

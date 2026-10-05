@@ -8,7 +8,8 @@ merge-request-comment tools. GitHub and the internal "Forjo" system are planned 
 are already accounted for by the provider abstraction.
 
 Access is **deny-by-default** and configured per provider and repository.
-Repositories containing a `.noai` marker file are completely off limits.
+Repositories containing a `.noai` marker file cannot have their files read
+(`read_file`); all other operations follow their own capabilities.
 
 See [`docs/DESIGN.md`](docs/DESIGN.md) for the full design and
 [`configs/config.example.yaml`](configs/config.example.yaml) for a documented
@@ -65,6 +66,9 @@ See `configs/config.example.yaml`. Capabilities:
 - `mr:write` – reserved (creating/updating/merging MRs).
 - `repo:write` – reserved.
 
+`deny` rules must not list `capabilities`; a deny rule simply hides the matching
+repositories (config load rejects capabilities on deny rules).
+
 ¹ `list_repositories` returns concrete repositories listed literally in the
 configuration (unless a `deny` rule hides them) and needs no capability for that.
 The `repo:list` capability additionally allows discovery of repositories matching
@@ -76,7 +80,7 @@ config repositories — their topics are fetched and they may be omitted (counte
 returned with no provider API call. The `limit` argument bounds only the discovered
 repositories; static repositories are always returned and may push the total above
 `limit`. Listing does not check the `.noai` marker, so a `.noai` repository may appear
-in a listing; the marker still blocks every operation on it.
+in a listing; the marker only blocks `read_file`, not merge-request operations.
 
 ### Tag filters
 
@@ -122,7 +126,8 @@ Limitations:
 The `token` field accepts either a literal secret or `${NAME}` references expanded
 from the environment, e.g. `token: "${GITLAB_WORK_TOKEN}"`. The resolved token is
 never logged. It must be able to read repository files on the default branch so the
-`.noai` check works; otherwise all access is denied (fail-closed).
+`.noai` check works; otherwise `read_file` is denied (fail-closed). Merge-request
+operations are not affected by `.noai`.
 
 ## License
 
