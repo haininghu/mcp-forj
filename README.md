@@ -5,8 +5,8 @@ controlled access to code hosting providers. The first iteration supports **GitL
 GitHub and the internal "Forgejo" system are planned and already accounted for by the provider abstraction.
 
 Access is **deny-by-default** and configured per provider and repository. Repositories containing a `.noai`
-marker file cannot have their contents read or written; merge-request operations and repository listing
-follow their own capabilities.
+marker file deny **every** capability unless the matching grant is explicitly exempted with
+`noai: allow` (see [`.noai` marker](#noai-marker)).
 
 See [`AGENTS.md`](AGENTS.md) for contributor/agent instructions and
 [`configs/config.example.yaml`](configs/config.example.yaml) for a documented configuration.
@@ -141,7 +141,8 @@ capabilities:
 Tags are matched by exact, case-sensitive equality. Path globs are case-sensitive (`*.md` is root-level
 only, `**/*.md` matches at any depth). An empty `paths.include` allows all paths; `paths.exclude` wins
 over `paths.include`; an active path filter with an empty path fails closed. Tags and paths combine (both
-must pass). Whenever required information cannot be determined, the decision fails closed.
+must pass). Whenever required information cannot be determined, the decision fails closed. A capability
+may also carry `noai: allow` to exempt it from the `.noai` default-deny overlay.
 
 ### Repository listing
 
@@ -163,9 +164,28 @@ enables discovery of repositories matching glob patterns through the provider AP
 
 ### `.noai` marker
 
-The `.noai` file is checked on the repository default branch before any **repository-content** operation:
-`repo:read` (`read_file`) and `repo:write`. A marker check failure fails closed. The marker does **not**
-affect merge-request operations or `list_repositories`/`list_configured_rules`.
+`.noai` is a **capability-level default-deny overlay**: on a repository carrying the marker, every
+capability is denied unless the matching grant is explicitly exempted with `noai: allow`. The marker is
+checked on the repository's default branch and is **fail-closed** (a check failure denies). It is
+evaluated after the policy decision (first match wins); an exempt grant skips the check.
+
+```yaml
+capabilities:
+  - repo:list              # not exempt -> .noai repos are hidden from discovery
+  - repo:read:
+      noai: allow
+  - mr:read:
+      noai: allow
+  - mr:rebase              # not exempt -> denied on .noai repos
+```
+
+Literal (explicitly configured) repositories are always listed, even if `.noai`. Discovered `.noai`
+repositories are omitted unless the `repo:list` grant is exempt. `.noai` is an **integrity control**
+(no unreviewed changes), not a confidentiality control: content can still reach the agent through
+exempted reads (`repo:read`, `mr:read`, `mr:diff`).
+
+Because the marker is checked for every non-exempt capability, the token must be able to read repository
+files on the default branch; otherwise non-exempt operations on **any** repository fail closed.
 
 ## GitLab token permissions
 
@@ -200,7 +220,8 @@ the server sends `HEAD` (default branch) when no ref is given.
   missing permission surfaces as a "forbidden" message naming the required permission; a non-rebaseable
   merge request surfaces as "not in a rebaseable state".
 - No caching: labels, topics and markers are fetched on every operation.
-- `mr:diff` is not `.noai`-protected; diffs are repository content but follow their own capability.
+- `mr:diff` is denied on a `.noai` repository unless the grant is exempted with `noai: allow`; diffs are
+  repository content, but the marker is an integrity control, not a confidentiality control.
 - `repo:write`/`mr:write` are reserved; only the capabilities listed above have tools.
 
 ## Docs

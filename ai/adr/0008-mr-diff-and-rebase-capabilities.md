@@ -26,8 +26,10 @@ can contain source code). We wanted least-privilege grants for both.
   `detailed_merge_status`).
 - Both capabilities accept MR **tag filters** (labels), evaluated like other MR
   operations after fetching MR metadata. A metadata-fetch failure fails closed.
-- Diffs are merge-request metadata, not repository-content reads, so `.noai` does
-  **not** protect them.
+- Diffs contain repository content, but reading is not a change. Under the `.noai`
+  default-deny overlay (ADR 0003) `mr:diff` is denied on a `.noai` repository
+  unless the grant is exempted with `noai: allow`; there is no separate hardcoded
+  protection for it.
 - Labels are never returned in any output.
 
 ## Consequences

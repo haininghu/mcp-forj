@@ -33,7 +33,8 @@ push to the source branch (at least Developer). GitLab returns `202 Accepted`.
 4. `Guard.AuthorizeWithTags(mr:rebase, {labels})`.
 5. Request the rebase.
 
-`.noai` does not apply.
+`.noai` default-deny applies: the rebase is denied on a `.noai` repository unless
+the `mr:rebase` grant is exempted with `noai: allow`.
 
 ## Behavior / limits
 

@@ -8,13 +8,13 @@ server:
   name: mcp-forj
   log_level: info          # debug | info | warn | error
   noai:
-    marker_file: .noai     # repository marker that blocks content read/write
-    # The marker protects operations on repository CONTENTS (repo:read and
-    # repo:write). Merge-request operations (mr:*) and repository listing
-    # (repo:list) follow their own capabilities and still work on .noai repos.
-    # The marker is checked on every content operation (fail-closed, no caching).
+    marker_file: .noai     # repository marker for the capability default-deny
+    # .noai is a capability-level default-deny overlay: on a .noai repository
+    # EVERY capability is denied unless its grant is explicitly exempted with
+    # `noai: allow` (see the capabilities below). The marker is checked on the
+    # default branch, fail-closed, on every non-exempt operation (no caching).
     # The provider token below MUST be able to read repository files on the
-    # default branch, otherwise read_file is denied.
+    # default branch, otherwise non-exempt operations fail closed.
 
 providers:
   # A GitLab instance. Add more entries for more instances.
@@ -35,7 +35,10 @@ providers:
           - "team/service-b"
         effect: allow
         capabilities:
-          - mr:read
+          # `noai: allow` exempts this capability from the .noai default-deny
+          # overlay; on a .noai repository it would otherwise be denied.
+          - mr:read:
+              noai: allow
           # A capability may carry a tag filter. For MR capabilities the tags
           # are GitLab labels; for repo capabilities they are project topics.
           # The subject must have ALL `require` tags and NONE of the `exclude`

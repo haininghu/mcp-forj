@@ -30,7 +30,8 @@ Fine-grained permission: **Merge Request: Read**.
    failure denies (fail-closed).
 4. `Guard.AuthorizeWithTags(mr:read, {labels})`.
 
-`.noai` does not apply.
+`.noai` default-deny applies: the fetch is denied on a `.noai` repository unless the
+`mr:read` grant is exempted with `noai: allow`.
 
 ## Behavior / limits
 

@@ -31,8 +31,9 @@ Fine-grained permission: **Merge Request: Read**.
 4. `Guard.AuthorizeWithTags(mr:diff, {labels})`.
 5. List diffs (paginated) and map them.
 
-`.noai` does **not** apply: diffs are merge-request metadata, not a
-repository-content read.
+`.noai` default-deny applies: diffs are denied on a `.noai` repository unless the
+`mr:diff` grant is exempted with `noai: allow`. Diffs contain repository content, but
+the marker is an integrity control (no unreviewed changes), not a confidentiality one.
 
 ## Behavior / limits
 

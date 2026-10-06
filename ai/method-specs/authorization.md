@@ -4,7 +4,8 @@
 
 The shared evaluation pipeline used by every capability-gated tool: it turns a
 provider, repository, capability and (optional) tags/path into an allow/deny
-decision, with the `.noai` marker layered on top for content operations.
+decision, with the `.noai` default-deny overlay layered on top for every
+capability.
 
 ## Inputs
 
@@ -22,7 +23,8 @@ N/A — this is the evaluator used by all tools.
 
 ## GitLab endpoint(s)
 
-- `FileExists(repo, ".noai", "HEAD")` — the marker check for content operations.
+- `FileExists(repo, ".noai", "HEAD")` — the marker check for non-exempt
+  capabilities.
 
 ## Authorization
 
@@ -35,8 +37,12 @@ N/A — this is the evaluator used by all tools.
 5. Final decision:
    - `Guard.AuthorizeWithTags` — tags only (no path). Used by MR tools.
    - `Guard.AuthorizeResource` — tags + path. Used by `read_file`.
-   For marker-protected capabilities only, this also runs the `.noai` check.
+   Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
 6. On allow, perform the provider call; map errors with `mapProviderError`.
+
+Tools that evaluate tags per item or per candidate (repository discovery,
+`list_merge_requests`) use the policy-only `Evaluate`/`EvaluateWithTags` and then
+`Guard.CheckNoAI(ctx, provider, repo, decision.NoAIExempt)`.
 
 Decision reasons (all fail closed unless allowed):
 
@@ -47,15 +53,19 @@ Decision reasons (all fail closed unless allowed):
 - `tag requirement not met` / `excluded tag present` — exact, case-sensitive.
 - `path required` — active path filter, empty path.
 - `path not allowed` / `path excluded` — doublestar; exclude wins over include.
-- `.noai` — marker present or marker check failed, for `repo:read`/`repo:write`.
+- `.noai` — marker present or marker check failed, for any capability whose
+  matched grant is not `noai`-exempt.
 
 ## Behavior / limits
 
 - Rules are ordered; the first matching rule wins.
 - Deny-by-default: no match denies.
 - Tags/paths are never cached or returned.
-- `.noai` protects only `repo:read` and `repo:write`; it does not affect `mr:*` or
-  `repo:list`.
+- `.noai` is a capability-level default-deny overlay: every capability is denied on
+  a `.noai` repository unless the matched grant is exempted with `noai: allow`.
+  Literal (explicitly configured) repositories are still listed; discovered `.noai`
+  repositories are omitted unless the `repo:list` grant is exempt. The marker is
+  checked on the default branch and is fail-closed.
 
 ## Errors
 

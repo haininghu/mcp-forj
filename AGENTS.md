@@ -83,9 +83,11 @@ Authorization is the product. These rules are security-critical:
 4. **Capabilities are validated at config load.** Unknown capabilities and bad patterns are rejected.
 5. **Authorize before the provider call.** Every capability-gated tool authorizes first and fails
    closed on any error (including unknown tags/topics and metadata-fetch failures).
-6. **`.noai` scope.** It protects **only repository-content operations** (`repo:read`, `repo:write`).
-   It is checked on the repository's **default branch** via a file read with `ref=HEAD`, is
-   fail-closed, and does **not** affect `mr:*` or `repo:list`.
+6. **`.noai` scope.** It is a **capability-level default-deny overlay**: on a `.noai` repo every
+   capability is denied unless the matching grant is explicitly exempted with `noai: allow`. It is
+   checked on the repository's **default branch** via a file read with `ref=HEAD`, is fail-closed,
+   and runs after the policy decision (first-match-wins); an exempt grant skips the check. Literal
+   config repositories stay listed; discovered `.noai` repos are omitted unless `repo:list` is exempt.
 7. **Tag filters** match exact, case-sensitive values: GitLab MR **labels** for `mr:*`, project
    **topics** for `repo:*`. When the information is unknown, the decision fails closed.
 8. **Path filters** (doublestar) apply only to `repo:read`/`repo:write`; `paths.exclude` wins over
@@ -93,6 +95,9 @@ Authorization is the product. These rules are security-critical:
 9. **Data hygiene.** Labels, topics and tokens are never returned in tool output or logs.
 10. **Error hygiene.** Provider errors are mapped to safe messages with the numeric HTTP status;
     forbidden errors name the resource permission the operation needs.
+11. **`.noai` is an integrity control, not a confidentiality control.** It blocks non-exempt
+    operations; it does **not** stop content from reaching the agent through exempted reads
+    (`repo:read`, `mr:read`, `mr:diff`). Confidentiality is enforced by the capability policy.
 
 ## Authorization flow
 
@@ -105,11 +110,12 @@ Every capability-gated tool follows the same pipeline:
    MR metadata (`tags = labels`) for `mr:*`; project topics for `repo:*`.
    A fetch failure denies the operation (fail-closed).
 5. **Authorize with tags**: `Guard.AuthorizeWithTags` (tags) or `Guard.AuthorizeResource`
-   (tags + path). For marker-protected capabilities only, this also runs the `.noai` check.
+   (tags + path). Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
 6. Perform the provider operation and map the result. Map errors with `mapProviderError`.
 
 `list_merge_requests` filters client-side from list-endpoint labels (`omitted` counts drops);
-`list_repositories` uses policy-only `Guard.EvaluateWithTags` for discovered candidates.
+`list_repositories` lists literal repositories without a marker check and marker-checks discovered
+candidates (omitting `.noai` ones unless the `repo:list` grant is `noai`-exempt).
 
 ## Where to look
 

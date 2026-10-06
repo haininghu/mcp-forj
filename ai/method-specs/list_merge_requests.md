@@ -33,7 +33,9 @@ Fine-grained permission: **Merge Request: Read**.
    labels returned by the list endpoint. No metadata fetch is needed; the list
    response carries `labels`.
 
-`.noai` does not apply.
+`.noai` default-deny applies: listing is denied on a `.noai` repository unless the
+`mr:read` grant is exempted with `noai: allow`. The marker is checked once per
+request, after the policy pre-check and before the provider list call.
 
 ## Behavior / limits
 

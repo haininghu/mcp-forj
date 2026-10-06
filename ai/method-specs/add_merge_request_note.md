@@ -33,7 +33,8 @@ for the metadata fetch used for tag evaluation.
 4. `Guard.AuthorizeWithTags(mr:comment, {labels})`.
 5. Post the note and map the result.
 
-`.noai` does not apply.
+`.noai` default-deny applies: posting is denied on a `.noai` repository unless the
+`mr:comment` grant is exempted with `noai: allow`.
 
 ## Behavior / limits
 

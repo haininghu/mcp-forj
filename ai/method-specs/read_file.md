@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Read a repository file at an optional ref. This is the only `.noai`-protected tool.
+Read a repository file at an optional ref.
 
 ## Inputs
 
@@ -32,8 +32,9 @@ Fine-grained permission: **Repository: Read**.
    (`GetRepositoryTopics`); a topic-only failure denies. Path-only filters make no
    topic call.
 5. `Guard.AuthorizeResource(repo:read, tags, cleanedPath)` — tag and path checks plus
-   the `.noai` marker check. The marker is checked at the default branch via
-   `FileExists(repo, ".noai", "HEAD")`; present or failed denies (fail-closed).
+   the `.noai` marker check, unless the matched grant is exempted with `noai: allow`.
+   The marker is checked at the default branch via `FileExists(repo, ".noai", "HEAD")`;
+   present or failed denies (fail-closed).
 6. Read the file and return it.
 
 ## Behavior / limits

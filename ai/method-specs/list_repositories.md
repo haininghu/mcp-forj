@@ -29,15 +29,18 @@ Fine-grained permission: **Project: Read** (group/project must be in token scope
 ## Authorization
 
 - Literal repositories: returned subject to the first matching rule being `allow`
-  (a `deny` rule hides them). No capability, provider call or `.noai` check.
+  (a `deny` rule hides them). No capability, provider call or `.noai` check; an
+  explicitly configured repository is always listed even if it is `.noai`.
   Exception: an active `repo:list` topic filter also applies to literal entries;
   their topics are fetched and a failure/non-match omits them and increments
   `omitted` (fail-closed).
 - Discovery: eligible when at least one allow rule grants `repo:list`
   (`Guard.AuthorizeList`). Each candidate is filtered with the policy-only
-  `Guard.EvaluateWithTags(repo:list, topics)`. Missing `repo:list` is not an error;
-  only literal repositories are returned.
-- Listing never checks the `.noai` marker.
+  `Guard.EvaluateWithTags(repo:list, topics)`; a `.noai` candidate is then omitted
+  (counted in `omitted`) unless the `repo:list` grant is exempted with
+  `noai: allow`, and a marker-check failure also omits it (fail-closed). Missing
+  `repo:list` is not an error; only literal repositories are returned.
+- Only discovered candidates are marker-checked; literal repositories are not.
 
 ## Behavior / limits
 

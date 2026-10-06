@@ -31,7 +31,8 @@ Fine-grained permissions: **Work Item: Read** (notes) and **Merge Request: Read*
 4. `Guard.AuthorizeWithTags(mr:read, {labels})`.
 5. List notes and map them.
 
-`.noai` does not apply.
+`.noai` default-deny applies: listing notes is denied on a `.noai` repository unless
+the `mr:read` grant is exempted with `noai: allow`.
 
 ## Behavior / limits
 
