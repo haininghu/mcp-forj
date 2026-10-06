@@ -185,7 +185,6 @@ type repositoryJSON struct {
 
 type listRepositoriesOutput struct {
 	Repositories []repositoryJSON `json:"repositories"`
-	Omitted      int              `json:"omitted"`
 	Truncated    bool             `json:"truncated"`
 }
 
@@ -206,7 +205,6 @@ type mergeRequestJSON struct {
 
 type listMergeRequestsOutput struct {
 	MergeRequests []mergeRequestJSON `json:"merge_requests"`
-	Omitted       int                `json:"omitted"`
 	Truncated     bool               `json:"truncated"`
 }
 
@@ -403,10 +401,9 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 					return nil, nil, fmt.Errorf("unknown provider %q", name)
 				}
 				if !decision.Allowed {
-					// Only candidates that matched a rule but were blocked are
-					// counted; candidates with no matching rule are dropped
-					// silently, so omitted does not reveal how many
-					// repositories are hidden in total.
+					// The count is logged server-side only; it is never
+					// returned, so the client cannot tell how many repositories
+					// are hidden.
 					if decision.Matched {
 						omitted++
 					}
@@ -448,7 +445,15 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		return collected[i].Path < collected[j].Path
 	})
 
-	return jsonResult(listRepositoriesOutput{Repositories: collected, Omitted: omitted, Truncated: truncated})
+	// omitted is logged server-side only: returning it would tell the client that
+	// more repositories exist than it can see.
+	s.logger.Info("repository listing",
+		"provider", name,
+		"returned", len(collected),
+		"omitted", omitted,
+		"truncated", truncated,
+	)
+	return jsonResult(listRepositoriesOutput{Repositories: collected, Truncated: truncated})
 }
 
 // listMergeRequests lists merge request metadata. The GitLab list endpoint
@@ -509,7 +514,16 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 		}
 		out = append(out, toMergeRequestJSON(mr))
 	}
-	return jsonResult(listMergeRequestsOutput{MergeRequests: out, Omitted: omitted, Truncated: truncated})
+	// omitted is logged server-side only: returning it would tell the client that
+	// more merge requests exist than it can see.
+	s.logger.Info("merge request listing",
+		"provider", in.Provider,
+		"repo", in.Repo,
+		"returned", len(out),
+		"omitted", omitted,
+		"truncated", truncated,
+	)
+	return jsonResult(listMergeRequestsOutput{MergeRequests: out, Truncated: truncated})
 }
 
 func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in getMergeRequestInput) (*mcp.CallToolResult, any, error) {

@@ -643,9 +643,6 @@ func TestListRepositoriesFiltersByPattern(t *testing.T) {
 			t.Errorf("unexpected repository %q", r.Path)
 		}
 	}
-	if out.Omitted != 0 {
-		t.Errorf("omitted = %d, want 0", out.Omitted)
-	}
 }
 
 func TestListRepositoriesDenyBeforeAllow(t *testing.T) {
@@ -668,9 +665,6 @@ func TestListRepositoriesDenyBeforeAllow(t *testing.T) {
 	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
 		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
 	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
-	}
 }
 
 func TestListRepositoriesDiscoveredNoAIOmittedByDefault(t *testing.T) {
@@ -689,9 +683,6 @@ func TestListRepositoriesDiscoveredNoAIOmittedByDefault(t *testing.T) {
 	out := repoJSON(t, res)
 	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
 		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
-	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
 	}
 }
 
@@ -719,9 +710,6 @@ func TestListRepositoriesDiscoveredNoAIIncludedWhenExempt(t *testing.T) {
 	if len(out.Repositories) != 2 {
 		t.Fatalf("repositories = %v, want both (repo:list exempt)", out.Repositories)
 	}
-	if out.Omitted != 0 {
-		t.Errorf("omitted = %d, want 0", out.Omitted)
-	}
 }
 
 func TestListRepositoriesMarkerErrorOmitsCandidate(t *testing.T) {
@@ -740,9 +728,6 @@ func TestListRepositoriesMarkerErrorOmitsCandidate(t *testing.T) {
 	out := repoJSON(t, res)
 	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
 		t.Fatalf("repositories = %v, want [archive/ok] (marker error omits candidate)", out.Repositories)
-	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
 	}
 }
 
@@ -823,9 +808,6 @@ func TestListRepositoriesTruncatedWhenFetchWindowExhausted(t *testing.T) {
 	}
 	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
 		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
-	}
-	if out.Omitted != 0 {
-		t.Errorf("omitted = %d, want 0 (no-rule candidates are not counted)", out.Omitted)
 	}
 }
 
@@ -1177,9 +1159,6 @@ func TestListMergeRequestsTagFilterRequire(t *testing.T) {
 	if len(out.MergeRequests) != 1 || out.MergeRequests[0].Title != "renovate" {
 		t.Fatalf("merge_requests = %v, want only the renovate MR", out.MergeRequests)
 	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
-	}
 }
 
 func TestListMergeRequestsTagFilterExclude(t *testing.T) {
@@ -1198,9 +1177,6 @@ func TestListMergeRequestsTagFilterExclude(t *testing.T) {
 	if len(out.MergeRequests) != 1 || out.MergeRequests[0].Title != "renovate" {
 		t.Fatalf("merge_requests = %v, want the non-excluded MR only", out.MergeRequests)
 	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
-	}
 }
 
 func TestListMergeRequestsTagFilterUnknownLabelsOmitted(t *testing.T) {
@@ -1217,9 +1193,6 @@ func TestListMergeRequestsTagFilterUnknownLabelsOmitted(t *testing.T) {
 	out := mrListJSON(t, res)
 	if len(out.MergeRequests) != 0 {
 		t.Fatalf("merge_requests = %v, want none (unknown labels fail closed)", out.MergeRequests)
-	}
-	if out.Omitted != 1 {
-		t.Errorf("omitted = %d, want 1", out.Omitted)
 	}
 }
 
@@ -1239,9 +1212,6 @@ func TestListMergeRequestsNoFilterReturnsAll(t *testing.T) {
 	out := mrListJSON(t, res)
 	if len(out.MergeRequests) != 3 {
 		t.Fatalf("merge_requests = %d, want all 3", len(out.MergeRequests))
-	}
-	if out.Omitted != 0 {
-		t.Errorf("omitted = %d, want 0", out.Omitted)
 	}
 }
 
@@ -1391,15 +1361,14 @@ func TestNoAIDeniesReadFileWhenTopicFilterPasses(t *testing.T) {
 
 func TestListRepositoriesStaticTopicFilter(t *testing.T) {
 	tests := []struct {
-		name        string
-		topics      map[string][]string
-		topicsErr   map[string]error
-		wantCount   int
-		wantOmitted int
+		name      string
+		topics    map[string][]string
+		topicsErr map[string]error
+		wantCount int
 	}{
-		{"matching topic included", map[string][]string{"team/app": {"ai-ok"}}, nil, 1, 0},
-		{"missing topic omitted", map[string][]string{"team/app": {"other"}}, nil, 0, 1},
-		{"topic error omitted", nil, map[string]error{"team/app": errors.New("boom")}, 0, 1},
+		{"matching topic included", map[string][]string{"team/app": {"ai-ok"}}, nil, 1},
+		{"missing topic omitted", map[string][]string{"team/app": {"other"}}, nil, 0},
+		{"topic error omitted", nil, map[string]error{"team/app": errors.New("boom")}, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1415,9 +1384,6 @@ func TestListRepositoriesStaticTopicFilter(t *testing.T) {
 			out := repoJSON(t, res)
 			if len(out.Repositories) != tt.wantCount {
 				t.Errorf("repositories = %v, want %d", out.Repositories, tt.wantCount)
-			}
-			if out.Omitted != tt.wantOmitted {
-				t.Errorf("omitted = %d, want %d", out.Omitted, tt.wantOmitted)
 			}
 			if fake.topicsCalls != 1 {
 				t.Errorf("GetRepositoryTopics called %d times, want exactly 1", fake.topicsCalls)
@@ -1467,9 +1433,6 @@ func TestListRepositoriesDiscoveredTopicFilter(t *testing.T) {
 	out := repoJSON(t, res)
 	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/good" {
 		t.Fatalf("repositories = %v, want [archive/good]", out.Repositories)
-	}
-	if out.Omitted != 2 {
-		t.Errorf("omitted = %d, want 2 (non-matching + unknown topics)", out.Omitted)
 	}
 }
 
