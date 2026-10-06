@@ -47,9 +47,13 @@ type CapabilityFilter struct {
 	Exclude []string
 	// Paths constrains the repository-relative file path.
 	Paths PathFilter
+	// NoAIExempt exempts the capability from the .noai default-deny overlay. It
+	// is an override, not a constraint: IsZero ignores it.
+	NoAIExempt bool
 }
 
-// IsZero reports whether the filter imposes no constraints.
+// IsZero reports whether the filter imposes no constraints. NoAIExempt is an
+// override and is not a constraint, so it does not affect IsZero.
 func (f CapabilityFilter) IsZero() bool {
 	return len(f.Require) == 0 && len(f.Exclude) == 0 && f.Paths.IsZero()
 }
@@ -110,6 +114,10 @@ type Decision struct {
 	CapabilityGranted bool
 	// Matched reports whether any rule matched the repository.
 	Matched bool
+	// NoAIExempt reports whether the matched grant exempts the capability from
+	// the .noai default-deny overlay. It is only meaningful when
+	// CapabilityGranted is true.
+	NoAIExempt bool
 	// Reason is a short human-readable explanation of the decision.
 	Reason string
 }
@@ -190,40 +198,41 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 				Reason:  fmt.Sprintf("capability %s not granted", c),
 			}
 		}
+		noai := filter.NoAIExempt
 		if filter.IsZero() {
-			return Decision{Allowed: true, CapabilityGranted: true, Matched: true, Reason: "capability granted"}
+			return Decision{Allowed: true, CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "capability granted"}
 		}
 
 		if len(filter.Require) > 0 || len(filter.Exclude) > 0 {
 			if !tags.Known {
-				return Decision{CapabilityGranted: true, Matched: true, Reason: "tag information unavailable"}
+				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "tag information unavailable"}
 			}
 			for _, required := range filter.Require {
 				if !slices.Contains(tags.Values, required) {
-					return Decision{CapabilityGranted: true, Matched: true, Reason: "tag requirement not met"}
+					return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "tag requirement not met"}
 				}
 			}
 			for _, excluded := range filter.Exclude {
 				if slices.Contains(tags.Values, excluded) {
-					return Decision{CapabilityGranted: true, Matched: true, Reason: "excluded tag present"}
+					return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "excluded tag present"}
 				}
 			}
 		}
 
 		if !filter.Paths.IsZero() {
 			if path == "" {
-				return Decision{CapabilityGranted: true, Matched: true, Reason: "path required"}
+				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "path required"}
 			}
 			// Exclude wins over include.
 			if matchesAnyPath(filter.Paths.Exclude, path) {
-				return Decision{CapabilityGranted: true, Matched: true, Reason: "path excluded"}
+				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "path excluded"}
 			}
 			if len(filter.Paths.Include) > 0 && !matchesAnyPath(filter.Paths.Include, path) {
-				return Decision{CapabilityGranted: true, Matched: true, Reason: "path not allowed"}
+				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "path not allowed"}
 			}
 		}
 
-		return Decision{Allowed: true, CapabilityGranted: true, Matched: true, Reason: "capability granted"}
+		return Decision{Allowed: true, CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "capability granted"}
 	}
 	return Decision{Matched: false, Reason: "no matching rule"}
 }
@@ -422,6 +431,7 @@ func cloneFilter(f CapabilityFilter) CapabilityFilter {
 			Include: append([]string(nil), f.Paths.Include...),
 			Exclude: append([]string(nil), f.Paths.Exclude...),
 		},
+		NoAIExempt: f.NoAIExempt,
 	}
 }
 

@@ -72,10 +72,9 @@ func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string
 
 // AuthorizeResource checks whether capability c may be used on repo at
 // providerName with the observed tags and repository-relative path. It evaluates
-// the provider's policy first (tags and path constraints must both pass) and,
-// only for marker-protected capabilities (see IsMarkerProtected), then performs
-// the .noai marker check. Every decision is logged; tokens and request bodies
-// are never logged.
+// the provider's policy first (tags and path constraints must both pass) and
+// then performs the .noai marker check unless the matched grant is exempt. Every
+// decision is logged; tokens and request bodies are never logged.
 func (g *Guard) AuthorizeResource(ctx context.Context, providerName, repo string, c Capability, tags TagSet, path string) error {
 	p, ok := g.policies[providerName]
 	if !ok {
@@ -93,9 +92,20 @@ func (g *Guard) AuthorizeResource(ctx context.Context, providerName, repo string
 		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
 	}
 
-	// The .noai marker protects only repository-content operations; every other
-	// granted capability works on .noai repositories.
-	if !IsMarkerProtected(c) {
+	// .noai is a capability-level default-deny overlay: every capability is
+	// denied on a .noai repository unless the matched grant exempts it.
+	if decision.NoAIExempt {
+		return nil
+	}
+	return g.checkMarker(ctx, providerName, repo)
+}
+
+// CheckNoAI enforces the .noai default-deny overlay for a repository whose
+// matched grant carries the given exemption. exempt=true skips the check. It is
+// used by tools that evaluate tags per item or per candidate and therefore
+// cannot use AuthorizeResource. The check is fail-closed.
+func (g *Guard) CheckNoAI(ctx context.Context, providerName, repo string, exempt bool) error {
+	if exempt {
 		return nil
 	}
 	return g.checkMarker(ctx, providerName, repo)

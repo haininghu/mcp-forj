@@ -67,6 +67,7 @@ func run() error {
 							Include: grant.Paths.Include,
 							Exclude: grant.Paths.Exclude,
 						},
+						NoAIExempt: grant.NoAIExempt,
 					},
 				}
 			}

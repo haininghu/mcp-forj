@@ -858,6 +858,117 @@ providers:
 	}
 }
 
+func TestCapabilityGrantNoAIAllow(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:read:
+              noai: allow
+              paths:
+                include: ["docs/**"]
+          - mr:read:
+              noai: allow
+              require: [ai-ok]
+          - repo:list
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := cfg.Providers[0].Rules[0].Capabilities
+	if len(got) != 3 {
+		t.Fatalf("capabilities = %+v", got)
+	}
+	if got[0].Name != "repo:read" || !got[0].NoAIExempt {
+		t.Errorf("repo:read grant = %+v, want NoAIExempt", got[0])
+	}
+	if len(got[0].Paths.Include) != 1 || got[0].Paths.Include[0] != "docs/**" {
+		t.Errorf("repo:read paths = %v", got[0].Paths)
+	}
+	if got[1].Name != "mr:read" || !got[1].NoAIExempt || len(got[1].Require) != 1 {
+		t.Errorf("mr:read grant = %+v, want NoAIExempt + require", got[1])
+	}
+	if got[2].Name != "repo:list" || got[2].NoAIExempt {
+		t.Errorf("repo:list grant = %+v, want no exemption", got[2])
+	}
+}
+
+func TestCapabilityGrantNoAIRejections(t *testing.T) {
+	tests := []struct {
+		name    string
+		capYAML string
+		wantErr string
+	}{
+		{
+			name:    "deny value",
+			capYAML: "          - repo:read:\n              noai: deny\n",
+			wantErr: `noai must be "allow"`,
+		},
+		{
+			name:    "boolean value",
+			capYAML: "          - repo:read:\n              noai: true\n",
+			wantErr: "noai",
+		},
+		{
+			name:    "list value",
+			capYAML: "          - repo:read:\n              noai: [allow]\n",
+			wantErr: "noai",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+` + tt.capYAML
+			_, err := Parse([]byte(yaml))
+			if err == nil {
+				t.Fatal("Parse succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCapabilityGrantNoAIOnDenyRuleRejected(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: deny
+        capabilities:
+          - repo:read:
+              noai: allow
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("Parse accepted capabilities on a deny rule")
+	}
+	if !strings.Contains(err.Error(), "deny") {
+		t.Errorf("error = %q, want mention of deny", err)
+	}
+}
+
 func TestCapabilityGrantPathFilterRejections(t *testing.T) {
 	tests := []struct {
 		name    string

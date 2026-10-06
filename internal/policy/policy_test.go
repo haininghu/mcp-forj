@@ -103,6 +103,56 @@ func TestEvaluateWithTags(t *testing.T) {
 	}
 }
 
+func TestEvaluateNoAIExempt(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{NoAIExempt: true}},
+			{Name: CapRepoList},
+			{Name: CapMRRead, Filter: CapabilityFilter{NoAIExempt: true, Require: []string{"ai-ok"}}},
+		}},
+	})
+
+	if got := p.Evaluate("team/app", CapRepoRead); !got.Allowed || !got.NoAIExempt {
+		t.Errorf("repo:read = %+v, want allowed + NoAIExempt", got)
+	}
+	if got := p.Evaluate("team/app", CapRepoList); !got.Allowed || got.NoAIExempt {
+		t.Errorf("repo:list = %+v, want allowed without exemption", got)
+	}
+	// The exemption is carried even when a tag constraint fails.
+	got := p.EvaluateWithTags("team/app", CapMRRead, TagSet{Known: true, Values: []string{"other"}})
+	if got.Allowed || !got.CapabilityGranted || !got.NoAIExempt {
+		t.Errorf("mr:read tag failure = %+v, want not allowed but NoAIExempt retained", got)
+	}
+	// Deny/no-match decisions never carry the exemption.
+	if got := p.Evaluate("team/secret", CapRepoRead); got.NoAIExempt {
+		t.Errorf("unknown repository decision = %+v, want NoAIExempt false", got)
+	}
+}
+
+func TestNoAIExemptCloneAndIsZero(t *testing.T) {
+	if !(CapabilityFilter{NoAIExempt: true}).IsZero() {
+		t.Error("NoAIExempt must not affect IsZero")
+	}
+	f := CapabilityFilter{NoAIExempt: true, Require: []string{"ai-ok"}}
+	c := cloneFilter(f)
+	if !c.NoAIExempt || len(c.Require) != 1 {
+		t.Errorf("cloneFilter = %+v, want NoAIExempt preserved", c)
+	}
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: f},
+		}},
+	})
+	rules := p.Rules()
+	if !rules[0].Capabilities[CapRepoRead].NoAIExempt {
+		t.Error("Rules did not preserve NoAIExempt")
+	}
+	sorted := rules[0].SortedCapabilities()
+	if len(sorted) != 1 || !sorted[0].Filter.NoAIExempt {
+		t.Errorf("SortedCapabilities = %+v, want NoAIExempt preserved", sorted)
+	}
+}
+
 func TestRulesReturnsCopy(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{

@@ -292,43 +292,84 @@ func mrArgs() map[string]any {
 	return map[string]any{"provider": "fake", "repo": "team/app"}
 }
 
-func TestNoAIProtectsOnlyReadFile(t *testing.T) {
+func TestNoAIDeniesAllCapabilitiesByDefault(t *testing.T) {
 	fake := newFake()
 	fake.marker = true
-	env := newTestEnv(t, allowRules("mr:read", "mr:comment", "repo:read"), fake)
+	env := newTestEnv(t, allowRules("mr:read", "mr:comment", "mr:rebase", "repo:read", "repo:list"), fake)
 
-	res := env.call(t, "read_file", readFileArgs())
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("read_file result = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
-	}
-
-	allowed := []struct {
+	denied := []struct {
 		name string
 		args map[string]any
 	}{
+		{"read_file", readFileArgs()},
 		{"list_merge_requests", mrArgs()},
 		{"get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1}},
 		{"list_merge_request_notes", map[string]any{"provider": "fake", "repo": "team/app", "number": 1}},
 		{"add_merge_request_note", map[string]any{"provider": "fake", "repo": "team/app", "number": 1, "body": "hi"}},
+		{"rebase_merge_request", rebaseArgs()},
 	}
-	for _, c := range allowed {
+	for _, c := range denied {
 		t.Run(c.name, func(t *testing.T) {
 			res := env.call(t, c.name, c.args)
-			if res.IsError {
-				t.Fatalf("%s denied on a .noai repo: %s", c.name, resultText(t, res))
+			if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+				t.Fatalf("%s result = %q (isError=%v), want .noai denial", c.name, resultText(t, res), res.IsError)
 			}
 		})
 	}
 }
 
-func TestListMergeRequestsWorksOnNoAIRepo(t *testing.T) {
+func TestNoAIExemptAllowsCapability(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{
+			{Name: "repo:read", Filter: policy.CapabilityFilter{NoAIExempt: true}},
+			{Name: "mr:rebase", Filter: policy.CapabilityFilter{NoAIExempt: true}},
+			{Name: "mr:comment"}, // not exempt
+		},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	if res := env.call(t, "read_file", readFileArgs()); res.IsError {
+		t.Fatalf("read_file denied despite noai exemption: %s", resultText(t, res))
+	}
+	if res := env.call(t, "rebase_merge_request", rebaseArgs()); res.IsError {
+		t.Fatalf("rebase denied despite noai exemption: %s", resultText(t, res))
+	}
+	res := env.call(t, "add_merge_request_note", map[string]any{"provider": "fake", "repo": "team/app", "number": 1, "body": "hi"})
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("add_merge_request_note = %q, want .noai denial (not exempt)", resultText(t, res))
+	}
+}
+
+func TestListMergeRequestsDeniedOnNoAIRepoByDefault(t *testing.T) {
 	fake := newFake()
 	fake.marker = true
 	env := newTestEnv(t, allowRules("mr:read"), fake)
 
 	res := env.call(t, "list_merge_requests", mrArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("list_merge_requests = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	}
+}
+
+func TestListMergeRequestsAllowedOnNoAIRepoWhenExempt(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{
+			{Name: "mr:read", Filter: policy.CapabilityFilter{NoAIExempt: true}},
+		},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
 	if res.IsError {
-		t.Fatalf("list_merge_requests denied on a .noai repo: %s", resultText(t, res))
+		t.Fatalf("list_merge_requests denied despite noai exemption: %s", resultText(t, res))
 	}
 }
 
@@ -632,7 +673,7 @@ func TestListRepositoriesDenyBeforeAllow(t *testing.T) {
 	}
 }
 
-func TestListRepositoriesDiscoveredNoAIIncluded(t *testing.T) {
+func TestListRepositoriesDiscoveredNoAIOmittedByDefault(t *testing.T) {
 	fake := newFake()
 	fake.repos = []provider.Repository{
 		{Provider: "fake", Path: "archive/noai"},
@@ -646,15 +687,44 @@ func TestListRepositoriesDiscoveredNoAIIncluded(t *testing.T) {
 		t.Fatalf("list_repositories: %s", resultText(t, res))
 	}
 	out := repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
+		t.Fatalf("repositories = %v, want [archive/ok]", out.Repositories)
+	}
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
+	}
+}
+
+func TestListRepositoriesDiscoveredNoAIIncludedWhenExempt(t *testing.T) {
+	fake := newFake()
+	fake.repos = []provider.Repository{
+		{Provider: "fake", Path: "archive/noai"},
+		{Provider: "fake", Path: "archive/ok"},
+	}
+	fake.markerByRepo = map[string]bool{"archive/noai": true}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"archive/**"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{
+			{Name: "repo:list", Filter: policy.CapabilityFilter{NoAIExempt: true}},
+		},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_repositories", map[string]any{"provider": "fake"})
+	if res.IsError {
+		t.Fatalf("list_repositories: %s", resultText(t, res))
+	}
+	out := repoJSON(t, res)
 	if len(out.Repositories) != 2 {
-		t.Fatalf("repositories = %v, want both (marker must not affect listing)", out.Repositories)
+		t.Fatalf("repositories = %v, want both (repo:list exempt)", out.Repositories)
 	}
 	if out.Omitted != 0 {
 		t.Errorf("omitted = %d, want 0", out.Omitted)
 	}
 }
 
-func TestListRepositoriesIgnoresMarkerErrors(t *testing.T) {
+func TestListRepositoriesMarkerErrorOmitsCandidate(t *testing.T) {
 	fake := newFake()
 	fake.repos = []provider.Repository{
 		{Provider: "fake", Path: "archive/bad"},
@@ -668,11 +738,11 @@ func TestListRepositoriesIgnoresMarkerErrors(t *testing.T) {
 		t.Fatalf("list_repositories: %s", resultText(t, res))
 	}
 	out := repoJSON(t, res)
-	if len(out.Repositories) != 2 {
-		t.Fatalf("repositories = %v, want both (marker errors ignored during listing)", out.Repositories)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "archive/ok" {
+		t.Fatalf("repositories = %v, want [archive/ok] (marker error omits candidate)", out.Repositories)
 	}
-	if out.Omitted != 0 {
-		t.Errorf("omitted = %d, want 0", out.Omitted)
+	if out.Omitted != 1 {
+		t.Errorf("omitted = %d, want 1", out.Omitted)
 	}
 }
 
@@ -1575,17 +1645,17 @@ func TestRebaseMergeRequestProviderErrorIsSafe(t *testing.T) {
 	}
 }
 
-func TestRebaseMergeRequestAllowedOnNoAIRepo(t *testing.T) {
+func TestRebaseMergeRequestDeniedOnNoAIRepoByDefault(t *testing.T) {
 	fake := newFake()
 	fake.marker = true
 	env := newTestEnv(t, allowRules("mr:rebase"), fake)
 
 	res := env.call(t, "rebase_merge_request", rebaseArgs())
-	if res.IsError {
-		t.Fatalf("rebase_merge_request denied on a .noai repo: %s", resultText(t, res))
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("rebase_merge_request = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
 	}
-	if fake.rebaseCalls != 1 {
-		t.Errorf("RebaseMergeRequest called %d times, want 1", fake.rebaseCalls)
+	if fake.rebaseCalls != 0 {
+		t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
 	}
 }
 

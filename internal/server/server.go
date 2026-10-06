@@ -53,47 +53,47 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_configured_rules",
-		Description: "List the access rules and configured capabilities for this server. Configured capabilities may be further restricted by the .noai marker.",
+		Description: "List the access rules and configured capabilities for this server. Configured capabilities may be further restricted by the .noai marker unless the capability is exempted with `noai: allow`.",
 	}, s.listConfiguredRules)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_repositories",
-		Description: "List repositories explicitly configured (always) plus repositories discovered through the provider API when the repo:list capability is granted. The provider argument is required.",
+		Description: "List repositories explicitly configured (always) plus repositories discovered through the provider API when the repo:list capability is granted. Discovered .noai repositories are omitted unless the repo:list grant is exempted. The provider argument is required.",
 	}, s.listRepositories)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_merge_requests",
-		Description: "List merge requests for a repository. Requires the mr:read capability.",
+		Description: "List merge requests for a repository. Requires the mr:read capability; .noai-protected unless the grant is exempted.",
 	}, s.listMergeRequests)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_merge_request",
-		Description: "Fetch a single merge request by number. Requires the mr:read capability.",
+		Description: "Fetch a single merge request by number. Requires the mr:read capability; .noai-protected unless the grant is exempted.",
 	}, s.getMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_merge_request_diff",
-		Description: "Fetch the file diffs of a merge request. Requires the mr:diff capability.",
+		Description: "Fetch the file diffs of a merge request. Requires the mr:diff capability; .noai-protected unless the grant is exempted.",
 	}, s.getMergeRequestDiff)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_merge_request_notes",
-		Description: "List the comments on a merge request. Requires the mr:read capability.",
+		Description: "List the comments on a merge request. Requires the mr:read capability; .noai-protected unless the grant is exempted.",
 	}, s.listMergeRequestNotes)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "add_merge_request_note",
-		Description: "Create a comment on a merge request. Requires the mr:comment capability.",
+		Description: "Create a comment on a merge request. Requires the mr:comment capability; .noai-protected unless the grant is exempted.",
 	}, s.addMergeRequestNote)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "rebase_merge_request",
-		Description: "Trigger an asynchronous rebase of a merge request's source branch onto its target branch. The outcome is visible later via get_merge_request (merge_error, rebase_in_progress). Requires the mr:rebase capability.",
+		Description: "Trigger an asynchronous rebase of a merge request's source branch onto its target branch. The outcome is visible later via get_merge_request (merge_error, rebase_in_progress). Requires the mr:rebase capability; .noai-protected unless the grant is exempted.",
 	}, s.rebaseMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_file",
-		Description: "Read a repository file at an optional ref. Requires the repo:read capability.",
+		Description: "Read a repository file at an optional ref. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
 	}, s.readFile)
 
 	return srv
@@ -158,10 +158,11 @@ type configuredPathFilter struct {
 }
 
 type configuredCapability struct {
-	Name    string                `json:"name"`
-	Require []string              `json:"require,omitempty"`
-	Exclude []string              `json:"exclude,omitempty"`
-	Paths   *configuredPathFilter `json:"paths,omitempty"`
+	Name       string                `json:"name"`
+	Require    []string              `json:"require,omitempty"`
+	Exclude    []string              `json:"exclude,omitempty"`
+	Paths      *configuredPathFilter `json:"paths,omitempty"`
+	NoAIExempt bool                  `json:"noai_exempt,omitempty"`
 }
 
 type configuredRepository struct {
@@ -261,9 +262,10 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 		caps := make([]configuredCapability, len(rule.Capabilities))
 		for i, grant := range rule.Capabilities {
 			cap := configuredCapability{
-				Name:    string(grant.Name),
-				Require: grant.Filter.Require,
-				Exclude: grant.Filter.Exclude,
+				Name:       string(grant.Name),
+				Require:    grant.Filter.Require,
+				Exclude:    grant.Filter.Exclude,
+				NoAIExempt: grant.Filter.NoAIExempt,
 			}
 			if !grant.Filter.Paths.IsZero() {
 				cap.Paths = &configuredPathFilter{
@@ -392,6 +394,13 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 					}
 					continue
 				}
+				// .noai is a default-deny overlay: a discovered .noai
+				// repository is omitted unless the repo:list grant exempts it.
+				// A marker-check failure omits the candidate (fail-closed).
+				if err := s.guard.CheckNoAI(ctx, name, repo.Path, decision.NoAIExempt); err != nil {
+					omitted++
+					continue
+				}
 				if discoveredCount >= limit {
 					truncated = true
 					continue
@@ -437,6 +446,15 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 		return nil, nil, err
 	}
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	// The list endpoint carries labels, so tags are evaluated per merge request
+	// below; the .noai overlay is repository-level and is checked once here.
+	markerDecision, err := s.guard.Evaluate(in.Provider, in.Repo, policy.CapMRRead)
+	if err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	if err := s.guard.CheckNoAI(ctx, in.Provider, in.Repo, markerDecision.NoAIExempt); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit + 1})

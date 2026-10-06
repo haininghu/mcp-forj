@@ -85,13 +85,15 @@ type RuleConfig struct {
 }
 
 // CapabilityGrant is a configured capability. It is either a scalar capability
-// name or a single-key mapping from capability name to an optional tag filter:
+// name or a single-key mapping from capability name to an optional filter:
 //
 //	capabilities:
 //	  - mr:read
 //	  - mr:comment:
 //	      require: [ai-reviewed]
 //	      exclude: [do-not-touch]
+//	  - repo:read:
+//	      noai: allow
 type CapabilityGrant struct {
 	// Name is the capability name.
 	Name string
@@ -101,6 +103,9 @@ type CapabilityGrant struct {
 	Exclude []string
 	// Paths constrains the repository-relative file path (repo:read/repo:write).
 	Paths PathFilter
+	// NoAIExempt, set by "noai: allow", exempts the capability from the .noai
+	// default-deny overlay.
+	NoAIExempt bool
 }
 
 // PathFilter is the nested path constraint for a capability grant.
@@ -162,6 +167,15 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 					return fmt.Errorf("capability %q: paths: %w", name, err)
 				}
 				g.Paths = paths
+			case "noai":
+				var value string
+				if err := val.Decode(&value); err != nil {
+					return fmt.Errorf("capability %q: noai: %w", name, err)
+				}
+				if value != "allow" {
+					return fmt.Errorf("capability %q: noai must be \"allow\"", name)
+				}
+				g.NoAIExempt = true
 			default:
 				return fmt.Errorf("capability %q: unknown filter key %q", name, key)
 			}

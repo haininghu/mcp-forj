@@ -190,26 +190,59 @@ func TestAuthorizeWithTagsMarkerStillApplies(t *testing.T) {
 	}
 }
 
-func TestMarkerProtectsOnlyRepoContents(t *testing.T) {
+func TestMarkerDeniesAllCapabilitiesByDefault(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(
-			CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRComment, CapRebase,
+			CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRDiff, CapMRComment, CapRebase,
 		)},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
 	ctx := context.Background()
 
-	// The marker protects repository-content operations.
-	for _, c := range []Capability{CapRepoRead, CapRepoWrite} {
+	// .noai is a default-deny overlay: every capability is denied unless the
+	// matched grant exempts it.
+	for _, c := range []Capability{CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRDiff, CapMRComment, CapRebase} {
 		if err := g.Authorize(ctx, "fake", "team/app", c); !errors.Is(err, ErrNoAI) {
 			t.Errorf("Authorize(%s) on .noai repo = %v, want ErrNoAI", c, err)
 		}
 	}
-	// It does not affect listing or merge-request operations.
-	for _, c := range []Capability{CapRepoList, CapMRRead, CapMRComment, CapRebase} {
-		if err := g.Authorize(ctx, "fake", "team/app", c); err != nil {
-			t.Errorf("Authorize(%s) on .noai repo = %v, want nil", c, err)
-		}
+}
+
+func TestNoAIExemptSkipsMarker(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{NoAIExempt: true}},
+			{Name: CapRepoList},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
+	ctx := context.Background()
+
+	if err := g.Authorize(ctx, "fake", "team/app", CapRepoRead); err != nil {
+		t.Errorf("Authorize(repo:read, exempt) = %v, want nil", err)
+	}
+	if err := g.Authorize(ctx, "fake", "team/app", CapRepoList); !errors.Is(err, ErrNoAI) {
+		t.Errorf("Authorize(repo:list, not exempt) = %v, want ErrNoAI", err)
+	}
+}
+
+func TestCheckNoAI(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+	})
+	ctx := context.Background()
+
+	marked := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
+	if err := marked.CheckNoAI(ctx, "fake", "team/app", true); err != nil {
+		t.Errorf("CheckNoAI(exempt) = %v, want nil", err)
+	}
+	if err := marked.CheckNoAI(ctx, "fake", "team/app", false); !errors.Is(err, ErrNoAI) {
+		t.Errorf("CheckNoAI(marked) = %v, want ErrNoAI", err)
+	}
+
+	failing := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{err: errors.New("boom")}}, ".noai", nil)
+	if err := failing.CheckNoAI(ctx, "fake", "team/app", false); !errors.Is(err, ErrMarkerCheck) {
+		t.Errorf("CheckNoAI(check error) = %v, want ErrMarkerCheck", err)
 	}
 }
 
