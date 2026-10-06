@@ -200,11 +200,14 @@ func TestKnownCapabilities(t *testing.T) {
 	if !IsKnownCapability("repo:list") {
 		t.Error("repo:list should be known")
 	}
+	if !IsKnownCapability("policy:read") {
+		t.Error("policy:read should be known")
+	}
 	if IsKnownCapability("repo:teleport") {
 		t.Error("repo:teleport should not be known")
 	}
-	if len(KnownCapabilities()) != 8 {
-		t.Errorf("KnownCapabilities length = %d, want 8", len(KnownCapabilities()))
+	if len(KnownCapabilities()) != 9 {
+		t.Errorf("KnownCapabilities length = %d, want 9", len(KnownCapabilities()))
 	}
 }
 

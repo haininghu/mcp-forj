@@ -299,3 +299,26 @@ func TestConfiguredRulesSortedByProvider(t *testing.T) {
 		t.Errorf("capabilities = %v, want [mr:read]", rules[1].Capabilities)
 	}
 }
+
+func TestAuthorizePolicyRead(t *testing.T) {
+	granted := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapPolicyRead)},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+	})
+	g := NewGuard(map[string]*Policy{"fake": granted}, map[string]FileChecker{"fake": fakeChecker{}}, ".noai", nil)
+
+	if err := g.AuthorizePolicyRead("fake"); err != nil {
+		t.Fatalf("AuthorizePolicyRead = %v, want nil", err)
+	}
+	if err := g.AuthorizePolicyRead("missing"); !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("AuthorizePolicyRead(unknown) = %v, want ErrUnknownProvider", err)
+	}
+
+	notGranted := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+	})
+	g2 := NewGuard(map[string]*Policy{"fake": notGranted}, map[string]FileChecker{"fake": fakeChecker{}}, ".noai", nil)
+	if err := g2.AuthorizePolicyRead("fake"); !errors.Is(err, ErrDenied) {
+		t.Errorf("AuthorizePolicyRead(not granted) = %v, want ErrDenied", err)
+	}
+}

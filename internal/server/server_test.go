@@ -495,7 +495,7 @@ func TestPathTraversalRejected(t *testing.T) {
 func TestListConfiguredRulesReportsConfiguredCapabilities(t *testing.T) {
 	fake := newFake()
 	fake.marker = true // must not affect list_configured_rules
-	env := newTestEnv(t, allowRules("mr:read", "mr:comment"), fake)
+	env := newTestEnv(t, allowRules("mr:read", "mr:comment", "policy:read"), fake)
 
 	res := env.call(t, "list_configured_rules", map[string]any{})
 	if res.IsError {
@@ -1022,10 +1022,13 @@ func filteredReadRules() []policy.RuleSpec {
 	return []policy.RuleSpec{{
 		Repositories: []string{"team/app"},
 		Effect:       "allow",
-		Capabilities: []policy.CapabilityGrant{{
-			Name:   policy.CapMRRead,
-			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
-		}},
+		Capabilities: []policy.CapabilityGrant{
+			{
+				Name:   policy.CapMRRead,
+				Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+			},
+			{Name: policy.CapPolicyRead},
+		},
 	}}
 }
 
@@ -1253,12 +1256,12 @@ func TestListConfiguredRulesExposesFilters(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out.Repositories) != 1 || len(out.Repositories[0].ConfiguredCapabilities) != 1 {
+	if len(out.Repositories) != 1 {
 		t.Fatalf("configured rules = %+v", out)
 	}
-	cap := out.Repositories[0].ConfiguredCapabilities[0]
-	if cap.Name != "mr:read" {
-		t.Errorf("capability name = %q, want mr:read", cap.Name)
+	cap, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "mr:read")
+	if !ok {
+		t.Fatalf("mr:read missing from configured rules: %+v", out)
 	}
 	if len(cap.Require) != 1 || cap.Require[0] != "ai-reviewed" {
 		t.Errorf("require = %v, want [ai-reviewed]", cap.Require)
@@ -1266,6 +1269,15 @@ func TestListConfiguredRulesExposesFilters(t *testing.T) {
 	if len(cap.Exclude) != 1 || cap.Exclude[0] != "do-not-touch" {
 		t.Errorf("exclude = %v, want [do-not-touch]", cap.Exclude)
 	}
+}
+
+func findCapability(caps []configuredCapability, name string) (configuredCapability, bool) {
+	for _, c := range caps {
+		if c.Name == name {
+			return c, true
+		}
+	}
+	return configuredCapability{}, false
 }
 
 func TestLabelsNeverReturned(t *testing.T) {
@@ -1813,10 +1825,13 @@ func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
 	rules := []policy.RuleSpec{{
 		Repositories: []string{"team/app"},
 		Effect:       "allow",
-		Capabilities: []policy.CapabilityGrant{{
-			Name:   policy.CapRepoRead,
-			Filter: policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"docs/**"}, Exclude: []string{"**/.env"}}},
-		}},
+		Capabilities: []policy.CapabilityGrant{
+			{
+				Name:   policy.CapRepoRead,
+				Filter: policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"docs/**"}, Exclude: []string{"**/.env"}}},
+			},
+			{Name: policy.CapPolicyRead},
+		},
 	}}
 	env := newTestEnv(t, rules, newFake())
 
@@ -1828,10 +1843,13 @@ func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
 	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(out.Repositories) != 1 || len(out.Repositories[0].ConfiguredCapabilities) != 1 {
+	if len(out.Repositories) != 1 {
 		t.Fatalf("configured rules = %+v", out)
 	}
-	cap := out.Repositories[0].ConfiguredCapabilities[0]
+	cap, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "repo:read")
+	if !ok {
+		t.Fatalf("repo:read missing from configured rules: %+v", out)
+	}
 	if cap.Paths == nil {
 		t.Fatalf("paths missing from configured capability: %+v", cap)
 	}
@@ -2201,5 +2219,22 @@ func TestRebaseInvalidStateMessageIsSpecific(t *testing.T) {
 	res := env.call(t, "rebase_merge_request", rebaseArgs())
 	if !res.IsError || !strings.Contains(resultText(t, res), "rebaseable") {
 		t.Errorf("rebase invalid-state message = %q, want mention of rebaseable", resultText(t, res))
+	}
+}
+
+func TestListConfiguredRulesRequiresPolicyRead(t *testing.T) {
+	// The provider grants mr:read but not policy:read: the policy is not exposed.
+	env := newTestEnv(t, allowRules("mr:read"), newFake())
+
+	res := env.call(t, "list_configured_rules", map[string]any{})
+	if res.IsError {
+		t.Fatalf("list_configured_rules: %s", resultText(t, res))
+	}
+	var out listConfiguredRulesOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Repositories) != 0 {
+		t.Fatalf("configured rules = %+v, want none without policy:read", out.Repositories)
 	}
 }

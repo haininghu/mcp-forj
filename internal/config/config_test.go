@@ -1171,3 +1171,24 @@ providers:
 		t.Errorf("error = %q, want mention of an invalid repository pattern", err)
 	}
 }
+
+func TestCapabilityGrantPolicyReadAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [policy:read]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected policy:read: %v", err)
+	}
+	if got := cfg.Providers[0].Rules[0].Capabilities[0].Name; got != "policy:read" {
+		t.Errorf("capability = %q, want policy:read", got)
+	}
+}

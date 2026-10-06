@@ -54,7 +54,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_configured_rules",
-		Description: "List the access rules and configured capabilities for this server. Configured capabilities may be further restricted by the .noai marker unless the capability is exempted with `noai: allow`.",
+		Description: "List the access rules and configured capabilities for providers that grant the policy:read capability. Other providers are omitted. Configured capabilities may be further restricted by the .noai marker unless the capability is exempted with `noai: allow`.",
 	}, s.listConfiguredRules)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -256,14 +256,23 @@ type readFileOutput struct {
 	Truncated bool   `json:"truncated"`
 }
 
-// listConfiguredRules exposes the configured policy without authorization. This
-// is intentional (single trusted agent model): it returns only configured rules
-// and never runtime labels/topics, .noai state or tokens. See
-// ai/method-specs/list_configured_rules.md for the disclosure posture.
+// listConfiguredRules exposes the configured policy for providers whose rules
+// grant the policy:read capability. Providers without it are omitted, so the
+// policy is not disclosed by default. It never returns runtime labels/topics,
+// .noai state or tokens. See ai/method-specs/list_configured_rules.md.
 func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, _ listConfiguredRulesInput) (*mcp.CallToolResult, any, error) {
 	rules := s.guard.ConfiguredRules()
+	authorized := make(map[string]bool)
 	repos := make([]configuredRepository, 0, len(rules))
 	for _, rule := range rules {
+		ok, seen := authorized[rule.Provider]
+		if !seen {
+			ok = s.guard.AuthorizePolicyRead(rule.Provider) == nil
+			authorized[rule.Provider] = ok
+		}
+		if !ok {
+			continue
+		}
 		caps := make([]configuredCapability, len(rule.Capabilities))
 		for i, grant := range rule.Capabilities {
 			cap := configuredCapability{

@@ -6,9 +6,9 @@ package policy
 // that are validated at configuration-load time.
 type Capability string
 
-// Known capabilities. CapRepoList, CapRepoRead, CapMRRead and CapMRComment are
-// used by the first iteration's tools; the remaining values are reserved so the
-// configuration vocabulary stays stable.
+// Known capabilities. CapRepoList, CapRepoRead, CapMRRead, CapMRDiff,
+// CapMRComment, CapRebase and CapPolicyRead are used by the tools; the remaining
+// values are reserved so the configuration vocabulary stays stable.
 const (
 	// CapRepoList permits discovering repositories matching the configured
 	// patterns.
@@ -28,6 +28,9 @@ const (
 	CapMRWrite Capability = "mr:write"
 	// CapRepoWrite permits modifying repository content (reserved).
 	CapRepoWrite Capability = "repo:write"
+	// CapPolicyRead permits exposing the configured access rules
+	// (list_configured_rules). It is provider-scoped, not repository-scoped.
+	CapPolicyRead Capability = "policy:read"
 )
 
 var knownCapabilities = []Capability{
@@ -39,6 +42,7 @@ var knownCapabilities = []Capability{
 	CapRebase,
 	CapMRWrite,
 	CapRepoWrite,
+	CapPolicyRead,
 }
 
 // KnownCapabilities returns a copy of all capabilities known to the server.

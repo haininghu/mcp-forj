@@ -202,6 +202,20 @@ func (g *Guard) checkMarkerRefs(ctx context.Context, providerName, repo, ref str
 	return nil
 }
 
+// AuthorizePolicyRead checks whether providerName may expose its configured
+// access rules (list_configured_rules). It succeeds when the provider is known
+// and at least one allow rule grants CapPolicyRead, regardless of repository.
+func (g *Guard) AuthorizePolicyRead(providerName string) error {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	if !p.GrantsAnywhere(CapPolicyRead) {
+		return fmt.Errorf("%w: policy:read not granted", ErrDenied)
+	}
+	return nil
+}
+
 // AuthorizeList checks whether providerName may list repositories at all. It
 // succeeds when the provider is known and at least one allow rule grants
 // CapRepoList. It does not perform a .noai marker check: listing filters each
