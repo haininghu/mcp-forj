@@ -63,6 +63,13 @@ func TestMapNote(t *testing.T) {
 	}
 }
 
+func TestMapNoteMissingAuthor(t *testing.T) {
+	got := mapNote(&gitlab.Note{ID: 1, Body: "x"})
+	if got.Author != "" {
+		t.Errorf("Author = %q, want empty for a note without an author", got.Author)
+	}
+}
+
 func TestNewMissingToken(t *testing.T) {
 	_, err := New(config.ProviderConfig{
 		Name:    "p",
@@ -642,5 +649,73 @@ func TestListMergeRequestDiffsError(t *testing.T) {
 	_, err := c.ListMergeRequestDiffs(context.Background(), "team/app", 42)
 	if !errors.Is(err, provider.ErrForbidden) {
 		t.Fatalf("error = %v, want provider.ErrForbidden", err)
+	}
+}
+
+func TestListMergeRequestsPaginates(t *testing.T) {
+	var pages []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/merge_requests") {
+			http.NotFound(w, r)
+			return
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		if page == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			items := make([]map[string]any, 100)
+			for i := range items {
+				items[i] = map[string]any{"iid": i + 1, "title": "t", "state": "opened"}
+			}
+			_ = json.NewEncoder(w).Encode(items)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"iid": 101, "title": "t", "state": "opened"}})
+	}))
+
+	mrs, err := c.ListMergeRequests(context.Background(), "team/app", provider.ListOptions{Limit: 101})
+	if err != nil {
+		t.Fatalf("ListMergeRequests: %v", err)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("pages = %v, want two pages", pages)
+	}
+	if len(mrs) != 101 {
+		t.Fatalf("len(mrs) = %d, want 101 (pagination must exceed one page)", len(mrs))
+	}
+}
+
+func TestListMergeRequestNotesPaginates(t *testing.T) {
+	var pages []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/notes") {
+			http.NotFound(w, r)
+			return
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		if page == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			items := make([]map[string]any, 100)
+			for i := range items {
+				items[i] = map[string]any{"id": i + 1, "body": "n"}
+			}
+			_ = json.NewEncoder(w).Encode(items)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"id": 101, "body": "n"}})
+	}))
+
+	notes, err := c.ListMergeRequestNotes(context.Background(), "team/app", 42, provider.ListOptions{Limit: 101})
+	if err != nil {
+		t.Fatalf("ListMergeRequestNotes: %v", err)
+	}
+	if len(pages) != 2 {
+		t.Fatalf("pages = %v, want two pages", pages)
+	}
+	if len(notes) != 101 {
+		t.Fatalf("len(notes) = %d, want 101", len(notes))
 	}
 }

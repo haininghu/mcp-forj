@@ -76,6 +76,15 @@ func (g *Guard) AuthorizeWithTags(ctx context.Context, providerName, repo string
 // then performs the .noai marker check unless the matched grant is exempt. Every
 // decision is logged; tokens and request bodies are never logged.
 func (g *Guard) AuthorizeResource(ctx context.Context, providerName, repo string, c Capability, tags TagSet, path string) error {
+	return g.AuthorizeResourceRef(ctx, providerName, repo, c, tags, path, "")
+}
+
+// AuthorizeResourceRef is AuthorizeResource with an explicit git ref used for the
+// .noai marker check. The marker is checked on the default branch and, when ref
+// names a different revision, also on that ref; an occurrence at either ref
+// denies (fail-closed). This prevents reading a non-default branch that carries
+// the marker while the default branch does not.
+func (g *Guard) AuthorizeResourceRef(ctx context.Context, providerName, repo string, c Capability, tags TagSet, path, ref string) error {
 	p, ok := g.policies[providerName]
 	if !ok {
 		g.logDecision(providerName, repo, c, "deny", "unknown provider")
@@ -97,7 +106,7 @@ func (g *Guard) AuthorizeResource(ctx context.Context, providerName, repo string
 	if decision.NoAIExempt {
 		return nil
 	}
-	return g.checkMarker(ctx, providerName, repo)
+	return g.checkMarkerRefs(ctx, providerName, repo, ref)
 }
 
 // CheckNoAI enforces the .noai default-deny overlay for a repository whose
@@ -156,25 +165,39 @@ func (g *Guard) AuthorizeRepoCapability(providerName, repo string, c Capability)
 }
 
 func (g *Guard) checkMarker(ctx context.Context, providerName, repo string) error {
+	return g.checkMarkerRefs(ctx, providerName, repo, "")
+}
+
+// checkMarkerRefs checks the marker on the default branch and, when ref names a
+// different revision, also on that ref. A present marker or any check failure
+// denies (fail-closed).
+func (g *Guard) checkMarkerRefs(ctx context.Context, providerName, repo, ref string) error {
 	checker, ok := g.checkers[providerName]
 	if !ok || checker == nil {
 		g.logger.Warn("marker check failed", "provider", providerName, "repo", repo, "reason", "no file checker")
 		return fmt.Errorf("%w: no file checker for provider %s", ErrMarkerCheck, providerName)
 	}
 
-	exists, err := checker.FileExists(ctx, repo, g.markerFile, "")
-	if err != nil {
-		g.logger.Warn("marker check failed",
-			"provider", providerName,
-			"repo", repo,
-			"marker", g.markerFile,
-			"error", err.Error(),
-		)
-		return fmt.Errorf("%w: %s: %w", ErrMarkerCheck, repo, err)
+	refs := []string{""}
+	if ref != "" && ref != "HEAD" {
+		refs = append(refs, ref)
 	}
-	g.logger.Info("marker check", "provider", providerName, "repo", repo, "marker", g.markerFile, "exists", exists)
-	if exists {
-		return fmt.Errorf("%w: %s", ErrNoAI, repo)
+	for _, r := range refs {
+		exists, err := checker.FileExists(ctx, repo, g.markerFile, r)
+		if err != nil {
+			g.logger.Warn("marker check failed",
+				"provider", providerName,
+				"repo", repo,
+				"marker", g.markerFile,
+				"ref", r,
+				"error", err.Error(),
+			)
+			return fmt.Errorf("%w: %s: %w", ErrMarkerCheck, repo, err)
+		}
+		g.logger.Info("marker check", "provider", providerName, "repo", repo, "marker", g.markerFile, "ref", r, "exists", exists)
+		if exists {
+			return fmt.Errorf("%w: %s", ErrNoAI, repo)
+		}
 	}
 	return nil
 }

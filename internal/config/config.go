@@ -379,6 +379,11 @@ func (c *Config) Validate() error {
 			if slices.Contains(rule.Repositories, "") {
 				return fmt.Errorf("config: provider %q rule %d: empty repository pattern", p.Name, j)
 			}
+			for _, pattern := range rule.Repositories {
+				if !doublestar.ValidatePattern(pattern) {
+					return fmt.Errorf("config: provider %q rule %d: invalid repository pattern %q", p.Name, j, pattern)
+				}
+			}
 			seenCaps := make(map[string]bool, len(rule.Capabilities))
 			for k := range rule.Capabilities {
 				grant := &rule.Capabilities[k]

@@ -241,7 +241,9 @@ func matchesAnyPath(patterns []string, path string) bool {
 	for _, pattern := range patterns {
 		ok, err := doublestar.Match(pattern, path)
 		if err != nil {
-			continue
+			// Patterns are validated at config load; treat an unexpected match
+			// error as a match so exclude patterns stay fail-closed.
+			return true
 		}
 		if ok {
 			return true
@@ -439,7 +441,9 @@ func ruleMatches(rule Rule, repo string) bool {
 	for _, pattern := range rule.Repositories {
 		ok, err := doublestar.Match(pattern, repo)
 		if err != nil {
-			continue
+			// Patterns are validated at build time; treat an unexpected match
+			// error as a match so deny rules stay fail-closed.
+			return true
 		}
 		if ok {
 			return true

@@ -2110,3 +2110,96 @@ func TestForbiddenHints(t *testing.T) {
 		}
 	})
 }
+
+func TestRepoPathCanonicalization(t *testing.T) {
+	fake := newFake()
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: grants("repo:read")},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	// A canonical, allowed repository still works.
+	if res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": "README.md"}); res.IsError {
+		t.Fatalf("read_file on an allowed repo failed: %s", resultText(t, res))
+	}
+
+	// Non-canonical or traversal forms are rejected outright.
+	rejected := []string{
+		"team//secret", "team/../secret", "team\\secret", "/team/secret",
+		"team/%2e%2e/secret", "team/\x01secret",
+	}
+	for _, repo := range rejected {
+		res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": repo, "path": "README.md"})
+		if !res.IsError {
+			t.Errorf("read_file with repo %q succeeded, want rejection", repo)
+		}
+	}
+
+	// A trailing slash canonicalizes to the denied repository: the deny rule holds.
+	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/secret/", "path": "README.md"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "access denied") {
+		t.Errorf("trailing-slash deny bypass: %q (isError=%v)", resultText(t, res), res.IsError)
+	}
+}
+
+func TestReadFileRefDoesNotBypassNoAI(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": "README.md", "ref": "feature"})
+	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
+		t.Fatalf("read_file with ref = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	}
+}
+
+func TestReadFileRefValidation(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	bad := []string{"bad\x01ref", strings.Repeat("a", maxRefBytes+1)}
+	for _, ref := range bad {
+		res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": "README.md", "ref": ref})
+		if !res.IsError {
+			t.Errorf("read_file accepted invalid ref of length %d", len(ref))
+		}
+	}
+}
+
+func TestAddNoteRejectsControlCharacters(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:comment"), fake)
+
+	res := env.call(t, "add_merge_request_note", map[string]any{
+		"provider": "fake", "repo": "team/app", "number": 1, "body": "hi\x01there",
+	})
+	if !res.IsError {
+		t.Fatal("add_merge_request_note accepted a control character in the body")
+	}
+}
+
+func TestInvalidStateMessageIsGeneric(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = provider.ErrInvalidState
+	env := newTestEnv(t, allowRules("repo:read"), fake)
+
+	res := env.call(t, "read_file", readFileArgs())
+	if !res.IsError {
+		t.Fatal("read_file did not surface the invalid-state error")
+	}
+	if strings.Contains(strings.ToLower(resultText(t, res)), "rebase") {
+		t.Errorf("generic tool reported a rebase error: %q", resultText(t, res))
+	}
+}
+
+func TestRebaseInvalidStateMessageIsSpecific(t *testing.T) {
+	fake := newFake()
+	fake.rebaseErr = provider.ErrInvalidState
+	env := newTestEnv(t, allowRules("mr:rebase"), fake)
+
+	res := env.call(t, "rebase_merge_request", rebaseArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), "rebaseable") {
+		t.Errorf("rebase invalid-state message = %q, want mention of rebaseable", resultText(t, res))
+	}
+}

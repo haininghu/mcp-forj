@@ -28,6 +28,7 @@ const (
 	maxDiffFiles      = 100  // diff files per merge request
 	maxDiffFileBytes  = 128 << 10
 	maxDiffTotalBytes = 512 << 10
+	maxRefBytes       = 255 // git ref length bound
 	truncatedMarker   = "\n[truncated]"
 )
 
@@ -255,6 +256,10 @@ type readFileOutput struct {
 	Truncated bool   `json:"truncated"`
 }
 
+// listConfiguredRules exposes the configured policy without authorization. This
+// is intentional (single trusted agent model): it returns only configured rules
+// and never runtime labels/topics, .noai state or tokens. See
+// ai/method-specs/list_configured_rules.md for the disclosure posture.
 func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, _ listConfiguredRulesInput) (*mcp.CallToolResult, any, error) {
 	rules := s.guard.ConfiguredRules()
 	repos := make([]configuredRepository, 0, len(rules))
@@ -389,6 +394,10 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 					return nil, nil, fmt.Errorf("unknown provider %q", name)
 				}
 				if !decision.Allowed {
+					// Only candidates that matched a rule but were blocked are
+					// counted; candidates with no matching rule are dropped
+					// silently, so omitted does not reveal how many
+					// repositories are hidden in total.
 					if decision.Matched {
 						omitted++
 					}
@@ -441,6 +450,11 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 	if limit <= 0 || limit > maxListResults {
 		limit = maxListResults
 	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -493,6 +507,11 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	if in.Number <= 0 {
 		return nil, nil, errors.New("number must be positive")
 	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -512,11 +531,17 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 
 // getMergeRequestDiff fetches the file diffs of a merge request. The MR metadata
 // is fetched first as an internal authorization input for tag filters; a fetch
-// failure denies the request (fail-closed). Diffs are not `.noai`-protected.
+// failure denies the request (fail-closed). Diffs are `.noai`-protected unless
+// the matched grant is exempted with `noai: allow`.
 func (s *Server) getMergeRequestDiff(ctx context.Context, _ *mcp.CallToolRequest, in getMergeRequestDiffInput) (*mcp.CallToolResult, any, error) {
 	if in.Number <= 0 {
 		return nil, nil, errors.New("number must be positive")
 	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -581,6 +606,11 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	if in.Number <= 0 {
 		return nil, nil, errors.New("number must be positive")
 	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -622,6 +652,14 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 	if len(in.Body) > maxTextBytes {
 		return nil, nil, fmt.Errorf("body exceeds the %d byte limit", maxTextBytes)
 	}
+	if err := validateNoteBody(in.Body); err != nil {
+		return nil, nil, err
+	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -654,6 +692,11 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if in.Number <= 0 {
 		return nil, nil, errors.New("number must be positive")
 	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -669,7 +712,9 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	if err := p.RebaseMergeRequest(ctx, in.Repo, in.Number); err != nil {
-		return nil, nil, mapProviderError(err, "rebasing needs the Merge Request: Update permission and a role allowed to push to the source branch")
+		return nil, nil, mapProviderErrorState(err,
+			"rebasing needs the Merge Request: Update permission and a role allowed to push to the source branch",
+			"the merge request is not in a rebaseable state")
 	}
 	return jsonResult(rebaseMergeRequestOutput{
 		Provider: in.Provider,
@@ -708,6 +753,16 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
+	ref, err := validateRef(in.Ref)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Ref = ref
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
@@ -726,18 +781,23 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 			return nil, nil, err
 		}
 	}
-	if err := s.guard.AuthorizeResource(ctx, in.Provider, in.Repo, policy.CapRepoRead, tags, cleaned); err != nil {
+	if err := s.guard.AuthorizeResourceRef(ctx, in.Provider, in.Repo, policy.CapRepoRead, tags, cleaned, in.Ref); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	data, err := p.ReadFile(ctx, in.Repo, cleaned, in.Ref)
 	if err != nil {
 		return nil, nil, mapProviderError(err, "reading repository files needs the Repository: Read permission")
 	}
-	content := string(data)
+	// Bound the bytes before converting to a string so an oversized file is not
+	// copied in full a second time.
 	truncated := false
 	if len(data) > maxFileBytes {
-		content = safePrefix(string(data), maxFileBytes) + truncatedMarker
+		data = safeBytePrefix(data, maxFileBytes)
 		truncated = true
+	}
+	content := string(data)
+	if truncated {
+		content += truncatedMarker
 	}
 	return jsonResult(readFileOutput{
 		Provider:  in.Provider,
@@ -747,17 +807,6 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 		Content:   content,
 		Truncated: truncated,
 	})
-}
-
-func (s *Server) resolveAuthorized(ctx context.Context, providerName, repo string, c policy.Capability) (provider.Provider, error) {
-	p, ok := s.registry.Get(providerName)
-	if !ok {
-		return nil, fmt.Errorf("unknown provider %q", providerName)
-	}
-	if err := s.guard.Authorize(ctx, providerName, repo, c); err != nil {
-		return nil, mapAuthError(err, providerName, repo)
-	}
-	return p, nil
 }
 
 func mapAuthError(err error, providerName, repo string) error {
@@ -785,6 +834,13 @@ func mapAuthError(err error, providerName, repo string) error {
 // non-empty, describes the resource permission the failed operation needs and is
 // used for forbidden errors; response bodies and tokens are never surfaced.
 func mapProviderError(err error, hint string) error {
+	return mapProviderErrorState(err, hint, "")
+}
+
+// mapProviderErrorState is mapProviderError with an operation-specific message
+// for an invalid-state error (HTTP 400/405/409). When invalidStateHint is empty
+// a generic message is used, so a non-rebase tool never reports a rebase error.
+func mapProviderErrorState(err error, hint, invalidStateHint string) error {
 	status := provider.HTTPStatus(err)
 	switch {
 	case errors.Is(err, provider.ErrNotFound):
@@ -795,7 +851,10 @@ func mapProviderError(err error, hint string) error {
 		}
 		return withStatus("forbidden: the provider token lacks the required permission for this operation", status)
 	case errors.Is(err, provider.ErrInvalidState):
-		return withStatus("the merge request is not in a rebaseable state", status)
+		if invalidStateHint != "" {
+			return withStatus(invalidStateHint, status)
+		}
+		return withStatus("the resource is not in a state that permits this operation", status)
 	default:
 		return withStatus("provider request failed", status)
 	}
@@ -807,6 +866,79 @@ func withStatus(message string, status int) error {
 		return fmt.Errorf("%s (HTTP %d)", message, status)
 	}
 	return errors.New(message)
+}
+
+// validateRepo validates and canonicalizes a repository path. It rejects
+// absolute paths, backslashes, control characters, empty or relative segments
+// and encoded traversal, and returns the cleaned namespace/project path. The
+// cleaned value must be used for both policy matching and the provider call so
+// the two cannot diverge (a mismatch would allow a deny rule to be bypassed).
+func validateRepo(repo string) (string, error) {
+	if repo == "" {
+		return "", errors.New("repo must not be empty")
+	}
+	if path.IsAbs(repo) || strings.HasPrefix(repo, "/") || strings.HasPrefix(repo, "\\") {
+		return "", fmt.Errorf("repo %q must be relative", repo)
+	}
+	if strings.ContainsRune(repo, '\\') {
+		return "", fmt.Errorf("repo %q must use forward slashes", repo)
+	}
+	for _, r := range repo {
+		if r == 0 || r < 0x20 || r == 0x7f {
+			return "", errors.New("repo contains control characters")
+		}
+	}
+	if strings.Contains(repo, "//") {
+		return "", fmt.Errorf("repo %q contains an empty segment", repo)
+	}
+	for _, segment := range strings.Split(repo, "/") {
+		if segment == ".." || segment == "." {
+			return "", fmt.Errorf("repo %q contains a relative segment", repo)
+		}
+	}
+	cleaned := path.Clean(repo)
+	if path.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", fmt.Errorf("repo %q escapes the namespace", repo)
+	}
+	lower := strings.ToLower(repo)
+	for _, token := range []string{"%2e", "%2f", "%5c"} {
+		if strings.Contains(lower, token) {
+			return "", fmt.Errorf("repo %q contains an encoded traversal sequence", repo)
+		}
+	}
+	return cleaned, nil
+}
+
+// validateRef validates an optional git ref. An empty ref means the default
+// branch. It rejects control characters and overlong refs; the ref is otherwise
+// passed through to the provider.
+func validateRef(ref string) (string, error) {
+	if ref == "" {
+		return "", nil
+	}
+	if len(ref) > maxRefBytes {
+		return "", fmt.Errorf("ref exceeds the %d byte limit", maxRefBytes)
+	}
+	for _, r := range ref {
+		if r == 0 || r < 0x20 || r == 0x7f {
+			return "", errors.New("ref contains control characters")
+		}
+	}
+	return ref, nil
+}
+
+// validateNoteBody rejects control characters in a note body, allowing the
+// whitespace characters that notes legitimately contain.
+func validateNoteBody(body string) error {
+	for _, r := range body {
+		if r == '\n' || r == '\r' || r == '\t' {
+			continue
+		}
+		if r == 0 || r < 0x20 || r == 0x7f {
+			return errors.New("body contains control characters")
+		}
+	}
+	return nil
 }
 
 // validatePath applies the ordered path-traversal checks from the design. It
@@ -877,6 +1009,26 @@ func truncateText(s string, max int) string {
 		return s
 	}
 	return safePrefix(s, max) + truncatedMarker
+}
+
+// safeBytePrefix returns the longest prefix of b that is at most max bytes and
+// ends on a UTF-8 rune boundary. Invalid trailing bytes are dropped.
+func safeBytePrefix(b []byte, max int) []byte {
+	if max <= 0 {
+		return nil
+	}
+	if max >= len(b) {
+		return b
+	}
+	p := b[:max]
+	for len(p) > 0 {
+		r, size := utf8.DecodeLastRune(p)
+		if r != utf8.RuneError || size > 1 {
+			break
+		}
+		p = p[:len(p)-size]
+	}
+	return p
 }
 
 // safePrefix returns the longest prefix of s that is at most max bytes and ends

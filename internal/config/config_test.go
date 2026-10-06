@@ -1150,3 +1150,24 @@ providers:
 		t.Errorf("filtered mr:diff exclude = %v", filtered.Exclude)
 	}
 }
+
+func TestInvalidRepositoryPatternRejected(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/["]
+        effect: allow
+        capabilities: [mr:read]
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("Parse accepted an invalid repository pattern")
+	}
+	if !strings.Contains(err.Error(), "invalid repository pattern") {
+		t.Errorf("error = %q, want mention of an invalid repository pattern", err)
+	}
+}

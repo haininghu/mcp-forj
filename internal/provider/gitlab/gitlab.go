@@ -176,25 +176,38 @@ func (c *Client) GetRepositoryTopics(ctx context.Context, repo string) ([]string
 	return append([]string(nil), project.Topics...), nil
 }
 
-// ListMergeRequests implements provider.Provider.
+// ListMergeRequests implements provider.Provider. It follows pages until the
+// limit is reached or the provider is exhausted, so a caller requesting
+// limit+1 can detect truncation (GitLab clamps per_page to 100).
 func (c *Client) ListMergeRequests(ctx context.Context, repo string, opts provider.ListOptions) ([]provider.MergeRequest, error) {
-	listOpts := &gitlab.ListProjectMergeRequestsOptions{}
-	if opts.Limit > 0 {
-		listOpts.PerPage = int64(opts.Limit)
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
 	}
-	if opts.State != "" {
-		state := opts.State
-		listOpts.State = &state
+	perPage := min(limit, 100)
+	out := make([]provider.MergeRequest, 0, limit)
+	for page := int64(1); ; page++ {
+		listOpts := &gitlab.ListProjectMergeRequestsOptions{
+			PerPage: int64(perPage), Page: page,
+		}
+		if opts.State != "" {
+			state := opts.State
+			listOpts.State = &state
+		}
+		mrs, resp, err := c.api.MergeRequests.ListProjectMergeRequests(repo, listOpts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, mr := range mrs {
+			out = append(out, mapBasicMergeRequest(mr))
+			if len(out) >= limit {
+				return out, nil
+			}
+		}
+		if len(mrs) == 0 || resp == nil || resp.NextPage == 0 {
+			return out, nil
+		}
 	}
-	mrs, _, err := c.api.MergeRequests.ListProjectMergeRequests(repo, listOpts, gitlab.WithContext(ctx))
-	if err != nil {
-		return nil, mapError(err)
-	}
-	out := make([]provider.MergeRequest, 0, len(mrs))
-	for _, mr := range mrs {
-		out = append(out, mapBasicMergeRequest(mr))
-	}
-	return out, nil
 }
 
 // GetMergeRequest implements provider.Provider.
@@ -209,21 +222,34 @@ func (c *Client) GetMergeRequest(ctx context.Context, repo string, number int64)
 	return &out, nil
 }
 
-// ListMergeRequestNotes implements provider.Provider.
+// ListMergeRequestNotes implements provider.Provider. It follows pages until the
+// limit is reached or the provider is exhausted, so a caller requesting limit+1
+// can detect truncation (GitLab clamps per_page to 100).
 func (c *Client) ListMergeRequestNotes(ctx context.Context, repo string, number int64, opts provider.ListOptions) ([]provider.Note, error) {
-	listOpts := &gitlab.ListMergeRequestNotesOptions{}
-	if opts.Limit > 0 {
-		listOpts.PerPage = int64(opts.Limit)
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 100
 	}
-	notes, _, err := c.api.Notes.ListMergeRequestNotes(repo, number, listOpts, gitlab.WithContext(ctx))
-	if err != nil {
-		return nil, mapError(err)
+	perPage := min(limit, 100)
+	out := make([]provider.Note, 0, limit)
+	for page := int64(1); ; page++ {
+		listOpts := &gitlab.ListMergeRequestNotesOptions{
+			PerPage: int64(perPage), Page: page,
+		}
+		notes, resp, err := c.api.Notes.ListMergeRequestNotes(repo, number, listOpts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, mapError(err)
+		}
+		for _, note := range notes {
+			out = append(out, mapNote(note))
+			if len(out) >= limit {
+				return out, nil
+			}
+		}
+		if len(notes) == 0 || resp == nil || resp.NextPage == 0 {
+			return out, nil
+		}
 	}
-	out := make([]provider.Note, 0, len(notes))
-	for _, note := range notes {
-		out = append(out, mapNote(note))
-	}
-	return out, nil
 }
 
 // ListMergeRequestDiffs implements provider.Provider. It paginates the diffs
@@ -350,6 +376,8 @@ func mapBasicMergeRequest(m *gitlab.BasicMergeRequest) provider.MergeRequest {
 }
 
 func mapNote(n *gitlab.Note) provider.Note {
+	// Note.Author is a value type (not a pointer), so there is no nil deref;
+	// a missing author simply yields an empty username.
 	out := provider.Note{
 		ID:     n.ID,
 		Body:   n.Body,
