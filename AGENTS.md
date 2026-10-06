@@ -89,6 +89,7 @@ Authorization is the product. These rules are security-critical:
    non-default content read, also at the requested ref), is fail-closed, and runs after the policy
    decision (first-match-wins); an exempt grant skips the check. Literal
    config repositories stay listed; discovered `.noai` repos are omitted unless `repo:list` is exempt.
+   A `.noai` denial is reported to the client indistinguishably from an unknown repository.
 7. **Tag filters** match exact, case-sensitive values: GitLab MR **labels** for `mr:*`, project
    **topics** for `repo:*`. When the information is unknown, the decision fails closed.
 8. **Path filters** (doublestar) apply only to `repo:read`/`repo:write`; `paths.exclude` wins over

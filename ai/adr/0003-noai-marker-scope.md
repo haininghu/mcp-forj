@@ -67,6 +67,9 @@ request on a `.noai` repository.
   capability policy, not by the marker.
 - Exempting `repo:propose` allows new-branch-plus-MR proposals on a `.noai` repository, which is
   reviewable by construction.
+- A `.noai` denial is reported to the client **indistinguishably from an unknown repository**, so the
+  marker (and thereby the repository's existence) is not disclosed. The precise reason is logged
+  server-side only.
 
 ## History
 

@@ -78,3 +78,7 @@ Decision reasons (all fail closed unless allowed):
 
 `ErrUnknownProvider`, `ErrUnknownRepository`, `ErrDenied`, `ErrNoAI`,
 `ErrMarkerCheck` (wrapping the underlying provider error), all via `errors.Is`.
+
+At the tool boundary, `ErrNoAI` is mapped to the **same response as
+`ErrUnknownRepository`**, so a `.noai` denial does not confirm that the repository
+exists. The precise reason is logged server-side by the guard.

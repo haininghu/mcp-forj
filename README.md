@@ -187,7 +187,9 @@ repositories are omitted unless the `repo:list` grant is exempt. `.noai` is an *
 exempted reads (`repo:read`, `mr:read`, `mr:diff`).
 
 Because the marker is checked for every non-exempt capability, the token must be able to read repository
-files on the default branch; otherwise non-exempt operations on **any** repository fail closed.
+files on the default branch; otherwise non-exempt operations on **any** repository fail closed. A
+`.noai` denial is reported to the client indistinguishably from an unknown repository, so the marker and
+the repository's existence are not disclosed.
 
 ## GitLab token permissions
 
