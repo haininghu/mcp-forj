@@ -39,6 +39,9 @@ providers:
           # overlay; on a .noai repository it would otherwise be denied.
           - mr:read:
               noai: allow
+          # policy:read exposes this provider's configured rules through
+          # list_configured_rules; without it the policy is not disclosed.
+          - policy:read
           # A capability may carry a tag filter. For MR capabilities the tags
           # are GitLab labels; for repo capabilities they are project topics.
           # The subject must have ALL `require` tags and NONE of the `exclude`

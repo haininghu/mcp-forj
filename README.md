@@ -63,7 +63,7 @@ opencode loads its configuration once at startup, so restart it after editing.
 
 | Tool                       | Capability    | Description                                     |
 |----------------------------|---------------|-------------------------------------------------|
-| `list_configured_rules`    | –             | List configured rules and capabilities.         |
+| `list_configured_rules`    | `policy:read` | List configured rules and capabilities.         |
 | `list_repositories`        | see below     | List configured repositories, plus discovered.  |
 | `list_merge_requests`      | `mr:read`     | List merge requests (metadata only, no diffs).  |
 | `get_merge_request`        | `mr:read`     | Fetch one merge request.                        |
@@ -78,6 +78,7 @@ opencode loads its configuration once at startup, so restart it after editing.
 
 ## Capabilities
 
+- `policy:read` – expose the configured rules for a provider (`list_configured_rules`).
 - `repo:list` – discover repositories through the provider API.
 - `repo:read` – read repository files.
 - `mr:read` – view merge request metadata and notes (no diffs).

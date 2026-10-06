@@ -16,8 +16,8 @@ defaults to "no access" when the config is incomplete.
 Authorize with a per-provider, ordered list of **capability** rules:
 
 - Capabilities are opaque strings validated at config load:
-  `repo:list`, `repo:read`, `mr:read`, `mr:diff`, `mr:comment`, `mr:rebase`
-  (plus reserved `mr:write`, `repo:write`).
+  `policy:read`, `repo:list`, `repo:read`, `mr:read`, `mr:diff`, `mr:comment`,
+  `mr:rebase` (plus reserved `mr:write`, `repo:write`).
 - Rules match `repositories` glob patterns (doublestar) against the canonical
   `namespace/project` path.
 - Rules are evaluated **in order; first match wins**. Put specific rules before

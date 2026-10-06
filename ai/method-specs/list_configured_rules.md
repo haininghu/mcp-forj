@@ -13,7 +13,7 @@ agent can discover the policy without any provider call.
 
 ## Required capability
 
-None.
+`policy:read` (provider-scoped; granted by any allow rule of the provider).
 
 ## GitLab endpoint(s)
 
@@ -21,13 +21,16 @@ None — config only.
 
 ## Authorization
 
-None. This tool exposes the policy intentionally (single trusted agent model). It
-does not reveal `.noai` state, labels, topics or tokens.
+Per provider, `Guard.AuthorizePolicyRead` requires at least one allow rule to grant
+`policy:read` (`GrantsAnywhere`). Providers without it are omitted from the output, so
+the policy is not disclosed by default. The tool never reveals `.noai` state, runtime
+labels/topics or tokens.
 
 ## Behavior / limits
 
-- Returns each configured rule, sorted by provider name; rule order within a
-  provider is preserved.
+- Returns each configured rule for providers that grant `policy:read`, sorted by
+  provider name; rule order within a provider is preserved. Providers without the
+  capability contribute nothing.
 - Output shape per rule:
   `{provider, repositories, effect, configured_capabilities}` where each capability
   is `{name, require?, exclude?, paths?, noai_exempt?}` (`paths` = `{include?, exclude?}`).
