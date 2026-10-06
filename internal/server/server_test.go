@@ -311,8 +311,8 @@ func TestNoAIDeniesAllCapabilitiesByDefault(t *testing.T) {
 	for _, c := range denied {
 		t.Run(c.name, func(t *testing.T) {
 			res := env.call(t, c.name, c.args)
-			if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-				t.Fatalf("%s result = %q (isError=%v), want .noai denial", c.name, resultText(t, res), res.IsError)
+			if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+				t.Fatalf("%s result = %q (isError=%v), want an indistinguishable unknown-repository denial", c.name, resultText(t, res), res.IsError)
 			}
 		})
 	}
@@ -339,8 +339,8 @@ func TestNoAIExemptAllowsCapability(t *testing.T) {
 		t.Fatalf("rebase denied despite noai exemption: %s", resultText(t, res))
 	}
 	res := env.call(t, "add_merge_request_note", map[string]any{"provider": "fake", "repo": "team/app", "number": 1, "body": "hi"})
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("add_merge_request_note = %q, want .noai denial (not exempt)", resultText(t, res))
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("add_merge_request_note = %q, want an indistinguishable unknown-repository denial (not exempt)", resultText(t, res))
 	}
 }
 
@@ -350,8 +350,8 @@ func TestListMergeRequestsDeniedOnNoAIRepoByDefault(t *testing.T) {
 	env := newTestEnv(t, allowRules("mr:read"), fake)
 
 	res := env.call(t, "list_merge_requests", mrArgs())
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("list_merge_requests = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("list_merge_requests = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
 	}
 }
 
@@ -1384,8 +1384,8 @@ func TestNoAIDeniesReadFileWhenTopicFilterPasses(t *testing.T) {
 	env := newTestEnv(t, repoReadTopicRules(), fake)
 
 	res := env.call(t, "read_file", readFileArgs())
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("read_file result = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("read_file result = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
 	}
 }
 
@@ -1663,8 +1663,8 @@ func TestRebaseMergeRequestDeniedOnNoAIRepoByDefault(t *testing.T) {
 	env := newTestEnv(t, allowRules("mr:rebase"), fake)
 
 	res := env.call(t, "rebase_merge_request", rebaseArgs())
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("rebase_merge_request = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("rebase_merge_request = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
 	}
 	if fake.rebaseCalls != 0 {
 		t.Errorf("RebaseMergeRequest called %d times, want 0", fake.rebaseCalls)
@@ -2167,8 +2167,8 @@ func TestReadFileRefDoesNotBypassNoAI(t *testing.T) {
 	env := newTestEnv(t, allowRules("repo:read"), fake)
 
 	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": "README.md", "ref": "feature"})
-	if !res.IsError || !strings.Contains(resultText(t, res), ".noai") {
-		t.Fatalf("read_file with ref = %q (isError=%v), want .noai denial", resultText(t, res), res.IsError)
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("read_file with ref = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
 	}
 }
 

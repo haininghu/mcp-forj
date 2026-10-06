@@ -827,7 +827,10 @@ func mapAuthError(err error, providerName, repo string) error {
 	case errors.Is(err, policy.ErrDenied):
 		return fmt.Errorf("access denied for repository %q", repo)
 	case errors.Is(err, policy.ErrNoAI):
-		return fmt.Errorf("repository %q is marked .noai and is off limits", repo)
+		// Deliberately indistinguishable from an unknown repository: revealing
+		// the .noai marker would confirm that the repository exists. The precise
+		// reason is logged server-side by the guard.
+		return fmt.Errorf("unknown repository %q for provider %q", repo, providerName)
 	case errors.Is(err, policy.ErrMarkerCheck):
 		status := provider.HTTPStatus(err)
 		if errors.Is(err, provider.ErrForbidden) {
