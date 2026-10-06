@@ -37,9 +37,9 @@ Fine-grained permission: **Project: Read** (group/project must be in token scope
 - Discovery: eligible when at least one allow rule grants `repo:list`
   (`Guard.AuthorizeList`). Each candidate is filtered with the policy-only
   `Guard.EvaluateWithTags(repo:list, topics)`; a `.noai` candidate is then omitted
-  (counted in `omitted`) unless the `repo:list` grant is exempted with
-  `noai: allow`, and a marker-check failure also omits it (fail-closed). Missing
-  `repo:list` is not an error; only literal repositories are returned.
+  unless the `repo:list` grant is exempted with `noai: allow`, and a marker-check
+  failure also omits it (fail-closed). Missing `repo:list` is not an error; only
+  literal repositories are returned.
 - Only discovered candidates are marker-checked; literal repositories are not.
 
 ## Behavior / limits
@@ -48,10 +48,10 @@ Fine-grained permission: **Project: Read** (group/project must be in token scope
   call is made per prefix; an explicit `search` is one call.
 - Results are deduplicated by provider+path (literal wins) and sorted by provider
   then path.
-- `omitted` counts candidates that matched a rule but were blocked or failed a topic
-  filter; no-rule candidates are filtered silently. `truncated` is set when a call
-  offers more distinct candidates than the remaining capacity or the discovered cap
-  is reached.
+- Candidates that are blocked or fail a filter are dropped silently; the count is
+  logged server-side only, so the result does not reveal that repositories were
+  hidden. `truncated` is set when a call offers more distinct candidates than the
+  remaining capacity or the discovered cap is reached.
 - Labels/topics are never returned.
 
 ## Errors

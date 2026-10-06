@@ -158,8 +158,8 @@ enables discovery of repositories matching glob patterns through the provider AP
   explicit `search` argument is passed through verbatim.
 - `project_scope` controls breadth: `accessible` (default, all projects the token can see) or `membership`.
 - The `limit` argument bounds only discovered repositories (default 100, capped at 1000); literal
-  repositories are always returned. Results are deduplicated and sorted, and report `omitted` and
-  `truncated`.
+  repositories are always returned. Results are deduplicated and sorted and report `truncated`;
+  repositories hidden by policy are not counted in the output.
 - Listing never checks the `.noai` marker, so a `.noai` repository may appear. An active `repo:list` topic
   filter also applies to literal config repositories (their topics are fetched, fail-closed).
 
@@ -218,7 +218,8 @@ the server sends `HEAD` (default branch) when no ref is given.
 ## Limitations
 
 - `list_merge_requests` enforces an active `mr:read` filter client-side from the labels returned by the
-  list endpoint; non-matching or unknown-label merge requests are omitted and counted in `omitted`.
+  list endpoint; non-matching or unknown-label merge requests are omitted (the count is logged
+  server-side only and not returned).
 - `rebase_merge_request` triggers an **asynchronous** rebase. The outcome appears later via
   `get_merge_request` (`rebase_in_progress`, `merge_error`, `has_conflicts`, `detailed_merge_status`). A
   missing permission surfaces as a "forbidden" message naming the required permission; a non-rebaseable

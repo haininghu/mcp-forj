@@ -115,7 +115,7 @@ Every capability-gated tool follows the same pipeline:
    (tags + path). Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
 6. Perform the provider operation and map the result. Map errors with `mapProviderError`.
 
-`list_merge_requests` filters client-side from list-endpoint labels (`omitted` counts drops);
+`list_merge_requests` filters client-side from list-endpoint labels (the drop count is logged, not returned);
 `list_repositories` lists literal repositories without a marker check and marker-checks discovered
 candidates (omitting `.noai` ones unless the `repo:list` grant is `noai`-exempt).
 

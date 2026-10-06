@@ -41,8 +41,9 @@ request, after the policy pre-check and before the provider list call.
 
 - Active tag filters are enforced per MR; the GitLab list endpoint returns `labels`,
   so a `require: [renovate]` filter returns matching MRs (it does not fail closed).
-- Non-matching MRs are skipped and counted in `omitted`; MRs whose labels are
-  unknown (`LabelsKnown=false`) are omitted (fail-closed) and counted.
+- Non-matching MRs are skipped; MRs whose labels are unknown (`LabelsKnown=false`) are
+  omitted (fail-closed). The count is logged server-side only and not returned, so the
+  result does not reveal how many merge requests were hidden.
 - At most 100 results; `truncated` is set when the fetch window or the cap is hit.
 - Labels are never returned.
 
