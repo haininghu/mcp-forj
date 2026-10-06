@@ -34,10 +34,14 @@ request on a `.noai` repository.
   **not** `noai`-exempt, the marker is checked via `FileExists(".noai", ref=HEAD)`; a present
   marker denies with `ErrNoAI` and a check failure denies fail-closed. An exempt grant skips the
   marker check entirely.
+- For a content read at a **non-default ref** (`read_file`), the marker is additionally checked at
+  that ref; an occurrence at either the default branch or the requested ref denies. This closes the
+  case where the default branch has no marker but another branch does.
 - The hardcoded `policy.IsMarkerProtected` set is replaced by the config-driven `NoAIExempt`
   property of the matched grant.
-- The marker is checked on the repository's **default branch** (GitLab: `ref=HEAD`). There is
-  **no cache**: it is checked on every non-exempt operation.
+- The marker is checked on the repository's **default branch** (GitLab: `ref=HEAD`) and, for a
+  non-default content read, also on the requested ref. There is **no cache**: it is checked on
+  every non-exempt operation.
 - Repository listing:
   - Literal (explicitly configured) repositories are always listed, even if `.noai`, regardless
     of `repo:list`. A `deny` rule can still hide them.

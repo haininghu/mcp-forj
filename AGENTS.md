@@ -85,8 +85,9 @@ Authorization is the product. These rules are security-critical:
    closed on any error (including unknown tags/topics and metadata-fetch failures).
 6. **`.noai` scope.** It is a **capability-level default-deny overlay**: on a `.noai` repo every
    capability is denied unless the matching grant is explicitly exempted with `noai: allow`. It is
-   checked on the repository's **default branch** via a file read with `ref=HEAD`, is fail-closed,
-   and runs after the policy decision (first-match-wins); an exempt grant skips the check. Literal
+   checked on the repository's **default branch** via a file read with `ref=HEAD` (and, for a
+   non-default content read, also at the requested ref), is fail-closed, and runs after the policy
+   decision (first-match-wins); an exempt grant skips the check. Literal
    config repositories stay listed; discovered `.noai` repos are omitted unless `repo:list` is exempt.
 7. **Tag filters** match exact, case-sensitive values: GitLab MR **labels** for `mr:*`, project
    **topics** for `repo:*`. When the information is unknown, the decision fails closed.

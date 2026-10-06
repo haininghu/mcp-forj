@@ -25,17 +25,18 @@ Fine-grained permission: **Repository: Read**.
 
 ## Authorization
 
-1. Validate the path (ordered traversal checks) and clean it.
+1. Validate the path (ordered traversal checks) and clean it. Validate and clean the
+   repository path; validate the optional `ref` (control characters and a length bound).
 2. Resolve the provider.
 3. Policy-only pre-check: `Guard.AuthorizeRepoCapability(repo:read)`.
 4. If the matched grant has a tag constraint, fetch project topics
    (`GetRepositoryTopics`); a topic-only failure denies. Path-only filters make no
    topic call.
-5. `Guard.AuthorizeResource(repo:read, tags, cleanedPath)` — tag and path checks plus
-   the `.noai` marker check, unless the matched grant is exempted with `noai: allow`.
-   The marker is checked at the default branch via `FileExists(repo, ".noai", "HEAD")`;
-   present or failed denies (fail-closed).
-6. Read the file and return it.
+5. `Guard.AuthorizeResourceRef(repo:read, tags, cleanedPath, ref)` — tag and path checks
+   plus the `.noai` marker check, unless the matched grant is exempted with `noai: allow`.
+   The marker is checked at the default branch and, when `ref` names a different revision,
+   also at that ref; present or failed denies (fail-closed).
+6. Read the file and return it. The content is bounded before conversion to a string.
 
 ## Behavior / limits
 

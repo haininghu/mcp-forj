@@ -16,6 +16,13 @@ capability.
 | capability | `policy.Capability` | Must be known at config load.                      |
 | tags       | `policy.TagSet`     | `Known=false` means tags unavailable.              |
 | path       | string              | Repository-relative path for `repo:read`/`write`.  |
+| ref        | string              | Git ref for the marker check (`read_file` only).   |
+
+The repository path is validated and canonicalized by `validateRepo` before it is used
+for both policy matching and the provider call, so the two cannot diverge. Rejected:
+absolute paths, backslashes, control characters, empty/relative segments and encoded
+traversal. The file path is canonicalized by `validatePath` and the `ref` by
+`validateRef` (control characters, length bound).
 
 ## Required capability
 

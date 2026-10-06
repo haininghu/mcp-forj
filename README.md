@@ -166,8 +166,9 @@ enables discovery of repositories matching glob patterns through the provider AP
 
 `.noai` is a **capability-level default-deny overlay**: on a repository carrying the marker, every
 capability is denied unless the matching grant is explicitly exempted with `noai: allow`. The marker is
-checked on the repository's default branch and is **fail-closed** (a check failure denies). It is
-evaluated after the policy decision (first match wins); an exempt grant skips the check.
+checked on the repository's default branch (and, when `read_file` reads a non-default `ref`, also at that
+ref) and is **fail-closed** (a check failure denies). It is evaluated after the policy decision (first
+match wins); an exempt grant skips the check.
 
 ```yaml
 capabilities:

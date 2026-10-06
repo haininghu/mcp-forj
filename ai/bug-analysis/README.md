@@ -12,6 +12,8 @@ more useful than commit messages because they capture the *wrong assumption*.
 | 0002 | `read_file` omitted `ref`, so the `.noai` check failed on every call. |
 | 0003 | Repository discovery missed accessible repos and namespaces.          |
 | 0004 | MR note endpoints require the Work Item permission, not Merge Request.|
+| 0005 | Repository path was not canonicalized and `read_file` ref bypassed `.noai`. |
+| 0006 | List truncation was never reported and other provider/handler gaps.   |
 
 ## Template
 
