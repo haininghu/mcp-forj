@@ -203,11 +203,14 @@ func TestKnownCapabilities(t *testing.T) {
 	if !IsKnownCapability("policy:read") {
 		t.Error("policy:read should be known")
 	}
+	if !IsKnownCapability("mr:merge") {
+		t.Error("mr:merge should be known")
+	}
 	if IsKnownCapability("repo:teleport") {
 		t.Error("repo:teleport should not be known")
 	}
-	if len(KnownCapabilities()) != 9 {
-		t.Errorf("KnownCapabilities length = %d, want 9", len(KnownCapabilities()))
+	if len(KnownCapabilities()) != 10 {
+		t.Errorf("KnownCapabilities length = %d, want 10", len(KnownCapabilities()))
 	}
 }
 

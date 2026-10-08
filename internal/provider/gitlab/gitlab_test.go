@@ -433,6 +433,64 @@ func TestRebaseMergeRequestHTTPError(t *testing.T) {
 	}
 }
 
+func TestMergeMergeRequestHTTP(t *testing.T) {
+	var gotMethod, gotPath string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"iid": 42, "title": "merge me", "state": "merged",
+		})
+	}))
+
+	mr, err := c.MergeMergeRequest(context.Background(), "team/app", 42)
+	if err != nil {
+		t.Fatalf("MergeMergeRequest: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %s, want PUT", gotMethod)
+	}
+	if !strings.HasSuffix(gotPath, "/merge_requests/42/merge") {
+		t.Errorf("path = %s, want suffix /merge_requests/42/merge", gotPath)
+	}
+	if mr.State != "merged" {
+		t.Errorf("state = %q, want merged", mr.State)
+	}
+}
+
+func TestMergeMergeRequestHTTPInvalidState(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	_, err := c.MergeMergeRequest(context.Background(), "team/app", 42)
+	if err == nil {
+		t.Fatal("MergeMergeRequest succeeded on 405, want error")
+	}
+	if !errors.Is(err, provider.ErrInvalidState) {
+		t.Fatalf("error = %v, want provider.ErrInvalidState", err)
+	}
+	if got := provider.HTTPStatus(err); got != http.StatusMethodNotAllowed {
+		t.Errorf("HTTPStatus = %d, want 405", got)
+	}
+}
+
+func TestMergeMergeRequestHTTPNotAcceptable(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotAcceptable)
+	}))
+	_, err := c.MergeMergeRequest(context.Background(), "team/app", 42)
+	if err == nil {
+		t.Fatal("MergeMergeRequest succeeded on 406, want error")
+	}
+	if !errors.Is(err, provider.ErrInvalidState) {
+		t.Fatalf("error = %v, want provider.ErrInvalidState", err)
+	}
+	if got := provider.HTTPStatus(err); got != http.StatusNotAcceptable {
+		t.Errorf("HTTPStatus = %d, want 406", got)
+	}
+}
+
 func TestListMergeRequestsMapsLabels(t *testing.T) {
 	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

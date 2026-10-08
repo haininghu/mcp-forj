@@ -308,6 +308,17 @@ func (c *Client) RebaseMergeRequest(ctx context.Context, repo string, number int
 	return nil
 }
 
+// MergeMergeRequest implements provider.Provider. GitLab merges the merge
+// request synchronously and returns the updated (merged) merge request.
+func (c *Client) MergeMergeRequest(ctx context.Context, repo string, number int64) (*provider.MergeRequest, error) {
+	mr, _, err := c.api.MergeRequests.AcceptMergeRequest(repo, number, nil, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := mapBasicMergeRequest(&mr.BasicMergeRequest)
+	return &out, nil
+}
+
 // ReadFile implements provider.Provider. An empty ref means the default branch.
 func (c *Client) ReadFile(ctx context.Context, repo, path, ref string) ([]byte, error) {
 	file, _, err := c.api.RepositoryFiles.GetFile(repo, path, refOptions(ref), gitlab.WithContext(ctx))
@@ -405,7 +416,10 @@ func mapError(err error) error {
 		return wrapStatus(status, provider.ErrNotFound)
 	case status == http.StatusUnauthorized || status == http.StatusForbidden:
 		return wrapStatus(status, provider.ErrForbidden)
-	case status == http.StatusBadRequest || status == http.StatusMethodNotAllowed || status == http.StatusConflict:
+	case status == http.StatusBadRequest || status == http.StatusMethodNotAllowed ||
+		status == http.StatusConflict || status == http.StatusNotAcceptable:
+		// GitLab reports a non-mergeable MR as 406 ("branch cannot be
+		// merged"), alongside 400/405/409; treat all as an invalid state.
 		return wrapStatus(status, provider.ErrInvalidState)
 	case status != 0:
 		return &provider.HTTPError{Status: status, Err: errors.New("gitlab: request failed")}

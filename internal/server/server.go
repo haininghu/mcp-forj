@@ -93,6 +93,11 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	}, s.rebaseMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "merge_merge_request",
+		Description: "Merge a merge request. Requires the mr:merge capability; .noai-protected unless the grant is exempted.",
+	}, s.mergeMergeRequest)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_file",
 		Description: "Read a repository file at an optional ref. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
 	}, s.readFile)
@@ -141,6 +146,12 @@ type addMergeRequestNoteInput struct {
 }
 
 type rebaseMergeRequestInput struct {
+	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
+	Number   int64  `json:"number" jsonschema:"merge request number"`
+}
+
+type mergeMergeRequestInput struct {
 	Provider string `json:"provider" jsonschema:"logical provider name"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
@@ -745,6 +756,42 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 		Number:   in.Number,
 		Status:   "rebase requested",
 	})
+}
+
+// mergeMergeRequest merges a merge request synchronously. The merge request
+// metadata is fetched first as an internal authorization input (for tag
+// filters); if it cannot be fetched the merge is denied (fail-closed). The
+// merged merge request is returned.
+func (s *Server) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in mergeMergeRequestInput) (*mcp.CallToolResult, any, error) {
+	if in.Number <= 0 {
+		return nil, nil, errors.New("number must be positive")
+	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
+	p, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRMerge); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
+	}
+	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRMerge, tagSetFromMR(*mr)); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	merged, err := p.MergeMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderErrorState(err,
+			"merging needs the Merge Request: Update permission and a role allowed to merge (typically Developer)",
+			"the merge request is not in a mergeable state")
+	}
+	return jsonResult(toMergeRequestJSON(*merged))
 }
 
 // resolveProvider resolves a provider by name without authorization.

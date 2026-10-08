@@ -7,8 +7,9 @@ package policy
 type Capability string
 
 // Known capabilities. CapRepoList, CapRepoRead, CapMRRead, CapMRDiff,
-// CapMRComment, CapRebase and CapPolicyRead are used by the tools; the remaining
-// values are reserved so the configuration vocabulary stays stable.
+// CapMRComment, CapRebase, CapMRMerge and CapPolicyRead are used by the tools;
+// the remaining values are reserved so the configuration vocabulary stays
+// stable.
 const (
 	// CapRepoList permits discovering repositories matching the configured
 	// patterns.
@@ -23,7 +24,9 @@ const (
 	CapMRComment Capability = "mr:comment"
 	// CapRebase permits triggering a merge request rebase.
 	CapRebase Capability = "mr:rebase"
-	// CapMRWrite permits creating, updating, merging or closing merge requests
+	// CapMRMerge permits merging a merge request.
+	CapMRMerge Capability = "mr:merge"
+	// CapMRWrite permits creating, updating or closing merge requests
 	// (reserved).
 	CapMRWrite Capability = "mr:write"
 	// CapRepoWrite permits modifying repository content (reserved).
@@ -40,6 +43,7 @@ var knownCapabilities = []Capability{
 	CapMRDiff,
 	CapMRComment,
 	CapRebase,
+	CapMRMerge,
 	CapMRWrite,
 	CapRepoWrite,
 	CapPolicyRead,

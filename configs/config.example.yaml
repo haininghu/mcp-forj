@@ -52,6 +52,11 @@ providers:
           # Trigger a rebase only for review-approved MRs.
           - mr:rebase:
               require: [ai-reviewed]
+          # Merge review-approved MRs. This is a separate, least-privilege
+          # capability (not the reserved mr:write) and is denied on `.noai`
+          # repositories unless the grant is exempted with `noai: allow`.
+          - mr:merge:
+              require: [ai-reviewed]
 
       # Read-only access to all other repositories in this group.
       - repositories:

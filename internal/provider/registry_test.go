@@ -33,6 +33,9 @@ func (s stubProvider) ListMergeRequestDiffs(context.Context, string, int64) ([]D
 func (s stubProvider) RebaseMergeRequest(context.Context, string, int64) error {
 	return nil
 }
+func (s stubProvider) MergeMergeRequest(context.Context, string, int64) (*MergeRequest, error) {
+	return nil, nil
+}
 func (s stubProvider) ReadFile(context.Context, string, string, string) ([]byte, error) {
 	return nil, ErrNotFound
 }

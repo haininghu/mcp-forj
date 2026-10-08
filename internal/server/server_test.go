@@ -32,6 +32,9 @@ type fakeProvider struct {
 	added            []string
 	rebaseCalls      int
 	rebaseErr        error
+	getCalls         int
+	mergeCalls       int
+	mergeErr         error
 	diffCalls        int
 	diffErr          error
 	diffs            []provider.DiffFile
@@ -74,6 +77,7 @@ func (f *fakeProvider) ListMergeRequests(_ context.Context, _ string, opts provi
 }
 
 func (f *fakeProvider) GetMergeRequest(_ context.Context, _ string, number int64) (*provider.MergeRequest, error) {
+	f.getCalls++
 	if f.providerErr != nil {
 		return nil, f.providerErr
 	}
@@ -131,6 +135,24 @@ func (f *fakeProvider) RebaseMergeRequest(_ context.Context, _ string, _ int64) 
 		return f.providerErr
 	}
 	return nil
+}
+
+func (f *fakeProvider) MergeMergeRequest(_ context.Context, _ string, number int64) (*provider.MergeRequest, error) {
+	f.mergeCalls++
+	if f.mergeErr != nil {
+		return nil, f.mergeErr
+	}
+	if f.providerErr != nil {
+		return nil, f.providerErr
+	}
+	for i := range f.mrs {
+		if f.mrs[i].Number == number {
+			merged := f.mrs[i]
+			merged.State = "merged"
+			return &merged, nil
+		}
+	}
+	return nil, provider.ErrNotFound
 }
 
 func (f *fakeProvider) ReadFile(_ context.Context, _, path, _ string) ([]byte, error) {
@@ -295,7 +317,7 @@ func mrArgs() map[string]any {
 func TestNoAIDeniesAllCapabilitiesByDefault(t *testing.T) {
 	fake := newFake()
 	fake.marker = true
-	env := newTestEnv(t, allowRules("mr:read", "mr:comment", "mr:rebase", "repo:read", "repo:list"), fake)
+	env := newTestEnv(t, allowRules("mr:read", "mr:comment", "mr:rebase", "mr:merge", "repo:read", "repo:list"), fake)
 
 	denied := []struct {
 		name string
@@ -307,6 +329,7 @@ func TestNoAIDeniesAllCapabilitiesByDefault(t *testing.T) {
 		{"list_merge_request_notes", map[string]any{"provider": "fake", "repo": "team/app", "number": 1}},
 		{"add_merge_request_note", map[string]any{"provider": "fake", "repo": "team/app", "number": 1, "body": "hi"}},
 		{"rebase_merge_request", rebaseArgs()},
+		{"merge_merge_request", mergeArgs()},
 	}
 	for _, c := range denied {
 		t.Run(c.name, func(t *testing.T) {
@@ -1646,6 +1669,176 @@ func TestRebaseMergeRequestForbiddenMessage(t *testing.T) {
 	text := strings.ToLower(resultText(t, res))
 	if !strings.Contains(text, "forbidden") || !strings.Contains(text, "permission") {
 		t.Errorf("error = %q, want an actionable forbidden/permission message", resultText(t, res))
+	}
+}
+
+func filteredMergeRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRMerge,
+			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+		}},
+	}}
+}
+
+func mergeArgs() map[string]any {
+	return map[string]any{"provider": "fake", "repo": "team/app", "number": 1}
+}
+
+func TestMergeMergeRequestAllowed(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:merge"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if res.IsError {
+		t.Fatalf("merge_merge_request denied: %s", resultText(t, res))
+	}
+	if fake.mergeCalls != 1 {
+		t.Errorf("MergeMergeRequest called %d times, want 1", fake.mergeCalls)
+	}
+	var out mergeRequestJSON
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.State != "merged" {
+		t.Errorf("state = %q, want merged", out.State)
+	}
+	if strings.Contains(strings.ToLower(resultText(t, res)), "label") {
+		t.Errorf("labels leaked in output: %s", resultText(t, res))
+	}
+}
+
+func TestMergeMergeRequestRequiresCapability(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if !res.IsError {
+		t.Fatal("merge_merge_request succeeded without mr:merge")
+	}
+	if fake.mergeCalls != 0 {
+		t.Errorf("MergeMergeRequest called %d times, want 0", fake.mergeCalls)
+	}
+	if fake.getCalls != 0 {
+		t.Errorf("GetMergeRequest called %d times, want 0 (metadata must not be fetched without mr:merge)", fake.getCalls)
+	}
+}
+
+func TestMergeMergeRequestTagFilter(t *testing.T) {
+	t.Run("matching label allows", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed")
+		env := newTestEnv(t, filteredMergeRules(), fake)
+
+		res := env.call(t, "merge_merge_request", mergeArgs())
+		if res.IsError {
+			t.Fatalf("matching label denied: %s", resultText(t, res))
+		}
+		if fake.mergeCalls != 1 {
+			t.Errorf("MergeMergeRequest called %d times, want 1", fake.mergeCalls)
+		}
+	})
+	t.Run("excluded label denies", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed", "do-not-touch")
+		env := newTestEnv(t, filteredMergeRules(), fake)
+
+		res := env.call(t, "merge_merge_request", mergeArgs())
+		if !res.IsError {
+			t.Fatal("excluded label allowed the merge")
+		}
+		if fake.mergeCalls != 0 {
+			t.Errorf("MergeMergeRequest called %d times, want 0", fake.mergeCalls)
+		}
+	})
+	t.Run("unknown labels fail closed", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, false, "ai-reviewed")
+		env := newTestEnv(t, filteredMergeRules(), fake)
+
+		res := env.call(t, "merge_merge_request", mergeArgs())
+		if !res.IsError {
+			t.Fatal("unknown labels allowed an active filter")
+		}
+		if fake.mergeCalls != 0 {
+			t.Errorf("MergeMergeRequest called %d times, want 0", fake.mergeCalls)
+		}
+	})
+}
+
+func TestMergeMergeRequestMetadataErrorDenies(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = errors.New("metadata unavailable")
+	env := newTestEnv(t, allowRules("mr:merge"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if !res.IsError {
+		t.Fatal("metadata fetch error did not deny the merge")
+	}
+	if fake.mergeCalls != 0 {
+		t.Errorf("MergeMergeRequest called %d times, want 0", fake.mergeCalls)
+	}
+}
+
+func TestMergeMergeRequestProviderErrorIsSafe(t *testing.T) {
+	fake := newFake()
+	fake.mergeErr = errors.New("403 forbidden secret-detail")
+	env := newTestEnv(t, allowRules("mr:merge"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if !res.IsError {
+		t.Fatal("provider merge error did not surface as a tool error")
+	}
+	if strings.Contains(resultText(t, res), "secret-detail") {
+		t.Errorf("provider error leaked: %s", resultText(t, res))
+	}
+	if fake.mergeCalls != 1 {
+		t.Errorf("MergeMergeRequest called %d times, want 1", fake.mergeCalls)
+	}
+}
+
+func TestMergeMergeRequestDeniedOnNoAIRepoByDefault(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	env := newTestEnv(t, allowRules("mr:merge"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("merge_merge_request = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
+	}
+	if fake.mergeCalls != 0 {
+		t.Errorf("MergeMergeRequest called %d times, want 0", fake.mergeCalls)
+	}
+}
+
+func TestMergeMergeRequestForbiddenMessage(t *testing.T) {
+	fake := newFake()
+	fake.mergeErr = provider.ErrForbidden
+	env := newTestEnv(t, allowRules("mr:merge"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if !res.IsError {
+		t.Fatal("forbidden merge did not surface as a tool error")
+	}
+	text := strings.ToLower(resultText(t, res))
+	if !strings.Contains(text, "forbidden") || !strings.Contains(text, "permission") {
+		t.Errorf("error = %q, want an actionable forbidden/permission message", resultText(t, res))
+	}
+}
+
+func TestMergeMergeRequestInvalidStateMessage(t *testing.T) {
+	fake := newFake()
+	fake.mergeErr = provider.ErrInvalidState
+	env := newTestEnv(t, allowRules("mr:merge"), fake)
+
+	res := env.call(t, "merge_merge_request", mergeArgs())
+	if !res.IsError {
+		t.Fatal("invalid-state merge did not surface as a tool error")
+	}
+	if !strings.Contains(resultText(t, res), "not in a mergeable state") {
+		t.Errorf("error = %q, want the mergeable-state hint", resultText(t, res))
 	}
 }
 

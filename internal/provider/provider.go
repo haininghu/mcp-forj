@@ -175,6 +175,9 @@ type Provider interface {
 	// RebaseMergeRequest starts an asynchronous rebase of a merge request's
 	// source branch onto its target branch.
 	RebaseMergeRequest(ctx context.Context, repo string, number int64) error
+	// MergeMergeRequest merges a merge request synchronously and returns the
+	// merged merge request.
+	MergeMergeRequest(ctx context.Context, repo string, number int64) (*MergeRequest, error)
 
 	// ReadFile reads a repository file. An empty ref means the default branch.
 	ReadFile(ctx context.Context, repo, path, ref string) ([]byte, error)

@@ -766,6 +766,36 @@ providers:
 	}
 }
 
+func TestCapabilityGrantMergeAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:merge]
+      - repositories: ["a/c"]
+        effect: allow
+        capabilities:
+          - mr:merge:
+              require: [ai-reviewed]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected mr:merge: %v", err)
+	}
+	if got := cfg.Providers[0].Rules[0].Capabilities[0]; got.Name != "mr:merge" || len(got.Require) != 0 {
+		t.Errorf("plain mr:merge grant = %+v", got)
+	}
+	filtered := cfg.Providers[0].Rules[1].Capabilities[0]
+	if filtered.Name != "mr:merge" || len(filtered.Require) != 1 || filtered.Require[0] != "ai-reviewed" {
+		t.Errorf("filtered mr:merge grant = %+v", filtered)
+	}
+}
+
 func TestProjectScope(t *testing.T) {
 	tests := []struct {
 		name    string

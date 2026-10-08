@@ -17,6 +17,7 @@ tests, and configuration documentation.
 | `get_merge_request_diff.md`   | Fetch MR file diffs.                                       |
 | `add_merge_request_note.md`   | Create an MR note.                                         |
 | `rebase_merge_request.md`     | Trigger an asynchronous MR rebase.                         |
+| `merge_merge_request.md`      | Merge a merge request and return the merged MR.            |
 | `read_file.md`                | Read a repository file.                                    |
 
 ## Template

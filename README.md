@@ -71,6 +71,7 @@ opencode loads its configuration once at startup, so restart it after editing.
 | `get_merge_request_diff`   | `mr:diff`     | Fetch the file diffs of a merge request.        |
 | `add_merge_request_note`   | `mr:comment`¹ | Comment on a merge request.                     |
 | `rebase_merge_request`     | `mr:rebase`   | Trigger an asynchronous merge request rebase.   |
+| `merge_merge_request`      | `mr:merge`    | Merge a merge request (returns the merged MR).  |
 | `read_file`                | `repo:read`   | Read a repository file at an optional ref.      |
 
 ¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
@@ -85,7 +86,8 @@ opencode loads its configuration once at startup, so restart it after editing.
 - `mr:diff` – read merge request file diffs (`get_merge_request_diff`).
 - `mr:comment` – comment on merge requests.
 - `mr:rebase` – trigger an asynchronous merge request rebase.
-- `mr:write` – reserved (create/update/merge merge requests).
+- `mr:merge` – merge a merge request.
+- `mr:write` – reserved (create/update/close merge requests).
 - `repo:write` – reserved.
 
 ## Configuration
@@ -179,6 +181,7 @@ capabilities:
   - mr:read:
       noai: allow
   - mr:rebase              # not exempt -> denied on .noai repos
+  - mr:merge               # not exempt -> denied on .noai repos
 ```
 
 Literal (explicitly configured) repositories are always listed, even if `.noai`. Discovered `.noai`
@@ -199,21 +202,23 @@ logged or returned. The config is git-ignored, so a real config with a literal t
 Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **groups/projects** under
 "Group and project access", then grant the permissions for the operations you enable:
 
-| Capability / tool                     | Fine-grained permission                                     |
-|---------------------------------------|-------------------------------------------------------------|
-| `list_repositories` (`repo:list`)     | **Project: Read**                                           |
-| `read_file` (`repo:read`, `.noai`)    | **Repository: Read**                                        |
-| `mr:read` (list/get)                  | **Merge Request: Read**                                     |
-| `get_merge_request_diff` (`mr:diff`)  | **Merge Request: Read**                                     |
-| `rebase_merge_request` (`mr:rebase`)  | **Merge Request: Update** (+ role that can push to source)  |
-| `list_merge_request_notes`            | **Work Item: Read** (+ Merge Request: Read)                 |
-| `add_merge_request_note`              | **Work Item: Create** (+ Merge Request: Read)               |
-| `repo:write` (reserved)               | Repository: Create/Update/Delete                            |
-| `mr:write` (reserved)                 | Merge Request: Create/Update/Delete                         |
+| Capability / tool                    | Fine-grained permission                                                       |
+|--------------------------------------|-------------------------------------------------------------------------------|
+| `list_repositories` (`repo:list`)    | **Project: Read**                                                             |
+| `read_file` (`repo:read`, `.noai`)   | **Repository: Read**                                                          |
+| `mr:read` (list/get)                 | **Merge Request: Read**                                                       |
+| `get_merge_request_diff` (`mr:diff`) | **Merge Request: Read**                                                       |
+| `rebase_merge_request` (`mr:rebase`) | **Merge Request: Update** (+ Merge Request: Read; push to source)             |
+| `merge_merge_request` (`mr:merge`)   | **Merge Request: Update** (+ Merge Request: Read; merge role, e.g. Developer) |
+| `list_merge_request_notes`           | **Work Item: Read** (+ Merge Request: Read)                                   |
+| `add_merge_request_note`             | **Work Item: Create** (+ Merge Request: Read)                                 |
+| `repo:write` (reserved)              | Repository: Create/Update/Delete                                              |
+| `mr:write` (reserved)                | Merge Request: Create/Update/Close                                            |
 
 Classic tokens: use the `api` scope (read+write) or `read_api` (read only). A rebase also needs at least
-the **Developer** role (push access to the source branch). The repository-files endpoint requires a `ref`;
-the server sends `HEAD` (default branch) when no ref is given.
+the **Developer** role (push access to the source branch); merging also needs a role allowed to merge
+(typically **Developer**). The repository-files endpoint requires a `ref`; the server sends `HEAD`
+(default branch) when no ref is given.
 
 ## Limitations
 
@@ -224,6 +229,11 @@ the server sends `HEAD` (default branch) when no ref is given.
   `get_merge_request` (`rebase_in_progress`, `merge_error`, `has_conflicts`, `detailed_merge_status`). A
   missing permission surfaces as a "forbidden" message naming the required permission; a non-rebaseable
   merge request surfaces as "not in a rebaseable state".
+- `merge_merge_request` performs a **synchronous** merge and returns the merged merge request. It is not
+  idempotent: a retry after an ambiguous failure should be preceded by `get_merge_request` to check whether
+  the state is already `merged`. A missing permission or missing merge role surfaces as "forbidden"; a
+  non-mergeable merge request (already merged/closed, draft, pending pipeline, conflicts) surfaces as
+  "not in a mergeable state".
 - No caching: labels, topics and markers are fetched on every operation.
 - `mr:diff` is denied on a `.noai` repository unless the grant is exempted with `noai: allow`; diffs are
   repository content, but the marker is an integrity control, not a confidentiality control.

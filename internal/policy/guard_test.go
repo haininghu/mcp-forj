@@ -193,7 +193,7 @@ func TestAuthorizeWithTagsMarkerStillApplies(t *testing.T) {
 func TestMarkerDeniesAllCapabilitiesByDefault(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(
-			CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRDiff, CapMRComment, CapRebase,
+			CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRDiff, CapMRComment, CapRebase, CapMRMerge,
 		)},
 	})
 	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": fakeChecker{exists: true}}, ".noai", nil)
@@ -201,7 +201,7 @@ func TestMarkerDeniesAllCapabilitiesByDefault(t *testing.T) {
 
 	// .noai is a default-deny overlay: every capability is denied unless the
 	// matched grant exempts it.
-	for _, c := range []Capability{CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRDiff, CapMRComment, CapRebase} {
+	for _, c := range []Capability{CapRepoRead, CapRepoWrite, CapRepoList, CapMRRead, CapMRDiff, CapMRComment, CapRebase, CapMRMerge} {
 		if err := g.Authorize(ctx, "fake", "team/app", c); !errors.Is(err, ErrNoAI) {
 			t.Errorf("Authorize(%s) on .noai repo = %v, want ErrNoAI", c, err)
 		}
