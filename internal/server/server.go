@@ -23,9 +23,10 @@ import (
 const (
 	maxFileBytes      = 1 << 20 // 1 MiB
 	maxTextBytes      = 64 << 10
-	maxListResults    = 100  // MRs and notes
-	maxRepoResults    = 1000 // repository discovery cap
-	maxDiffFiles      = 100  // diff files per merge request
+	maxListDescBytes  = 1 << 10 // 1 KiB per MR description in listings
+	maxListResults    = 100     // MRs and notes
+	maxRepoResults    = 1000    // repository discovery cap
+	maxDiffFiles      = 100     // diff files per merge request
 	maxDiffFileBytes  = 128 << 10
 	maxDiffTotalBytes = 512 << 10
 	maxRefBytes       = 255 // git ref length bound
@@ -523,7 +524,7 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 			truncated = true
 			continue
 		}
-		out = append(out, toMergeRequestJSON(mr))
+		out = append(out, toMergeRequestJSON(mr, maxListDescBytes))
 	}
 	// omitted is logged server-side only: returning it would tell the client that
 	// more merge requests exist than it can see.
@@ -560,7 +561,7 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRRead, tagSetFromMR(*mr)); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
-	return jsonResult(toMergeRequestJSON(*mr))
+	return jsonResult(toMergeRequestJSON(*mr, maxTextBytes))
 }
 
 // getMergeRequestDiff fetches the file diffs of a merge request. The MR metadata
@@ -791,7 +792,7 @@ func (s *Server) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 			"merging needs the Merge Request: Update permission and a role allowed to merge (typically Developer)",
 			"the merge request is not in a mergeable state")
 	}
-	return jsonResult(toMergeRequestJSON(*merged))
+	return jsonResult(toMergeRequestJSON(*merged, maxTextBytes))
 }
 
 // resolveProvider resolves a provider by name without authorization.
@@ -1046,11 +1047,11 @@ func validatePath(p string) (string, error) {
 	return cleaned, nil
 }
 
-func toMergeRequestJSON(mr provider.MergeRequest) mergeRequestJSON {
+func toMergeRequestJSON(mr provider.MergeRequest, descriptionLimit int) mergeRequestJSON {
 	return mergeRequestJSON{
 		Number:              mr.Number,
 		Title:               mr.Title,
-		Description:         truncateText(mr.Description, maxTextBytes),
+		Description:         truncateText(mr.Description, descriptionLimit),
 		State:               mr.State,
 		Author:              mr.Author,
 		SourceBranch:        mr.SourceBranch,

@@ -947,6 +947,49 @@ func TestListMergeRequestsTruncation(t *testing.T) {
 	}
 }
 
+func TestListMergeRequestsTruncatesDescription(t *testing.T) {
+	fake := newFake()
+	fake.mrs = []provider.MergeRequest{{
+		Number:      1,
+		Title:       "Long",
+		Description: strings.Repeat("x", maxListDescBytes+100),
+		State:       "opened",
+	}}
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if res.IsError {
+		t.Fatalf("list_merge_requests: %s", resultText(t, res))
+	}
+	var out listMergeRequestsOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.MergeRequests) != 1 {
+		t.Fatalf("len = %d, want 1", len(out.MergeRequests))
+	}
+	got := out.MergeRequests[0].Description
+	if want := maxListDescBytes + len(truncatedMarker); len(got) != want {
+		t.Errorf("list description length = %d, want %d", len(got), want)
+	}
+	if !strings.HasSuffix(got, truncatedMarker) {
+		t.Errorf("list description = %q, want %q suffix", got, truncatedMarker)
+	}
+
+	// The single-resource fetch must still return the full description.
+	res = env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if res.IsError {
+		t.Fatalf("get_merge_request: %s", resultText(t, res))
+	}
+	var single mergeRequestJSON
+	if err := json.Unmarshal([]byte(resultText(t, res)), &single); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if want := maxListDescBytes + 100; len(single.Description) != want {
+		t.Errorf("get description length = %d, want %d (untruncated)", len(single.Description), want)
+	}
+}
+
 func TestListMergeRequestNotesTruncation(t *testing.T) {
 	fake := newFake()
 	fake.notes = nil

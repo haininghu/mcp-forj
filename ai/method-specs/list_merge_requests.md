@@ -45,6 +45,8 @@ request, after the policy pre-check and before the provider list call.
   omitted (fail-closed). The count is logged server-side only and not returned, so the
   result does not reveal how many merge requests were hidden.
 - At most 100 results; `truncated` is set when the fetch window or the cap is hit.
+- Each MR `description` is capped at 1 KiB (`\n[truncated]` marker appended) to keep the
+  listing size bounded; the full description is available via `get_merge_request`.
 - Labels are never returned.
 
 ## Errors
