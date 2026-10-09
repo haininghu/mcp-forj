@@ -1222,3 +1222,285 @@ providers:
 		t.Errorf("capability = %q, want policy:read", got)
 	}
 }
+
+// gitProxyTestConfig returns a minimal valid Config with the git proxy enabled
+// and applies the given mutation, for direct Validate tests.
+func gitProxyTestConfig(mutate func(*GitProxyConfig)) *Config {
+	cfg := &Config{
+		Server: ServerConfig{
+			Name:     "test-server",
+			LogLevel: "info",
+			NoAI:     NoAIConfig{MarkerFile: ".noai"},
+			GitProxy: GitProxyConfig{
+				Enabled:   true,
+				Listen:    "127.0.0.1:8417",
+				PublicURL: "https://git.example.com",
+				Token:     "proxy-secret",
+				Branches:  BranchesConfig{Allow: []string{"ai/**"}},
+			},
+		},
+		Providers: []ProviderConfig{{
+			Name: "p", Type: "gitlab", BaseURL: "https://gitlab.example.com",
+			Token: "TOKEN", ProjectScope: "accessible",
+		}},
+	}
+	if mutate != nil {
+		mutate(&cfg.Server.GitProxy)
+	}
+	return cfg
+}
+
+func TestGitProxyParseDefaultsAndToken(t *testing.T) {
+	t.Setenv("MCP_FORJ_TEST_PROXY_TOKEN", "proxy-secret")
+	yaml := `
+server:
+  git_proxy:
+    enabled: true
+    public_url: https://git.example.com
+    token: "${MCP_FORJ_TEST_PROXY_TOKEN}"
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	gp := cfg.Server.GitProxy
+	if gp.Listen != defaultGitProxyListen {
+		t.Errorf("listen = %q, want default %q", gp.Listen, defaultGitProxyListen)
+	}
+	if got := gp.Branches.Allow; len(got) != 1 || got[0] != defaultGitProxyBranch {
+		t.Errorf("branches.allow = %v, want [%s]", got, defaultGitProxyBranch)
+	}
+	if gp.Token.Value() != "proxy-secret" {
+		t.Errorf("token = %q, want the resolved environment value", gp.Token.Value())
+	}
+	if gp.TLSCert != "" || gp.TLSKey != "" {
+		t.Error("TLS fields should stay empty by default")
+	}
+	if gp.AllowInsecure {
+		t.Error("allow_insecure should default to false")
+	}
+}
+
+func TestGitProxyParseAllowInsecure(t *testing.T) {
+	yaml := `
+server:
+  git_proxy:
+    enabled: true
+    listen: "0.0.0.0:8417"
+    public_url: https://git.example.com
+    token: SECRET
+    allow_insecure: true
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Server.GitProxy.AllowInsecure {
+		t.Error("allow_insecure: true was not parsed")
+	}
+}
+
+func TestGitProxyDisabledSkipsValidation(t *testing.T) {
+	yaml := `
+server:
+  git_proxy:
+    enabled: false
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected a disabled git_proxy: %v", err)
+	}
+	if cfg.Server.GitProxy.Listen != "" {
+		t.Errorf("disabled git_proxy listen = %q, want it untouched", cfg.Server.GitProxy.Listen)
+	}
+	if cfg.Server.GitProxy.Branches.Allow != nil {
+		t.Errorf("disabled git_proxy branches.allow = %v, want it untouched", cfg.Server.GitProxy.Branches.Allow)
+	}
+}
+
+func TestGitProxyValidationFailures(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*GitProxyConfig)
+		wantErr string
+	}{
+		{
+			name:    "missing listen",
+			mutate:  func(g *GitProxyConfig) { g.Listen = "" },
+			wantErr: "listen is required",
+		},
+		{
+			name:    "missing public_url",
+			mutate:  func(g *GitProxyConfig) { g.PublicURL = "" },
+			wantErr: "public_url must be an absolute http(s) URL",
+		},
+		{
+			name:    "relative public_url",
+			mutate:  func(g *GitProxyConfig) { g.PublicURL = "git.example.com" },
+			wantErr: "public_url must be an absolute http(s) URL",
+		},
+		{
+			name:    "ftp public_url",
+			mutate:  func(g *GitProxyConfig) { g.PublicURL = "ftp://git.example.com" },
+			wantErr: "public_url must be an absolute http(s) URL",
+		},
+		{
+			name:    "missing token",
+			mutate:  func(g *GitProxyConfig) { g.Token = "" },
+			wantErr: "token is required",
+		},
+		{
+			name:    "empty branches.allow",
+			mutate:  func(g *GitProxyConfig) { g.Branches.Allow = []string{} },
+			wantErr: "branches.allow must not be empty",
+		},
+		{
+			name:    "empty branch pattern",
+			mutate:  func(g *GitProxyConfig) { g.Branches.Allow = []string{""} },
+			wantErr: "empty pattern",
+		},
+		{
+			name:    "invalid branch pattern",
+			mutate:  func(g *GitProxyConfig) { g.Branches.Allow = []string{"ai/["} },
+			wantErr: `invalid pattern "ai/["`,
+		},
+		{
+			name: "tls_cert without tls_key",
+			mutate: func(g *GitProxyConfig) {
+				g.TLSCert = "/etc/tls/cert.pem"
+			},
+			wantErr: "tls_cert and tls_key must be set together",
+		},
+		{
+			name: "tls_key without tls_cert",
+			mutate: func(g *GitProxyConfig) {
+				g.TLSKey = "/etc/tls/key.pem"
+			},
+			wantErr: "tls_cert and tls_key must be set together",
+		},
+		{
+			name:    "plain HTTP on non-loopback listen",
+			mutate:  func(g *GitProxyConfig) { g.Listen = "0.0.0.0:8417" },
+			wantErr: "requires tls_cert/tls_key or allow_insecure",
+		},
+		{
+			name:    "plain HTTP on unparsable listen (fail-safe)",
+			mutate:  func(g *GitProxyConfig) { g.Listen = "8417" },
+			wantErr: "requires tls_cert/tls_key or allow_insecure",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := gitProxyTestConfig(tc.mutate)
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted %s", tc.name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %q, want it to mention %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestGitProxyValidTLSBoth(t *testing.T) {
+	cfg := gitProxyTestConfig(func(g *GitProxyConfig) {
+		g.TLSCert = "/etc/tls/cert.pem"
+		g.TLSKey = "/etc/tls/key.pem"
+	})
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("Validate rejected a complete TLS pair: %v", err)
+	}
+}
+
+func TestGitProxyInsecureListenRules(t *testing.T) {
+	tests := []struct {
+		name     string
+		listen   string
+		tls      bool
+		insecure bool
+		wantErr  bool
+	}{
+		{"non-loopback no tls no allow", "0.0.0.0:8417", false, false, true},
+		{"non-loopback no tls allow", "0.0.0.0:8417", false, true, false},
+		{"non-loopback tls", "0.0.0.0:8417", true, false, false},
+		{"loopback no tls", "127.0.0.1:8417", false, false, false},
+		{"localhost no tls", "localhost:8417", false, false, false},
+		{"ipv6 loopback no tls", "[::1]:8417", false, false, false},
+		{"wildcard no tls no allow", ":8417", false, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := gitProxyTestConfig(func(g *GitProxyConfig) {
+				g.Listen = tc.listen
+				g.AllowInsecure = tc.insecure
+				if tc.tls {
+					g.TLSCert = "/etc/tls/cert.pem"
+					g.TLSKey = "/etc/tls/key.pem"
+				}
+			})
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate accepted insecure %s, want an error", tc.listen)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate rejected %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestGitProxyExplicitEmptyAllowRejectedByParse(t *testing.T) {
+	yaml := `
+server:
+  git_proxy:
+    enabled: true
+    public_url: https://git.example.com
+    token: SECRET
+    branches:
+      allow: []
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+	_, err := Parse([]byte(yaml))
+	if err == nil {
+		t.Fatal("Parse accepted an explicit empty branches.allow")
+	}
+	if !strings.Contains(err.Error(), "branches.allow must not be empty") {
+		t.Errorf("error = %q, want the empty branches.allow message", err)
+	}
+}

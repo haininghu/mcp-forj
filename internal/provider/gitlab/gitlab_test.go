@@ -2,6 +2,7 @@ package gitlab
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -775,5 +776,192 @@ func TestListMergeRequestNotesPaginates(t *testing.T) {
 	}
 	if len(notes) != 101 {
 		t.Fatalf("len(notes) = %d, want 101", len(notes))
+	}
+}
+
+func TestGitAuthHeader(t *testing.T) {
+	c := newTestClient(t, http.NotFoundHandler())
+
+	header, err := c.GitAuthHeader(context.Background(), "team/app")
+	if err != nil {
+		t.Fatalf("GitAuthHeader: %v", err)
+	}
+	if !strings.HasPrefix(header, "Basic ") {
+		t.Fatalf("GitAuthHeader = %q, want the Basic scheme", header)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(header, "Basic "))
+	if err != nil {
+		t.Fatalf("GitAuthHeader payload is not valid base64: %v", err)
+	}
+	if want := "oauth2:test-token"; string(raw) != want {
+		t.Errorf("decoded credentials = %q, want %q (the git transport needs the configured token)", raw, want)
+	}
+}
+
+func TestMergeBaseHTTP(t *testing.T) {
+	const baseSHA = "8be373d96aa74ad3b7a6bfd11f7f27869df4e499"
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/repository/merge_base") {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.URL.Query()["refs[]"]; !reflect.DeepEqual(got, []string{"main", "feat/ai"}) {
+			t.Errorf("refs query = %v, want [main feat/ai]", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": baseSHA})
+	}))
+
+	got, err := c.MergeBase(context.Background(), "team/app", "main", "feat/ai")
+	if err != nil {
+		t.Fatalf("MergeBase: %v", err)
+	}
+	if got != baseSHA {
+		t.Errorf("MergeBase = %q, want %q", got, baseSHA)
+	}
+}
+
+func TestMergeBaseErrorHTTP(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+
+	_, err := c.MergeBase(context.Background(), "team/app", "main", "gone")
+	if !errors.Is(err, provider.ErrNotFound) {
+		t.Fatalf("error = %v, want provider.ErrNotFound via mapError", err)
+	}
+	if status := provider.HTTPStatus(err); status != http.StatusNotFound {
+		t.Errorf("HTTPStatus = %d, want 404", status)
+	}
+}
+
+func TestMergeBaseRequiresRefs(t *testing.T) {
+	c := newTestClient(t, http.NotFoundHandler())
+
+	if _, err := c.MergeBase(context.Background(), "team/app"); err == nil {
+		t.Fatal("MergeBase without refs succeeded, want an error")
+	}
+}
+
+func TestGitRemoteURL(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	c, err := New(config.ProviderConfig{
+		Name:    "p",
+		Type:    "gitlab",
+		BaseURL: srv.URL + "/",
+		Token:   "test-token",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got, err := c.GitRemoteURL(context.Background(), "team/app")
+	if err != nil {
+		t.Fatalf("GitRemoteURL: %v", err)
+	}
+	if want := srv.URL + "/team/app.git"; got != want {
+		t.Errorf("GitRemoteURL = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "test-token") {
+		t.Errorf("GitRemoteURL = %q, must be credential-free", got)
+	}
+}
+
+// TestGitRemoteURLEscapesReservedChars guards the authorization bypass: a
+// repository name with URL delimiters must not change the structure of the
+// clone URL. The delimiters have to stay escaped inside the path, the URL
+// must parse back to the exact repository path, and no credential may appear.
+func TestGitRemoteURLEscapesReservedChars(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	c, err := New(config.ProviderConfig{
+		Name:    "p",
+		Type:    "gitlab",
+		BaseURL: srv.URL,
+		Token:   "test-token",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	const repo = `team/we?ird#1[m];&=$+`
+	got, err := c.GitRemoteURL(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("GitRemoteURL: %v", err)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("resulting URL is unparsable: %v", err)
+	}
+	if wantHost := strings.TrimPrefix(srv.URL, "http://"); u.Host != wantHost {
+		t.Errorf("host = %q, want the base URL host %q", u.Host, wantHost)
+	}
+	// Round trip: the path decodes back to exactly the requested repository.
+	if wantPath := "/" + repo + ".git"; u.Path != wantPath {
+		t.Errorf("path = %q, want %q", u.Path, wantPath)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		t.Errorf("query/fragment = %q/%q, want both empty: delimiters must stay inside the path",
+			u.RawQuery, u.Fragment)
+	}
+	if strings.Contains(got, "test-token") {
+		t.Errorf("GitRemoteURL = %q, must be credential-free", got)
+	}
+	if u.User != nil {
+		t.Errorf("GitRemoteURL = %q, must carry no user info", got)
+	}
+}
+
+func TestDefaultBranchHTTP(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/projects/team/app") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"default_branch": "main"})
+	}))
+
+	got, err := c.DefaultBranch(context.Background(), "team/app")
+	if err != nil {
+		t.Fatalf("DefaultBranch: %v", err)
+	}
+	if got != "main" {
+		t.Errorf("DefaultBranch = %q, want main", got)
+	}
+}
+
+func TestResolveRefHTTP(t *testing.T) {
+	const tipSHA = "1111111111111111111111111111111111111111"
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/repository/branches/") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"name":   "ai/fix",
+			"commit": map[string]any{"id": tipSHA},
+		})
+	}))
+
+	got, err := c.ResolveRef(context.Background(), "team/app", "ai/fix")
+	if err != nil {
+		t.Fatalf("ResolveRef: %v", err)
+	}
+	if got != tipSHA {
+		t.Errorf("ResolveRef = %q, want %q", got, tipSHA)
+	}
+}
+
+func TestResolveRefNotFoundHTTP(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "404 Branch Not Found", http.StatusNotFound)
+	}))
+
+	_, err := c.ResolveRef(context.Background(), "team/app", "gone")
+	if !errors.Is(err, provider.ErrNotFound) {
+		t.Fatalf("ResolveRef error = %v, want provider.ErrNotFound via mapError", err)
 	}
 }

@@ -16,6 +16,29 @@ server:
     # The provider token below MUST be able to read repository files on the
     # default branch, otherwise non-exempt operations fail closed.
 
+  # Authenticated git smart-HTTP reverse proxy (optional, disabled by default).
+  # It serves "git clone/fetch/push" over HTTP Basic at
+  #   <public_url>/git/<provider>/<repo>.git/...
+  # where <repo> is the namespace/project path. Fetch requires repo:read and
+  # push requires repo:write from the provider rules below; `.noai` is enforced
+  # as always. Pushes are constrained to refs/heads/<branch> matching
+  # branches.allow, may not touch the default branch or delete, and must be a
+  # fast-forward.
+  # git_proxy:
+  #   enabled: true
+  #   listen: 127.0.0.1:8417             # bind address (defaults to this)
+  #   public_url: https://git.example.com # absolute http(s) URL clients use
+  #   token: "${GIT_PROXY_TOKEN}"         # HTTP Basic password (username is ignored)
+  #   branches:
+  #     allow: ["ai/**"]                  # doublestar globs for pushable branches
+  #   # TLS is optional; set both or neither. Plain HTTP without TLS is only
+  #   # allowed on a loopback listen address; any other bind refuses to start
+  #   # unless allow_insecure is set explicitly (the Basic-auth token would
+  #   # otherwise cross the network in clear text).
+  #   allow_insecure: false               # explicit opt-in for plain HTTP on non-loopback
+  #   tls_cert: /etc/tls/git-proxy.crt
+  #   tls_key: /etc/tls/git-proxy.key
+
 providers:
   # A GitLab instance. Add more entries for more instances.
   - name: gitlab-work

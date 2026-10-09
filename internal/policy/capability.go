@@ -7,18 +7,19 @@ package policy
 type Capability string
 
 // Known capabilities. CapRepoList, CapRepoRead, CapMRRead, CapMRDiff,
-// CapMRComment, CapRebase, CapMRMerge and CapPolicyRead are used by the tools;
-// the remaining values are reserved so the configuration vocabulary stays
-// stable.
+// CapMRComment, CapRebase, CapMRMerge and CapPolicyRead are used by the tools
+// and CapRepoWrite by the git smart-HTTP proxy; CapMRWrite is still reserved
+// so the configuration vocabulary stays stable.
 const (
 	// CapRepoList permits discovering repositories matching the configured
 	// patterns.
 	CapRepoList Capability = "repo:list"
-	// CapRepoRead permits reading repository files.
+	// CapRepoRead permits reading repository files and serving git
+	// fetch/clone through the git smart-HTTP proxy.
 	CapRepoRead Capability = "repo:read"
 	// CapMRRead permits listing and viewing merge request metadata and notes.
 	CapMRRead Capability = "mr:read"
-	// CapMRDiff permits reading merge request diff content (reserved).
+	// CapMRDiff permits reading merge request diff content.
 	CapMRDiff Capability = "mr:diff"
 	// CapMRComment permits creating comments on merge requests.
 	CapMRComment Capability = "mr:comment"
@@ -29,7 +30,8 @@ const (
 	// CapMRWrite permits creating, updating or closing merge requests
 	// (reserved).
 	CapMRWrite Capability = "mr:write"
-	// CapRepoWrite permits modifying repository content (reserved).
+	// CapRepoWrite permits modifying repository content: it authorizes the
+	// git smart-HTTP push through the git proxy.
 	CapRepoWrite Capability = "repo:write"
 	// CapPolicyRead permits exposing the configured access rules
 	// (list_configured_rules). It is provider-scoped, not repository-scoped.

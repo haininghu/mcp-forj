@@ -22,6 +22,7 @@ It exposes tools that let an AI agent inspect and (limitedly) act on code hostin
 | `internal/policy`               | Capabilities, ordered rule engine, `.noai` guard.              |
 | `internal/provider`             | Provider interface, neutral types, registry and factory.        |
 | `internal/provider/gitlab`      | GitLab implementation (official `client-go`).                   |
+| `internal/gitproxy`             | Authenticated git smart-HTTP reverse proxy (pkt-line, policy).  |
 | `internal/server`               | MCP server, tool handlers, argument validation, limits.         |
 | `ai/`                           | Agent docs: ADRs, bug analyses, method specs (see below).       |
 | `configs/config.example.yaml`   | Documented example configuration.                               |

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -27,6 +28,8 @@ const (
 	defaultMarkerFile     = ".noai"
 	defaultRequestTimeout = 30 * time.Second
 	defaultProjectScope   = "accessible"
+	defaultGitProxyListen = "127.0.0.1:8417"
+	defaultGitProxyBranch = "ai/**"
 )
 
 // Config is the root configuration.
@@ -45,6 +48,40 @@ type ServerConfig struct {
 	LogLevel string `yaml:"log_level"`
 	// NoAI configures the marker-file guard.
 	NoAI NoAIConfig `yaml:"noai"`
+	// GitProxy configures the authenticated git smart-HTTP reverse proxy.
+	GitProxy GitProxyConfig `yaml:"git_proxy"`
+}
+
+// GitProxyConfig configures the git smart-HTTP reverse proxy.
+type GitProxyConfig struct {
+	// Enabled turns the proxy on. All other fields are only validated when true.
+	Enabled bool `yaml:"enabled"`
+	// Listen is the bind address, e.g. "127.0.0.1:8417".
+	Listen string `yaml:"listen"`
+	// PublicURL is the absolute http(s) URL at which clients reach the proxy.
+	PublicURL string `yaml:"public_url"`
+	// Token is the HTTP Basic password the proxy accepts (resolved by Parse,
+	// literal or ${NAME} env reference like the provider tokens).
+	Token Secret `yaml:"token"`
+	// TLSCert is an optional certificate file; when set with TLSKey the proxy
+	// serves HTTPS.
+	TLSCert string `yaml:"tls_cert"`
+	// TLSKey is the private key file for TLSCert.
+	TLSKey string `yaml:"tls_key"`
+	// AllowInsecure explicitly permits plain HTTP (no TLS) on a non-loopback
+	// listen address. Without TLS and without it the proxy must bind loopback
+	// only, because the Basic-auth token would otherwise cross the network in
+	// clear text.
+	AllowInsecure bool `yaml:"allow_insecure"`
+	// Branches constrains which branches a push may target.
+	Branches BranchesConfig `yaml:"branches"`
+}
+
+// BranchesConfig constrains the branches a push may target.
+type BranchesConfig struct {
+	// Allow lists doublestar glob patterns matched against the branch name
+	// (the part after "refs/heads/"). An empty list allows no branch.
+	Allow []string `yaml:"allow"`
 }
 
 // NoAIConfig configures the .noai marker guard.
@@ -300,6 +337,13 @@ func Parse(data []byte) (*Config, error) {
 		}
 		cfg.Providers[i].Token = resolved
 	}
+	if cfg.Server.GitProxy.Token.Value() != "" {
+		resolved, err := resolveSecret(string(cfg.Server.GitProxy.Token))
+		if err != nil {
+			return nil, fmt.Errorf("config: git_proxy: %w", err)
+		}
+		cfg.Server.GitProxy.Token = resolved
+	}
 	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -436,7 +480,65 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+
+	if c.Server.GitProxy.Enabled {
+		if err := c.Server.GitProxy.validate(); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// validate checks the git proxy section. It runs only when the proxy is
+// enabled. Defaults are applied before validation, so an unset listen address
+// and an absent branches.allow never fail here; an explicitly empty
+// branches.allow ([]) is not defaulted and is rejected, keeping a deliberate
+// "allow nothing" configuration a visible error instead of a silent default.
+func (g *GitProxyConfig) validate() error {
+	if g.Listen == "" {
+		return fmt.Errorf("config: git_proxy: listen is required")
+	}
+	u, err := url.Parse(g.PublicURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("config: git_proxy: public_url must be an absolute http(s) URL")
+	}
+	if g.Token.Value() == "" {
+		return fmt.Errorf("config: git_proxy: token is required")
+	}
+	if len(g.Branches.Allow) == 0 {
+		return fmt.Errorf("config: git_proxy: branches.allow must not be empty")
+	}
+	for _, pattern := range g.Branches.Allow {
+		if pattern == "" {
+			return fmt.Errorf("config: git_proxy: branches.allow: empty pattern")
+		}
+		if !doublestar.ValidatePattern(pattern) {
+			return fmt.Errorf("config: git_proxy: branches.allow: invalid pattern %q", pattern)
+		}
+	}
+	if (g.TLSCert == "") != (g.TLSKey == "") {
+		return fmt.Errorf("config: git_proxy: tls_cert and tls_key must be set together")
+	}
+	tls := g.TLSCert != "" && g.TLSKey != ""
+	if !tls && !g.AllowInsecure && !listenIsLoopback(g.Listen) {
+		return fmt.Errorf("config: git_proxy: non-loopback listen %q requires tls_cert/tls_key or allow_insecure", g.Listen)
+	}
+	return nil
+}
+
+// listenIsLoopback reports whether a listen address binds only loopback
+// interfaces. An empty host, a wildcard IP or an unparsable address counts as
+// non-loopback (fail-safe), matching the enforcement in the proxy itself.
+func listenIsLoopback(listen string) bool {
+	host := listen
+	if h, _, err := net.SplitHostPort(listen); err == nil {
+		host = h
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func normalizePaths(providerName string, ruleIndex int, capability, field string, patterns []string) ([]string, error) {
@@ -492,6 +594,14 @@ func (c *Config) applyDefaults() {
 		}
 		if c.Providers[i].ProjectScope == "" {
 			c.Providers[i].ProjectScope = defaultProjectScope
+		}
+	}
+	if c.Server.GitProxy.Enabled {
+		if c.Server.GitProxy.Listen == "" {
+			c.Server.GitProxy.Listen = defaultGitProxyListen
+		}
+		if c.Server.GitProxy.Branches.Allow == nil {
+			c.Server.GitProxy.Branches.Allow = []string{defaultGitProxyBranch}
 		}
 	}
 }

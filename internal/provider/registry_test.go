@@ -42,6 +42,21 @@ func (s stubProvider) ReadFile(context.Context, string, string, string) ([]byte,
 func (s stubProvider) FileExists(context.Context, string, string, string) (bool, error) {
 	return false, nil
 }
+func (s stubProvider) GitAuthHeader(context.Context, string) (string, error) {
+	return "", nil
+}
+func (s stubProvider) MergeBase(context.Context, string, ...string) (string, error) {
+	return "", nil
+}
+func (s stubProvider) GitRemoteURL(context.Context, string) (string, error) {
+	return "", nil
+}
+func (s stubProvider) DefaultBranch(context.Context, string) (string, error) {
+	return "", nil
+}
+func (s stubProvider) ResolveRef(context.Context, string, string) (string, error) {
+	return "", ErrNotFound
+}
 
 func TestRegistry(t *testing.T) {
 	r := NewRegistry()

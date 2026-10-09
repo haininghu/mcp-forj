@@ -1,0 +1,133 @@
+package gitproxy
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/bmatcuk/doublestar/v4"
+
+	"github.com/hvo/mcp-forj/internal/provider"
+)
+
+// errPushDenied marks a push rejected by policy (HTTP 403). Every provider
+// metadata failure inside the check wraps it as well: the decision is
+// fail-closed.
+var errPushDenied = errors.New("gitproxy: push denied")
+
+// errMalformedPush marks a request whose pkt-line command section cannot be
+// parsed (HTTP 400). It is a protocol error, not a policy denial.
+var errMalformedPush = errors.New("gitproxy: malformed push request")
+
+// isZeroOID reports whether s is an all-zero object id (creation when it is
+// the old id, deletion when it is the new one). Callers receive only values
+// validated as hex object ids by ReadReceivePackCommands.
+func isZeroOID(s string) bool {
+	return s != "" && strings.Trim(s, "0") == ""
+}
+
+// checkPush applies the push policy to every ref update. All updates must
+// pass; the first rejection denies the whole push. The wrapped detail is for
+// logs only and never reaches the client.
+func (s *Server) checkPush(ctx context.Context, p provider.Provider, repo string, updates []RefUpdate) error {
+	for _, u := range updates {
+		if err := s.checkRefUpdate(ctx, p, repo, u); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkRefUpdate validates one ref update: only branches under refs/heads/,
+// a syntactically sane branch name inside the configured allowlist, never the
+// default branch, never a delete, and only fast-forward updates verified with
+// the provider's merge base.
+func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo string, u RefUpdate) error {
+	if !strings.HasPrefix(u.Ref, "refs/heads/") {
+		return fmt.Errorf("%w: ref %q is not a branch under refs/heads/", errPushDenied, u.Ref)
+	}
+	branch := strings.TrimPrefix(u.Ref, "refs/heads/")
+	if !validBranchName(branch) {
+		return fmt.Errorf("%w: branch name %q is invalid", errPushDenied, branch)
+	}
+	if !s.branchAllowed(branch) {
+		return fmt.Errorf("%w: branch %q is outside branches.allow", errPushDenied, branch)
+	}
+	defaultBranch, err := p.DefaultBranch(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("%w: cannot determine the default branch: %v", errPushDenied, err)
+	}
+	if branch == defaultBranch {
+		return fmt.Errorf("%w: branch %q is the default branch", errPushDenied, branch)
+	}
+	if isZeroOID(u.NewSHA) {
+		return fmt.Errorf("%w: deleting branch %q is not allowed", errPushDenied, branch)
+	}
+	if isZeroOID(u.OldSHA) {
+		// Creating a new branch: nothing to fast-forward from.
+		return nil
+	}
+
+	// Update of an existing branch: the advertised old id must equal the
+	// current tip and the new id must contain it (fast-forward). Unknown
+	// provider state fails closed.
+	tip, err := p.ResolveRef(ctx, repo, branch)
+	if err != nil {
+		// A missing branch with a non-zero old id is inconsistent; ErrNotFound
+		// and every other error deny alike.
+		return fmt.Errorf("%w: cannot resolve branch %q: %v", errPushDenied, branch, err)
+	}
+	mergeBase, err := p.MergeBase(ctx, repo, tip, u.NewSHA)
+	if err != nil {
+		return fmt.Errorf("%w: cannot compute merge base for branch %q: %v", errPushDenied, branch, err)
+	}
+	// Object ids are lowercase hex on the wire and from the provider, so an
+	// exact comparison is the fail-closed choice.
+	if mergeBase != tip {
+		return fmt.Errorf("%w: update of branch %q is not a fast-forward", errPushDenied, branch)
+	}
+	return nil
+}
+
+// branchAllowed reports whether branch matches one of the configured push
+// globs. An empty list allows nothing (deny by default). An unexpected match
+// error counts as no match so a broken pattern can never grant access;
+// patterns are validated in New.
+func (s *Server) branchAllowed(branch string) bool {
+	for _, pattern := range s.cfg.Branches {
+		ok, err := doublestar.Match(pattern, branch)
+		if err == nil && ok {
+			return true
+		}
+	}
+	return false
+}
+
+// validBranchName is a coarse git-check-ref-format check for the part after
+// "refs/heads/": non-empty, no control characters or spaces, none of the
+// forbidden characters ~^:?*[\, no "..", no leading '-', no leading or
+// trailing '/' or '.', and no empty or dot-prefixed path segment.
+func validBranchName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.ContainsAny(name, " \t~^:?*[\\") {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	if strings.HasPrefix(name, "-") || strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") {
+		return false
+	}
+	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
+		return false
+	}
+	for _, segment := range strings.Split(name, "/") {
+		if segment == "" || strings.HasPrefix(segment, ".") {
+			return false
+		}
+	}
+	return true
+}

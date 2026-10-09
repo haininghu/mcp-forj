@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/hvo/mcp-forj/internal/config"
+	"github.com/hvo/mcp-forj/internal/gitproxy"
 	"github.com/hvo/mcp-forj/internal/policy"
 	"github.com/hvo/mcp-forj/internal/provider"
 	_ "github.com/hvo/mcp-forj/internal/provider/gitlab" // register the gitlab provider factory
@@ -87,14 +89,55 @@ func run() error {
 	guard := policy.NewGuard(policies, checkers, cfg.Server.NoAI.MarkerFile, logger)
 	srv := server.New(guard, registry, logger)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// proxyWG tracks the proxy goroutine so run can wait for its graceful
+	// shutdown after cancelling ctx, before returning.
+	var proxyWG sync.WaitGroup
+	if cfg.Server.GitProxy.Enabled {
+		gp := cfg.Server.GitProxy
+		ps, err := gitproxy.New(gitproxy.Config{
+			Listen:        gp.Listen,
+			PublicURL:     gp.PublicURL,
+			Token:         gp.Token.Value(),
+			TLSCert:       gp.TLSCert,
+			TLSKey:        gp.TLSKey,
+			AllowInsecure: gp.AllowInsecure,
+			Branches:      gp.Branches.Allow,
+		}, registry, guard, logger)
+		if err != nil {
+			return fmt.Errorf("git proxy: %w", err)
+		}
+		proxyWG.Add(1)
+		go func() {
+			defer proxyWG.Done()
+			if err := ps.ListenAndServe(ctx); err != nil {
+				logger.Error("git proxy terminated", "error", err.Error())
+			}
+		}()
+		// The token is deliberately not part of this log line.
+		logger.Info("git proxy enabled",
+			"listen", gp.Listen,
+			"public_url", gp.PublicURL,
+			"branches", gp.Branches.Allow,
+		)
+	}
+
 	logger.Info("starting mcp-forj",
 		"version", version,
 		"config", *configPath,
 		"providers", registry.Names(),
 	)
 
-	if err := srv.MCPServer(version).Run(context.Background(), &mcp.StdioTransport{}); err != nil {
-		return fmt.Errorf("server: %w", err)
+	runErr := srv.MCPServer(version).Run(ctx, &mcp.StdioTransport{})
+	// The MCP run ended: stop the proxy and wait for its graceful shutdown
+	// (ListenAndServe bounds itself with shutdownTimeout, so this cannot hang)
+	// before the process exits.
+	cancel()
+	proxyWG.Wait()
+	if runErr != nil {
+		return fmt.Errorf("server: %w", runErr)
 	}
 	return nil
 }

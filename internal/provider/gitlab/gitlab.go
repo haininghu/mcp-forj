@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -34,6 +35,8 @@ type Client struct {
 	name           string
 	api            *gitlab.Client
 	membershipOnly bool
+	token          string
+	baseURL        string
 }
 
 // New creates a GitLab client from cfg. The token is read from cfg.Token,
@@ -56,6 +59,8 @@ func New(cfg config.ProviderConfig) (*Client, error) {
 		name:           cfg.Name,
 		api:            api,
 		membershipOnly: cfg.ProjectScope == "membership",
+		token:          token,
+		baseURL:        cfg.BaseURL,
 	}, nil
 }
 
@@ -338,6 +343,72 @@ func (c *Client) FileExists(ctx context.Context, repo, path, ref string) (bool, 
 		return false, mapError(err)
 	}
 	return true, nil
+}
+
+// GitAuthHeader implements provider.Provider. GitLab accepts a personal access
+// token as the Basic-auth password with any non-empty username; "oauth2" is the
+// documented convention. The returned value carries the secret token, so it is
+// never logged and never embedded in URLs by callers.
+func (c *Client) GitAuthHeader(_ context.Context, _ string) (string, error) {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte("oauth2:"+c.token)), nil
+}
+
+// MergeBase implements provider.Provider. It calls the GitLab merge-base
+// endpoint and returns the commit SHA that is the best common ancestor of refs.
+func (c *Client) MergeBase(ctx context.Context, repo string, refs ...string) (string, error) {
+	if len(refs) == 0 {
+		return "", fmt.Errorf("gitlab: merge base requires at least one ref")
+	}
+	commit, _, err := c.api.Repositories.MergeBase(repo, &gitlab.MergeBaseOptions{Ref: &refs}, gitlab.WithContext(ctx))
+	if err != nil {
+		return "", mapError(err)
+	}
+	return commit.ID, nil
+}
+
+// GitRemoteURL implements provider.Provider. It returns the credential-free
+// base clone URL for the repository (e.g. https://host/group/project.git).
+// The repository path is set as the URL's (decoded) Path and escaped by
+// url.URL.String, so characters that are reserved in URL syntax ("?", "#",
+// ...) stay inside the path and cannot change the URL structure. Any
+// user-info on the base URL is dropped: the token is never embedded in the
+// URL.
+func (c *Client) GitRemoteURL(_ context.Context, repo string) (string, error) {
+	if repo == "" {
+		return "", errors.New("gitlab: repository path is empty")
+	}
+	base, err := url.Parse(c.baseURL)
+	if err != nil || base.Host == "" || (base.Scheme != "http" && base.Scheme != "https") {
+		return "", fmt.Errorf("gitlab: base_url %q is not an absolute http(s) URL", c.baseURL)
+	}
+	base.User = nil
+	base.RawPath = ""
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/" + repo + ".git"
+	base.RawQuery = ""
+	base.Fragment = ""
+	return base.String(), nil
+}
+
+// DefaultBranch implements provider.Provider.
+func (c *Client) DefaultBranch(ctx context.Context, repo string) (string, error) {
+	project, _, err := c.api.Projects.GetProject(repo, nil, gitlab.WithContext(ctx))
+	if err != nil {
+		return "", mapError(err)
+	}
+	return project.DefaultBranch, nil
+}
+
+// ResolveRef implements provider.Provider. It uses the GitLab branch endpoint,
+// which accepts branch names with slashes (they are URL-escaped automatically).
+func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
+	branch, _, err := c.api.Branches.GetBranch(repo, ref, gitlab.WithContext(ctx))
+	if err != nil {
+		return "", mapError(err)
+	}
+	if branch.Commit == nil {
+		return "", provider.ErrNotFound
+	}
+	return branch.Commit.ID, nil
 }
 
 // refOptions builds the file options. The GitLab repository-files endpoint

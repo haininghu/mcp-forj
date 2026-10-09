@@ -179,6 +179,26 @@ func (f *fakeProvider) FileExists(_ context.Context, repo, _, _ string) (bool, e
 	return f.marker, nil
 }
 
+func (f *fakeProvider) GitAuthHeader(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeProvider) MergeBase(_ context.Context, _ string, _ ...string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeProvider) GitRemoteURL(_ context.Context, repo string) (string, error) {
+	return "https://gitlab.example.com/" + repo + ".git", nil
+}
+
+func (f *fakeProvider) DefaultBranch(_ context.Context, _ string) (string, error) {
+	return "main", nil
+}
+
+func (f *fakeProvider) ResolveRef(_ context.Context, _, _ string) (string, error) {
+	return "", provider.ErrNotFound
+}
+
 func newFake() *fakeProvider {
 	return &fakeProvider{
 		name: "fake",

@@ -184,4 +184,23 @@ type Provider interface {
 	// FileExists reports whether a repository file exists. An empty ref means
 	// the default branch.
 	FileExists(ctx context.Context, repo, path, ref string) (bool, error)
+
+	// GitAuthHeader returns the value of the Authorization header the git HTTP
+	// transport must send to this provider for repo. The value carries a secret
+	// and must never be logged, returned to clients, or embedded in URLs.
+	GitAuthHeader(ctx context.Context, repo string) (string, error)
+	// MergeBase returns the best common ancestor commit SHA of the given refs.
+	MergeBase(ctx context.Context, repo string, refs ...string) (string, error)
+	// GitRemoteURL returns the credential-free base clone URL of repo, ending in
+	// ".git" (e.g. https://host/group/project.git). It must never contain a
+	// token or any other credential.
+	GitRemoteURL(ctx context.Context, repo string) (string, error)
+	// DefaultBranch returns the repository's default branch name (e.g. "main").
+	DefaultBranch(ctx context.Context, repo string) (string, error)
+	// ResolveRef resolves a branch name to its commit SHA in repo. The git
+	// proxy uses it for the fast-forward check, so only branch names (the
+	// part after "refs/heads/") are part of the contract; tags and raw SHAs
+	// need not resolve. It must return an error wrapping ErrNotFound when the
+	// branch does not exist.
+	ResolveRef(ctx context.Context, repo, branch string) (string, error)
 }
