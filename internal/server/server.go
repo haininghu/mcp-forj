@@ -33,11 +33,19 @@ const (
 	truncatedMarker   = "\n[truncated]"
 )
 
+// GitRemoteResolver resolves the git proxy clone URL for a repository. It is
+// implemented by the git proxy server. A nil resolver disables the git_remote
+// tool.
+type GitRemoteResolver interface {
+	RemoteURL(providerName, repo string) (string, error)
+}
+
 // Server holds the MCP tool handlers and their dependencies.
 type Server struct {
-	guard    *policy.Guard
-	registry *provider.Registry
-	logger   *slog.Logger
+	guard     *policy.Guard
+	registry  *provider.Registry
+	logger    *slog.Logger
+	gitRemote GitRemoteResolver
 }
 
 // New constructs a Server.
@@ -47,6 +55,10 @@ func New(guard *policy.Guard, registry *provider.Registry, logger *slog.Logger) 
 	}
 	return &Server{guard: guard, registry: registry, logger: logger}
 }
+
+// SetGitRemoteResolver installs the resolver used by the git_remote tool. It
+// must be called before MCPServer to register the tool.
+func (s *Server) SetGitRemoteResolver(r GitRemoteResolver) { s.gitRemote = r }
 
 // MCPServer builds an mcp.Server with all tools registered. version is
 // advertised to clients and is typically injected at build time.
@@ -102,6 +114,15 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 		Name:        "read_file",
 		Description: "Read a repository file at an optional ref. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
 	}, s.readFile)
+
+	// git_remote only exists while the git proxy is enabled: without a
+	// resolver there is no proxy URL to advertise.
+	if s.gitRemote != nil {
+		mcp.AddTool(srv, &mcp.Tool{
+			Name:        "git_remote",
+			Description: "Return the git smart-HTTP proxy clone URL for a repository. Cloning through the proxy requires HTTP Basic auth with any username and the configured git proxy token as the password; the token is never returned by this tool. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
+		}, s.handleGitRemote)
+	}
 
 	return srv
 }
@@ -163,6 +184,11 @@ type readFileInput struct {
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Path     string `json:"path" jsonschema:"repository-relative file path"`
 	Ref      string `json:"ref,omitempty" jsonschema:"optional git ref; defaults to the default branch"`
+}
+
+type gitRemoteInput struct {
+	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 }
 
 type configuredPathFilter struct {
@@ -264,6 +290,22 @@ type readFileOutput struct {
 	Ref       string `json:"ref"`
 	Content   string `json:"content"`
 	Truncated bool   `json:"truncated"`
+}
+
+// gitRemoteAuthJSON describes how to authenticate against the git proxy. It
+// deliberately carries no secret: the password is the configured proxy token,
+// which this tool never outputs.
+type gitRemoteAuthJSON struct {
+	Type     string `json:"type"`     // "http-basic"
+	Username string `json:"username"` // "any": the proxy ignores the username
+	Note     string `json:"note"`     // where the password comes from
+}
+
+type gitRemoteOutput struct {
+	Provider  string            `json:"provider"`
+	Repo      string            `json:"repo"`
+	RemoteURL string            `json:"remote_url"`
+	Auth      gitRemoteAuthJSON `json:"auth"`
 }
 
 // listConfiguredRules exposes the configured policy for providers whose rules
@@ -877,6 +919,44 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 		Ref:       in.Ref,
 		Content:   content,
 		Truncated: truncated,
+	})
+}
+
+// handleGitRemote returns the git proxy clone URL for a repository. It
+// authorizes repo:read with the full guard (unknown tags plus the .noai
+// overlay) before calling the resolver, mirroring the proxy's own fetch gate:
+// a grant with a tag constraint fails closed and a .noai denial stays
+// indistinguishable from an unknown repository. The proxy token is never part
+// of the output; resolver details are logged server-side only.
+func (s *Server) handleGitRemote(ctx context.Context, _ *mcp.CallToolRequest, in gitRemoteInput) (*mcp.CallToolResult, any, error) {
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
+	if _, err := s.resolveProvider(in.Provider); err != nil {
+		return nil, nil, err
+	}
+	if err := s.guard.Authorize(ctx, in.Provider, in.Repo, policy.CapRepoRead); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	cloneURL, err := s.gitRemote.RemoteURL(in.Provider, in.Repo)
+	if err != nil {
+		// The resolver's message is a routing/validation detail, never a
+		// secret, but it is still only logged, not surfaced.
+		s.logger.Error("git remote url lookup failed",
+			"provider", in.Provider, "repo", in.Repo, "error", err.Error())
+		return nil, nil, errors.New("could not determine the git remote URL")
+	}
+	return jsonResult(gitRemoteOutput{
+		Provider:  in.Provider,
+		Repo:      in.Repo,
+		RemoteURL: cloneURL,
+		Auth: gitRemoteAuthJSON{
+			Type:     "http-basic",
+			Username: "any",
+			Note:     "Use the configured git proxy token as the password; it is never returned by this tool.",
+		},
 	})
 }
 

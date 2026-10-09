@@ -109,6 +109,10 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("git proxy: %w", err)
 		}
+		// Install the resolver before MCPServer registers the tools so the
+		// git_remote tool exists exactly when the proxy does. The token stays
+		// inside the proxy; RemoteURL only returns the credential-free URL.
+		srv.SetGitRemoteResolver(ps)
 		proxyWG.Add(1)
 		go func() {
 			defer proxyWG.Done()

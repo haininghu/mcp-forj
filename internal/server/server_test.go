@@ -225,7 +225,35 @@ type testEnv struct {
 	fake    *fakeProvider
 }
 
+// fakeGitRemote is a GitRemoteResolver test stub. It records the calls and
+// returns a fixed URL; the token field mirrors the real proxy holding a secret
+// that must never reach the tool output.
+type fakeGitRemote struct {
+	url          string
+	token        string
+	err          error
+	calls        int
+	lastProvider string
+	lastRepo     string
+}
+
+func (f *fakeGitRemote) RemoteURL(providerName, repo string) (string, error) {
+	f.calls++
+	f.lastProvider, f.lastRepo = providerName, repo
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.url, nil
+}
+
 func newTestEnv(t *testing.T, rules []policy.RuleSpec, fake *fakeProvider) *testEnv {
+	t.Helper()
+	return newTestEnvWithResolver(t, rules, fake, nil)
+}
+
+// newTestEnvWithResolver additionally installs a GitRemoteResolver before the
+// tools are registered; a nil resolver leaves git_remote unregistered.
+func newTestEnvWithResolver(t *testing.T, rules []policy.RuleSpec, fake *fakeProvider, resolver GitRemoteResolver) *testEnv {
 	t.Helper()
 	pol, err := policy.Build(rules)
 	if err != nil {
@@ -242,6 +270,9 @@ func newTestEnv(t *testing.T, rules []policy.RuleSpec, fake *fakeProvider) *test
 	registry := provider.NewRegistry()
 	registry.Register(fake)
 	srv := New(guard, registry, logger)
+	if resolver != nil {
+		srv.SetGitRemoteResolver(resolver)
+	}
 
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
@@ -2455,5 +2486,121 @@ func TestListConfiguredRulesRequiresPolicyRead(t *testing.T) {
 	}
 	if len(out.Repositories) != 0 {
 		t.Fatalf("configured rules = %+v, want none without policy:read", out.Repositories)
+	}
+}
+
+const proxyCloneURL = "http://127.0.0.1:8417/git/fake/team/app.git"
+
+func gitRemoteArgs() map[string]any {
+	return map[string]any{"provider": "fake", "repo": "team/app"}
+}
+
+func TestGitRemoteAllowedReturnsURLWithoutToken(t *testing.T) {
+	const proxyToken = "proxytoken-supersecret-42"
+	resolver := &fakeGitRemote{url: proxyCloneURL, token: proxyToken}
+	env := newTestEnvWithResolver(t, allowRules("repo:read"), newFake(), resolver)
+
+	res := env.call(t, "git_remote", gitRemoteArgs())
+	if res.IsError {
+		t.Fatalf("git_remote denied: %s", resultText(t, res))
+	}
+	if resolver.calls != 1 || resolver.lastProvider != "fake" || resolver.lastRepo != "team/app" {
+		t.Errorf("resolver calls = %d (%q %q), want 1 fake/team/app", resolver.calls, resolver.lastProvider, resolver.lastRepo)
+	}
+	var out gitRemoteOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.RemoteURL != proxyCloneURL {
+		t.Errorf("remote_url = %q, want %q", out.RemoteURL, proxyCloneURL)
+	}
+	if out.Auth.Type != "http-basic" || out.Auth.Username != "any" {
+		t.Errorf("auth = %+v, want http-basic/any", out.Auth)
+	}
+	// Data hygiene: the proxy token never appears in tool output or logs.
+	if strings.Contains(resultText(t, res), proxyToken) {
+		t.Errorf("token leaked into tool output: %s", resultText(t, res))
+	}
+	if strings.Contains(env.logs.String(), proxyToken) {
+		t.Errorf("token leaked into logs: %s", env.logs.String())
+	}
+}
+
+func TestGitRemoteRequiresRepoRead(t *testing.T) {
+	resolver := &fakeGitRemote{url: proxyCloneURL}
+	// The rule grants mr:read only: repo:read is denied.
+	env := newTestEnvWithResolver(t, allowRules("mr:read"), newFake(), resolver)
+
+	res := env.call(t, "git_remote", gitRemoteArgs())
+	if !res.IsError {
+		t.Fatal("git_remote succeeded without repo:read")
+	}
+	if !strings.Contains(resultText(t, res), "denied") {
+		t.Errorf("error = %q, want access denied", resultText(t, res))
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver called %d times despite policy denial; authorization must run first", resolver.calls)
+	}
+}
+
+func TestGitRemoteDeniedOnNoAIRepoIndistinguishably(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	resolver := &fakeGitRemote{url: proxyCloneURL}
+	env := newTestEnvWithResolver(t, allowRules("repo:read"), fake, resolver)
+
+	res := env.call(t, "git_remote", gitRemoteArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("git_remote = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver called %d times despite the .noai denial", resolver.calls)
+	}
+}
+
+func TestGitRemoteResolverErrorIsSafe(t *testing.T) {
+	const proxyToken = "proxytoken-supersecret-42"
+	resolver := &fakeGitRemote{token: proxyToken, err: errors.New("gitproxy: invalid repository path")}
+	env := newTestEnvWithResolver(t, allowRules("repo:read"), newFake(), resolver)
+
+	res := env.call(t, "git_remote", gitRemoteArgs())
+	if !res.IsError {
+		t.Fatal("git_remote succeeded despite resolver error")
+	}
+	text := resultText(t, res)
+	if !strings.Contains(text, "could not determine the git remote URL") {
+		t.Errorf("error = %q, want the safe fallback message", text)
+	}
+	if strings.Contains(text, proxyToken) || strings.Contains(env.logs.String(), proxyToken) {
+		t.Error("token leaked through the resolver error path")
+	}
+}
+
+func TestGitRemoteNotRegisteredWithoutResolver(t *testing.T) {
+	env := newTestEnv(t, allowRules("repo:read"), newFake())
+
+	tools, err := env.session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name == "git_remote" {
+			t.Fatal("git_remote is registered although no resolver was installed")
+		}
+	}
+
+	withResolver := newTestEnvWithResolver(t, allowRules("repo:read"), newFake(), &fakeGitRemote{url: proxyCloneURL})
+	tools, err = withResolver.session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ListTools: %v", err)
+	}
+	found := false
+	for _, tool := range tools.Tools {
+		if tool.Name == "git_remote" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("git_remote is missing although a resolver was installed")
 	}
 }

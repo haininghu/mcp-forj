@@ -118,7 +118,10 @@ Every capability-gated tool follows the same pipeline:
 
 `list_merge_requests` filters client-side from list-endpoint labels (the drop count is logged, not returned);
 `list_repositories` lists literal repositories without a marker check and marker-checks discovered
-candidates (omitting `.noai` ones unless the `repo:list` grant is `noai`-exempt).
+candidates (omitting `.noai` ones unless the `repo:list` grant is `noai`-exempt); `git_remote` is
+registered only while the git proxy is enabled, gates `repo:read` via `Guard.Authorize` (unknown tags
+fail closed, `.noai` overlay included) before calling the proxy resolver, and never returns the
+proxy token.
 
 ## Where to look
 

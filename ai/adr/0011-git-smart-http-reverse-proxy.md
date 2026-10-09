@@ -33,6 +33,9 @@ provider. Repositories and branches are filtered; **paths are not** (path filter
   `git_proxy.token`, compared with `crypto/subtle.ConstantTimeCompare`. Failures answer 401 with
   a `WWW-Authenticate: Basic` challenge. The proxy token is never logged and never forwarded
   upstream; the upstream receives only the provider's own header from `GitAuthHeader`.
+- **Clone URL discovery**: the `git_remote` MCP tool (registered only while the proxy is enabled)
+  exposes `Server.RemoteURL` so an agent can learn the credential-free clone URL; the token itself
+  is never returned by the tool.
 - **Authorization before the provider call**, using the existing guard: fetch
   (`info/refs?service=git-upload-pack`, `POST git-upload-pack`) needs `repo:read`; push
   (`info/refs?service=git-receive-pack`, `POST git-receive-pack`) needs `repo:write`. The `.noai`
@@ -109,5 +112,7 @@ These are deliberate scope decisions, not bugs; they are listed so operators can
   a `read_file` concept. This is deliberate for the MVP.
 - `.noai` remains an integrity control (invariant 11): the proxy denies non-exempt operations on
   marked repositories but an exempt `repo:read` still serves content, as everywhere else.
-- The MCP tools do not yet advertise the proxy URL; `Server.RemoteURL` is exported for a later
-  tool to return it.
+- The MCP tool `git_remote` (registered only while the proxy is enabled) returns the clone URL through
+  `Server.RemoteURL`; the proxy token is never part of the tool output. It authorizes `repo:read` with
+  the full guard (unknown tags fail closed, `.noai` overlay included) before calling the resolver, so
+  the tool sees exactly what the proxy would allow for a fetch.
