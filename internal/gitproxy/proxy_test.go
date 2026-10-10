@@ -133,6 +133,7 @@ type recorded struct {
 	rawQuery      string
 	authorization string
 	contentType   string
+	header        http.Header // full clone, for absence assertions
 	body          []byte
 }
 
@@ -163,6 +164,7 @@ func newUpstream(t *testing.T, body []byte) *upstream {
 			rawQuery:      r.URL.RawQuery,
 			authorization: r.Header.Get("Authorization"),
 			contentType:   r.Header.Get("Content-Type"),
+			header:        r.Header.Clone(),
 			body:          data,
 		})
 		u.mu.Unlock()
@@ -328,6 +330,55 @@ func TestFetchInfoRefsForwardsWithProviderAuth(t *testing.T) {
 	}
 	if p.remoteURLCalls == 0 || p.authCalls == 0 {
 		t.Error("provider credential/remote lookups were not used for forwarding")
+	}
+}
+
+// TestInboundCredentialHeadersStripped pins the identity separation: a client
+// that attaches its own credentials (proxy Basic auth plus Private-Token,
+// Cookie and Proxy-Authorization) must never have any of them reach the
+// upstream. The upstream sees exclusively the provider's git credential.
+func TestInboundCredentialHeadersStripped(t *testing.T) {
+	ad := []byte("001e# service=git-upload-pack\n0000")
+	u := newUpstream(t, ad)
+	p := newFetchProvider(u.serverURL)
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil)
+	req.SetBasicAuth("git", proxyToken) // becomes the Authorization header
+	req.Header.Set("Private-Token", "attacker-token")
+	req.Header.Set("Cookie", "session=x")
+	req.Header.Set("Proxy-Authorization", "Basic zzz")
+
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+
+	got := u.last()
+	// The only credential upstream is the provider's git auth, not the
+	// client's Basic proxy token.
+	if got.authorization != fakeGitAuth {
+		t.Errorf("upstream Authorization = %q, want the provider credential %q", got.authorization, fakeGitAuth)
+	}
+	if strings.Contains(got.authorization, proxyToken) {
+		t.Error("upstream Authorization contains the proxy token")
+	}
+	// Every other inbound credential header is stripped outright: an empty
+	// value would still prove presence, so the key must be absent entirely.
+	for _, h := range []string{"Private-Token", "Cookie", "Proxy-Authorization"} {
+		if vs := got.header.Values(h); len(vs) > 0 {
+			t.Errorf("upstream header %q = %v, want it stripped completely", h, vs)
+		}
+	}
+	// No client credential leaks through any other header either.
+	for name, values := range got.header {
+		for _, v := range values {
+			if strings.Contains(v, proxyToken) || strings.Contains(v, "attacker-token") || strings.Contains(v, "session=x") {
+				t.Errorf("upstream header %q leaks a client credential: %v", name, v)
+			}
+		}
 	}
 }
 

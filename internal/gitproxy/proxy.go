@@ -358,9 +358,19 @@ func (s *Server) applyPushPolicy(r *http.Request, rt *route, p provider.Provider
 	return nil
 }
 
+// inboundCredentialHeaders are client-supplied headers that could carry an
+// upstream credential: the proxy's own Basic auth (Authorization), a GitLab
+// API token (Private-Token), session state (Cookie) and proxy authentication
+// (Proxy-Authorization). They are always stripped before the provider's own
+// Authorization is set, so the upstream sees exactly one credential, the one
+// the provider supplied, and never anything the client sent (identity
+// separation).
+var inboundCredentialHeaders = []string{"Authorization", "Private-Token", "Cookie", "Proxy-Authorization"}
+
 // forward transparently proxies the request to the provider's git endpoint
 // with the provider's own git credentials. Client credentials never leave the
-// proxy; upstream failures map to a safe 502 without response bodies.
+// proxy and no client credential header reaches the upstream; upstream
+// failures map to a safe 502 without response bodies.
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, rt *route, p provider.Provider) {
 	remote, err := p.GitRemoteURL(r.Context(), rt.repo)
 	if err != nil {
@@ -396,8 +406,13 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, rt *route, p pr
 			pr.Out.URL = target
 			pr.Out.Host = target.Host
 			pr.SetXForwarded()
-			// Never forward the client's proxy token upstream.
-			pr.Out.Header.Del("Authorization")
+			// Identity separation: strip every inbound credential header, not
+			// just Authorization, so a client cannot smuggle its own token or
+			// cookie to the provider through the proxy. Only the provider's
+			// git credential set below ever reaches the upstream.
+			for _, h := range inboundCredentialHeaders {
+				pr.Out.Header.Del(h)
+			}
 			if authz != "" {
 				pr.Out.Header.Set("Authorization", authz)
 			}
