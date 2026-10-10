@@ -91,7 +91,7 @@ sequenceDiagram
   X->>X: parse command section + push-options section (bounded, no provider call)
   loop each unique target branch
     X->>G: AuthorizeBranch(repo:write, branch)
-    Note over G: branches filter of the grant (without one: deny); .noai on default AND target branch
+    Note over G: branches filter of the grant (without one: deny) and .noai on default AND target branch
   end
   X->>U: DefaultBranch, ResolveRef, MergeBase (guardrail state)
   Note over X: only refs/heads/, never default branch, no deletes, fast-forward incl. stale base
