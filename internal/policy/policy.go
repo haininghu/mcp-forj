@@ -137,6 +137,12 @@ func Build(specs []RuleSpec) (*Policy, error) {
 		if effect != EffectAllow && effect != EffectDeny {
 			return nil, fmt.Errorf("policy: rule %d: unknown effect %q", i, spec.Effect)
 		}
+		// Invariant 3: a deny rule only hides repositories and must not list
+		// capabilities. Enforced here as well as in config validation so the
+		// policy layer defends itself regardless of the construction path.
+		if effect == EffectDeny && len(spec.Capabilities) > 0 {
+			return nil, fmt.Errorf("policy: rule %d: capabilities are not allowed on a deny rule", i)
+		}
 		if len(spec.Repositories) == 0 {
 			return nil, fmt.Errorf("policy: rule %d: no repositories", i)
 		}

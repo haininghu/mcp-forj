@@ -16,6 +16,7 @@ more useful than commit messages because they capture the *wrong assumption*.
 | 0006 | List truncation was never reported and other provider/handler gaps.   |
 | 0007 | The `.noai` denial message disclosed repository existence.           |
 | 0008 | `list_repositories` disclosed the number of hidden repositories.     |
+| 0009 | Repository path was not lowercased and accepted a bare numeric id.   |
 
 ## Template
 

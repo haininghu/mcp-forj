@@ -34,6 +34,15 @@ provider. `read_file` passed `in.Ref` to the provider while the marker check alw
 - `matchesAnyPath`/`ruleMatches` now treat an unexpected match error as a match
   (fail-closed). See ADR 0003.
 
+## Follow-up
+
+`validateRepo` initially canonicalized only the *syntax* (`path.Clean`); it did **not**
+lowercase the path or reject a bare numeric project id, so the `Group/Secret` vector
+named above and the numeric-id vector stayed open. Both were closed later by
+lowercasing the returned path and requiring a `/` (see
+`0009-repo-case-and-numeric-id-bypass.md`); the claim below that `Group/Secret` was
+fixed by this change was therefore premature.
+
 ## Lesson
 
 The authorization key must be canonicalized exactly once and shared by the policy and

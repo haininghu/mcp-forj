@@ -189,6 +189,7 @@ func TestBuildValidation(t *testing.T) {
 		{"empty branch exclude pattern", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
 			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Exclude: []string{""}}}},
 		}}}},
+		{"capabilities on deny rule", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "deny", Capabilities: grants("repo:read")}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

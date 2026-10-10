@@ -21,8 +21,13 @@ capability.
 The repository path is validated and canonicalized by `validateRepo` before it is used
 for both policy matching and the provider call, so the two cannot diverge. Rejected:
 absolute paths, backslashes, control characters, empty/relative segments and encoded
-traversal. The file path is canonicalized by `validatePath` and the `ref` by
-`validateRef` (control characters, length bound).
+traversal. The canonical form is the **lowercase namespaced path**: the result is
+lowercased and must contain a `/`, because GitLab resolves project paths
+case-insensitively (and stores them lowercase) and also accepts a bare numeric project
+id on the same parameter. Configured repository patterns must therefore be lowercase.
+The git proxy applies the same rule via `canonicalRepoPath`. The file path is
+canonicalized by `validatePath` and the `ref` by `validateRef` (control characters,
+length bound).
 
 ## Required capability
 

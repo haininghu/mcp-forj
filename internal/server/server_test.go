@@ -845,7 +845,7 @@ func TestListRepositoriesTruncation(t *testing.T) {
 	fake := newFake()
 	fake.repos = nil
 	for i := range maxListResults + 5 {
-		fake.repos = append(fake.repos, provider.Repository{Provider: "fake", Path: "archive/r" + string('a'+i%26) + string('0'+i/26)})
+		fake.repos = append(fake.repos, provider.Repository{Provider: "fake", Path: "archive/r" + string(rune('a'+i%26)) + string(rune('0'+i/26))})
 	}
 	env := newTestEnv(t, listReposRules("archive/**"), fake)
 
@@ -2395,10 +2395,18 @@ func TestRepoPathCanonicalization(t *testing.T) {
 		t.Fatalf("read_file on an allowed repo failed: %s", resultText(t, res))
 	}
 
+	// A case-variant of an allowed repository canonicalizes to the same path and
+	// still works (GitLab resolves paths case-insensitively).
+	if res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "Team/App", "path": "README.md"}); res.IsError {
+		t.Fatalf("read_file on a case-variant allowed repo failed: %s", resultText(t, res))
+	}
+
 	// Non-canonical or traversal forms are rejected outright.
 	rejected := []string{
 		"team//secret", "team/../secret", "team\\secret", "/team/secret",
 		"team/%2e%2e/secret", "team/\x01secret",
+		// A bare numeric name would be read by GitLab as a project id, not a path.
+		"42",
 	}
 	for _, repo := range rejected {
 		res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": repo, "path": "README.md"})
@@ -2407,10 +2415,33 @@ func TestRepoPathCanonicalization(t *testing.T) {
 		}
 	}
 
+	// A case-variant of the denied repository canonicalizes to the denied path:
+	// the deny rule holds even though GitLab would resolve the mixed casing.
+	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/SECRET", "path": "README.md"})
+	if !res.IsError || !strings.Contains(resultText(t, res), "access denied") {
+		t.Errorf("case-variant deny bypass: %q (isError=%v)", resultText(t, res), res.IsError)
+	}
+
 	// A trailing slash canonicalizes to the denied repository: the deny rule holds.
-	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/secret/", "path": "README.md"})
+	res = env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/secret/", "path": "README.md"})
 	if !res.IsError || !strings.Contains(resultText(t, res), "access denied") {
 		t.Errorf("trailing-slash deny bypass: %q (isError=%v)", resultText(t, res), res.IsError)
+	}
+}
+
+// TestRepoPathRejectsBareNumericID pins that a bare numeric repository name is
+// rejected: GitLab would read it as a project id, so with a broad "**" allow a
+// deny literal (e.g. "team/secret") could otherwise be evaded by its numeric id.
+func TestRepoPathRejectsBareNumericID(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, []policy.RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"**"}, Effect: "allow", Capabilities: grants("repo:read")},
+	}, fake)
+
+	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "42", "path": "README.md"})
+	if !res.IsError {
+		t.Fatalf("read_file with a bare numeric repo succeeded, want rejection: %s", resultText(t, res))
 	}
 }
 

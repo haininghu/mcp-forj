@@ -917,6 +917,7 @@ func TestPushOptionsDeniedCases(t *testing.T) {
 			leaks:   []string{"bad..name"},
 		},
 		{"ci option", []string{"ci.skip"}, []string{"ci"}},
+		{"unknown merge_request option", []string{"merge_request.future_action=1"}, []string{"future_action"}},
 		{"unknown option", []string{"deploy.production=true"}, []string{"deploy"}},
 	}
 	for _, tc := range tests {
@@ -1578,17 +1579,124 @@ func TestRemoteURL(t *testing.T) {
 		t.Errorf("RemoteURL = %q, must be credential-free", got)
 	}
 
+	// Canonicalization applies here too: a mixed-case path is lowercased.
+	got, err = s.RemoteURL(providerName, "Team/APP")
+	if err != nil {
+		t.Fatalf("RemoteURL mixed case: %v", err)
+	}
+	if want := "https://gitproxy.example.com/git/gl/team/app.git"; got != want {
+		t.Errorf("RemoteURL mixed case = %q, want %q", got, want)
+	}
+
 	if _, err := s.RemoteURL("nope", repo); err == nil {
 		t.Error("RemoteURL accepted an unknown provider")
 	}
 	bad := []string{
-		"", "..", "team/../x", "team//x", "team/app.git", "team/ap p",
+		"", "app", "42", "..", "team/../x", "team//x", "team/app.git", "team/ap p",
 		"team/a?b", "team/a#b", "team/a@b", "team/a:b", "team/a%40b",
 	}
 	for _, badRepo := range bad {
 		if _, err := s.RemoteURL(providerName, badRepo); err == nil {
 			t.Errorf("RemoteURL accepted invalid repo %q", badRepo)
 		}
+	}
+}
+
+func TestCanonicalRepoPath(t *testing.T) {
+	valid := map[string]string{
+		"team/app":     "team/app",
+		"Team/App":     "team/app",
+		"team/sub/APP": "team/sub/app",
+	}
+	for in, want := range valid {
+		got, err := canonicalRepoPath(in)
+		if err != nil || got != want {
+			t.Errorf("canonicalRepoPath(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	invalid := []string{"", "app", "42", "team/../x", "team//x", "team/app.git", "team/ap p"}
+	for _, in := range invalid {
+		if _, err := canonicalRepoPath(in); err == nil {
+			t.Errorf("canonicalRepoPath(%q) accepted an invalid path", in)
+		}
+	}
+}
+
+// TestRouteCanonicalizesRepoCase pins that the repository is lowercased before
+// it reaches the policy: a case-variant of a denied repository must resolve to
+// the denied canonical path (GitLab is case-insensitive), and a case-variant of
+// an allowed repository must still work.
+func TestRouteCanonicalizesRepoCase(t *testing.T) {
+	u := newUpstream(t, []byte(" advertisement "))
+	p := newFetchProvider(u.serverURL)
+	pol, err := policy.Build([]policy.RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: string(policy.EffectDeny)},
+		{Repositories: []string{"team/**"}, Effect: string(policy.EffectAllow),
+			Capabilities: []policy.CapabilityGrant{{Name: policy.CapRepoRead}}},
+	})
+	if err != nil {
+		t.Fatalf("policy.Build: %v", err)
+	}
+	registry := provider.NewRegistry()
+	registry.Register(p)
+	guard := policy.NewGuard(
+		map[string]*policy.Policy{p.name: pol},
+		map[string]policy.FileChecker{p.name: p},
+		".noai", nil,
+	)
+	s, err := New(Config{Listen: "127.0.0.1:0", PublicURL: "https://gitproxy.example.com/", Token: proxyToken}, registry, guard, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	rec := doRequest(t, s, http.MethodGet,
+		"/git/"+providerName+"/team/SECRET.git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("case-variant denied repo = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0 for the denied repository", u.count())
+	}
+
+	rec = doRequest(t, s, http.MethodGet,
+		"/git/"+providerName+"/TEAM/APP.git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Errorf("case-variant allowed repo = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+}
+
+// TestRouteRejectsBareNumericRepo pins that a bare numeric repository route
+// (GitLab would read it as a project id) is rejected before the policy runs.
+func TestRouteRejectsBareNumericRepo(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
+
+	rec := doRequest(t, s, http.MethodGet,
+		"/git/"+providerName+"/42.git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("bare numeric repo = %d, want 404", rec.Code)
+	}
+	if u.count() != 0 || p.remoteURLCalls != 0 || p.authCalls != 0 {
+		t.Errorf("upstream/provider calls = %d/%d/%d, want 0/0/0", u.count(), p.remoteURLCalls, p.authCalls)
+	}
+}
+
+// TestRouteRejectsDuplicateService pins that a duplicated service query parameter
+// is rejected: the policy authorizes the first value while the upstream parses
+// the last, so accepting both could authorize one service and forward another.
+func TestRouteRejectsDuplicateService(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead, policy.CapRepoWrite})
+
+	rec := doRequest(t, s, http.MethodGet,
+		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack&service=git-receive-pack", nil, "git", proxyToken)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("duplicate service = %d, want 404, body %q", rec.Code, rec.Body)
+	}
+	if u.count() != 0 || p.remoteURLCalls != 0 {
+		t.Errorf("upstream/provider calls = %d/%d, want 0/0", u.count(), p.remoteURLCalls)
 	}
 }
 

@@ -127,10 +127,34 @@ const (
 	optionCI = "ci."
 )
 
+// allowedMergeRequestOptions is the exact set of merge-request push options this
+// proxy forwards, mirroring GitLab's own vocabulary
+// (lib/gitlab/push_options.rb). `merge_request.target_project` is deliberately
+// absent: it is denied outright below. Any key outside this set — including a
+// future `merge_request.*` option — is denied fail-closed, so an option GitLab
+// later adds cannot silently ride the `mr:write` gate.
+var allowedMergeRequestOptions = map[string]struct{}{
+	"merge_request.assign":                       {},
+	"merge_request.auto_merge":                   {},
+	"merge_request.create":                       {},
+	"merge_request.description":                  {},
+	"merge_request.draft":                        {},
+	"merge_request.label":                        {},
+	"merge_request.merge_when_pipeline_succeeds": {},
+	"merge_request.milestone":                    {},
+	"merge_request.remove_source_branch":         {},
+	"merge_request.squash":                       {},
+	"merge_request.target":                       {},
+	"merge_request.title":                        {},
+	"merge_request.unassign":                     {},
+	"merge_request.unlabel":                      {},
+}
+
 // checkPushOptions authorizes the GitLab push options of a push. Every option
 // must be known; merge-request options require mr:write, auto-merge options
-// additionally mr:merge, and anything else (ci.*, cross-project, unknown) is
-// denied fail-closed. All checks run against the same guard.
+// additionally mr:merge, and anything else (ci.*, cross-project, unknown, or a
+// merge_request.* key outside the allowlist) is denied fail-closed. All checks
+// run against the same guard.
 //
 // Options arrive as "key" or "key=value" and are evaluated in two passes: the
 // first applies the syntactic rules to every option and records which
@@ -159,6 +183,12 @@ func (s *Server) checkPushOptions(ctx context.Context, rt *route, options []stri
 		case key == optionMergeRequestTargetProject:
 			return fmt.Errorf("%w: %s targets another project", errPushDenied, key)
 		case strings.HasPrefix(key, optionMergeRequest):
+			// Deny-by-default within the namespace: only the exact GitLab
+			// vocabulary passes, so a future merge_request.* option cannot be
+			// forwarded on the mr:write gate alone.
+			if _, ok := allowedMergeRequestOptions[key]; !ok {
+				return fmt.Errorf("%w: unrecognized push option", errPushDenied)
+			}
 			needsMRWrite = true
 			switch key {
 			case optionMergeRequestAutoMerge, optionMergeRequestMergeWhenPipelineSucceeds:

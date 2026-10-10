@@ -164,14 +164,15 @@ func (s *Server) RemoteURL(providerName, repo string) (string, error) {
 	if err := validateNameSegment(providerName, false); err != nil {
 		return "", fmt.Errorf("gitproxy: invalid provider name: %w", err)
 	}
-	if err := validateNameSegment(repo, true); err != nil {
+	canonical, err := canonicalRepoPath(repo)
+	if err != nil {
 		return "", fmt.Errorf("gitproxy: invalid repository path: %w", err)
 	}
 	if _, ok := s.registry.Get(providerName); !ok {
 		return "", fmt.Errorf("gitproxy: unknown provider %q", providerName)
 	}
 	base := *s.public
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/git/" + providerName + "/" + repo + ".git"
+	base.Path = strings.TrimSuffix(base.Path, "/") + "/git/" + providerName + "/" + canonical + ".git"
 	base.RawQuery = ""
 	base.Fragment = ""
 	return base.String(), nil
@@ -421,16 +422,24 @@ func (s *Server) parseRoute(r *http.Request) (*route, bool) {
 	if err := validateNameSegment(providerName, false); err != nil {
 		return nil, false
 	}
-	if err := validateNameSegment(repo, true); err != nil {
+	canonical, err := canonicalRepoPath(repo)
+	if err != nil {
 		return nil, false
 	}
-	rt := &route{providerName: providerName, repo: repo, service: service}
+	rt := &route{providerName: providerName, repo: canonical, service: service}
 	switch service {
 	case serviceInfoRefs:
 		if r.Method != http.MethodGet {
 			return nil, false
 		}
-		switch r.URL.Query().Get("service") {
+		// Exactly one service value: the policy authorizes the first value while
+		// the upstream parses the last, so a duplicated parameter could authorize
+		// one service and forward another. Reject anything but a single value.
+		services, ok := r.URL.Query()["service"]
+		if !ok || len(services) != 1 {
+			return nil, false
+		}
+		switch services[0] {
 		case serviceUploadPack:
 			rt.capability = policy.CapRepoRead
 		case serviceReceivePack:
@@ -578,6 +587,24 @@ func validateNameSegment(s string, slashes bool) error {
 		}
 	}
 	return nil
+}
+
+// canonicalRepoPath validates a repository route segment and returns the
+// canonical path used for BOTH the policy decision and the upstream URL. It
+// requires a namespaced path ("namespace/project"), because GitLab also accepts
+// a bare numeric project id on the same parameter: without a slash, a bare
+// integer could dodge a deny literal like "group/secret" while the provider
+// resolves that very project. It lowercases the result because GitLab resolves
+// paths case-insensitively and stores them lowercase, so the policy match must
+// not diverge from the resolved project. Configured patterns must be lowercase.
+func canonicalRepoPath(repo string) (string, error) {
+	if err := validateNameSegment(repo, true); err != nil {
+		return "", err
+	}
+	if !strings.Contains(repo, "/") {
+		return "", fmt.Errorf("repository %q must be a namespaced path (namespace/project)", repo)
+	}
+	return strings.ToLower(repo), nil
 }
 
 // isLoopbackAddr reports whether a listen address binds only loopback

@@ -1043,9 +1043,11 @@ func withStatus(message string, status int) error {
 
 // validateRepo validates and canonicalizes a repository path. It rejects
 // absolute paths, backslashes, control characters, empty or relative segments
-// and encoded traversal, and returns the cleaned namespace/project path. The
-// cleaned value must be used for both policy matching and the provider call so
-// the two cannot diverge (a mismatch would allow a deny rule to be bypassed).
+// and encoded traversal, and returns the canonical lowercase namespace/project
+// path (a bare numeric project id is rejected because GitLab would read it as
+// an id). The canonical value must be used for both policy matching and the
+// provider call so the two cannot diverge (a mismatch would allow a deny rule
+// to be bypassed).
 func validateRepo(repo string) (string, error) {
 	if repo == "" {
 		return "", errors.New("repo must not be empty")
@@ -1079,7 +1081,21 @@ func validateRepo(repo string) (string, error) {
 			return "", fmt.Errorf("repo %q contains an encoded traversal sequence", repo)
 		}
 	}
-	return cleaned, nil
+	// GitLab identifies a project by its namespaced path ("namespace/project")
+	// but also accepts a bare numeric project id on the same parameter. A bare
+	// integer would diverge from the policy key: it cannot match a deny literal
+	// such as "group/secret" while the provider resolves it to that very
+	// project. Require a namespaced path so the numeric form is rejected.
+	if !strings.Contains(cleaned, "/") {
+		return "", fmt.Errorf("repo %q must be a namespaced path (namespace/project)", repo)
+	}
+	// GitLab resolves project paths case-insensitively and stores them in their
+	// lowercase canonical form, so lowercase the result. Policy matching and the
+	// provider call must see exactly the same canonical string: a mixed-case
+	// request that differed only in case could otherwise match a broader allow
+	// rule while the provider resolves the denied project. Configured repository
+	// patterns must therefore be lowercase.
+	return strings.ToLower(cleaned), nil
 }
 
 // validateRef validates an optional git ref. An empty ref means the default
