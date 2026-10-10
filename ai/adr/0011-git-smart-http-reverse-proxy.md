@@ -49,11 +49,13 @@ authorization) carry `branch == ""` and the branch filter imposes nothing there 
   a decoded segment containing one would let the policy match diverge from the upstream URL
   (authorization bypass), so the route is rejected with 404 before the policy runs. Providers
   must likewise escape the repository path when building the remote URL (see below).
-  The repository path is then canonicalized by `canonicalRepoPath`: lowercased and required
-  to be a namespaced path, matching the server's `validateRepo`. GitLab resolves project
-  paths case-insensitively and also accepts a bare numeric project id on the same parameter,
-  so an un-lowercased or single-segment repository could diverge from the policy decision
-  (see bug analysis 0009); configured patterns must be lowercase. An `info/refs` route must
+  The repository path is then normalized to the provider's canonical authorization key
+  by `Provider.CanonicalRepository` (after the provider segment is resolved), matching
+  the server's `validateRepo` + provider normalization. GitLab resolves project paths
+  case-insensitively and also accepts a bare numeric project id on the same parameter,
+  so an un-normalized or single-segment repository could diverge from the policy
+  decision (see bug analysis 0009); configured patterns must match the canonical form.
+  An `info/refs` route must
   carry exactly one `service` query value: the policy authorizes the first value while the
   upstream parses the last, so a duplicated parameter is rejected with 404.
   The provider segment is resolved against the registry before authorization

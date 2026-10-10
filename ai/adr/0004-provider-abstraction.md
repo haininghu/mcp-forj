@@ -40,6 +40,11 @@ Supporting pieces:
   a registration hook (`provider.RegisterFactory`) that the gitlab package installs
   in `init`, avoiding an import cycle.
 - `number` is the provider-native identifier: GitLab uses the project-scoped `iid`.
+- `CanonicalRepository(repo)` returns the provider's canonical authorization key (the
+  lowercase namespaced path for GitLab); the server and the git proxy use that same
+  string for both policy matching and the provider call, so a provider-specific
+  identifier form (a case variant, a bare numeric project id) cannot diverge from the
+  policy decision.
 
 Config selects a backend with `type: gitlab`; the server only sees the interface.
 

@@ -31,16 +31,16 @@ the fix did not touch casing, so the vector stayed open.
 
 ## Fix
 
-- `validateRepo` now lowercases its cleaned result and requires a namespaced path
-  (`strings.Contains(cleaned, "/")`), rejecting the bare numeric-id form. The same
-  canonical string is used for the policy decision and every provider call.
-- The git proxy gained `canonicalRepoPath`, applied in `parseRoute` and `RemoteURL`,
-  which performs the same lowercasing and `/` requirement on top of
-  `validateNameSegment`.
-- Configured repository patterns must be lowercase; a pattern that differs in case
-  fails closed (deny), which is the safe direction.
-- Tests: `TestRepoPathCanonicalization`, `TestRepoPathRejectsBareNumericID`,
-  `TestCanonicalRepoPath`, `TestRouteCanonicalizesRepoCase`,
+- The canonical form is now provider-owned: `Provider.CanonicalRepository` returns it,
+  and every server handler and both git-proxy call sites (`parseRoute`/`RemoteURL`) use
+  its result for the policy decision and the provider call. The GitLab implementation
+  lowercases and requires a namespaced path (`strings.Contains(repo, "/")`), rejecting
+  the bare numeric-id form. `validateRepo` keeps only the provider-neutral structural
+  checks.
+- Configured repository patterns must match the provider's canonical form (lowercase for
+  GitLab); a pattern that differs in case fails closed (deny), the safe direction.
+- Tests: `TestCanonicalRepository` (GitLab), `TestRepoPathCanonicalization`,
+  `TestRepoPathRejectsBareNumericID`, `TestRouteCanonicalizesRepoCase`,
   `TestRouteRejectsBareNumericRepo`.
 
 ## Lesson

@@ -57,6 +57,7 @@ func (s stubProvider) DefaultBranch(context.Context, string) (string, error) {
 func (s stubProvider) ResolveRef(context.Context, string, string) (string, error) {
 	return "", ErrNotFound
 }
+func (s stubProvider) CanonicalRepository(repo string) (string, error) { return repo, nil }
 
 func TestRegistry(t *testing.T) {
 	r := NewRegistry()

@@ -164,12 +164,16 @@ func (s *Server) RemoteURL(providerName, repo string) (string, error) {
 	if err := validateNameSegment(providerName, false); err != nil {
 		return "", fmt.Errorf("gitproxy: invalid provider name: %w", err)
 	}
-	canonical, err := canonicalRepoPath(repo)
-	if err != nil {
+	if err := validateNameSegment(repo, true); err != nil {
 		return "", fmt.Errorf("gitproxy: invalid repository path: %w", err)
 	}
-	if _, ok := s.registry.Get(providerName); !ok {
+	p, ok := s.registry.Get(providerName)
+	if !ok {
 		return "", fmt.Errorf("gitproxy: unknown provider %q", providerName)
+	}
+	canonical, err := p.CanonicalRepository(repo)
+	if err != nil {
+		return "", fmt.Errorf("gitproxy: invalid repository path: %w", err)
 	}
 	base := *s.public
 	base.Path = strings.TrimSuffix(base.Path, "/") + "/git/" + providerName + "/" + canonical + ".git"
@@ -263,12 +267,20 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "git proxy: unsupported endpoint", http.StatusNotFound)
 		return
 	}
+	// Normalize the repository to the provider's canonical authorization key so
+	// the policy match and the upstream URL cannot diverge (e.g. a case variant
+	// or a bare numeric project id). An unusable form is a routing miss (404).
+	canonical, err := p.CanonicalRepository(rt.repo)
+	if err != nil {
+		http.Error(w, "git proxy: unsupported endpoint", http.StatusNotFound)
+		return
+	}
+	rt.repo = canonical
 	// Authorize before any provider call (deny by default). Repository tags are
 	// not fetched here: a grant with a tag constraint sees unknown tags and
 	// therefore fails closed, which is the documented behavior for git traffic.
 	// A POST push additionally parses its command section and authorizes every
 	// unique target branch, so the .noai marker is checked on that branch too.
-	var err error
 	if rt.isPush {
 		err = s.preparePush(r, rt, p)
 	} else {
@@ -422,11 +434,10 @@ func (s *Server) parseRoute(r *http.Request) (*route, bool) {
 	if err := validateNameSegment(providerName, false); err != nil {
 		return nil, false
 	}
-	canonical, err := canonicalRepoPath(repo)
-	if err != nil {
+	if err := validateNameSegment(repo, true); err != nil {
 		return nil, false
 	}
-	rt := &route{providerName: providerName, repo: canonical, service: service}
+	rt := &route{providerName: providerName, repo: repo, service: service}
 	switch service {
 	case serviceInfoRefs:
 		if r.Method != http.MethodGet {
@@ -587,24 +598,6 @@ func validateNameSegment(s string, slashes bool) error {
 		}
 	}
 	return nil
-}
-
-// canonicalRepoPath validates a repository route segment and returns the
-// canonical path used for BOTH the policy decision and the upstream URL. It
-// requires a namespaced path ("namespace/project"), because GitLab also accepts
-// a bare numeric project id on the same parameter: without a slash, a bare
-// integer could dodge a deny literal like "group/secret" while the provider
-// resolves that very project. It lowercases the result because GitLab resolves
-// paths case-insensitively and stores them lowercase, so the policy match must
-// not diverge from the resolved project. Configured patterns must be lowercase.
-func canonicalRepoPath(repo string) (string, error) {
-	if err := validateNameSegment(repo, true); err != nil {
-		return "", err
-	}
-	if !strings.Contains(repo, "/") {
-		return "", fmt.Errorf("repository %q must be a namespaced path (namespace/project)", repo)
-	}
-	return strings.ToLower(repo), nil
 }
 
 // isLoopbackAddr reports whether a listen address binds only loopback

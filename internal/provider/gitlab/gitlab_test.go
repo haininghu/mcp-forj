@@ -965,3 +965,24 @@ func TestResolveRefNotFoundHTTP(t *testing.T) {
 		t.Fatalf("ResolveRef error = %v, want provider.ErrNotFound via mapError", err)
 	}
 }
+
+func TestCanonicalRepository(t *testing.T) {
+	c := &Client{}
+	valid := map[string]string{
+		"team/app":     "team/app",
+		"Team/App":     "team/app",
+		"team/sub/APP": "team/sub/app",
+	}
+	for in, want := range valid {
+		got, err := c.CanonicalRepository(in)
+		if err != nil || got != want {
+			t.Errorf("CanonicalRepository(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	// A bare numeric name would be read by GitLab as a project id, not a path.
+	for _, in := range []string{"", "app", "42"} {
+		if _, err := c.CanonicalRepository(in); err == nil {
+			t.Errorf("CanonicalRepository(%q) accepted an invalid repository", in)
+		}
+	}
+}

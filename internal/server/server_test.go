@@ -199,6 +199,16 @@ func (f *fakeProvider) ResolveRef(_ context.Context, _, _ string) (string, error
 	return "", provider.ErrNotFound
 }
 
+// CanonicalRepository models the GitLab provider: a lowercase namespaced path,
+// with a bare numeric project id rejected. The server tests rely on it to prove
+// the handler uses the provider's canonical form for the policy and the call.
+func (f *fakeProvider) CanonicalRepository(repo string) (string, error) {
+	if !strings.Contains(repo, "/") {
+		return "", errors.New("must be a namespaced path")
+	}
+	return strings.ToLower(repo), nil
+}
+
 func newFake() *fakeProvider {
 	return &fakeProvider{
 		name: "fake",

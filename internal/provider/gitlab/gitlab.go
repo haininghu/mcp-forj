@@ -411,6 +411,24 @@ func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, erro
 	return branch.Commit.ID, nil
 }
 
+// CanonicalRepository implements provider.Provider. GitLab identifies a project
+// by its namespaced path ("namespace/project") but resolves it
+// case-insensitively and stores it lowercase; the same :id parameter also
+// accepts a bare numeric project id. The canonical authorization key is
+// therefore the lowercase namespaced path: lowercasing keeps the policy match
+// aligned with the project GitLab resolves, and requiring a slash rejects the
+// bare numeric-id form so it cannot dodge a deny literal. The caller passes an
+// already structurally validated path.
+func (c *Client) CanonicalRepository(repo string) (string, error) {
+	if repo == "" {
+		return "", errors.New("gitlab: repository path is empty")
+	}
+	if !strings.Contains(repo, "/") {
+		return "", fmt.Errorf("gitlab: repository %q must be a namespaced path (namespace/project)", repo)
+	}
+	return strings.ToLower(repo), nil
+}
+
 // refOptions builds the file options. The GitLab repository-files endpoint
 // requires a ref (there is no server-side default), so an empty ref means the
 // default branch via the special value HEAD.

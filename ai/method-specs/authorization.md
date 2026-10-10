@@ -18,14 +18,16 @@ capability.
 | path       | string              | Repository-relative path for `repo:read`/`write`.  |
 | ref        | string              | Git ref for the marker check (`read_file` only).   |
 
-The repository path is validated and canonicalized by `validateRepo` before it is used
-for both policy matching and the provider call, so the two cannot diverge. Rejected:
-absolute paths, backslashes, control characters, empty/relative segments and encoded
-traversal. The canonical form is the **lowercase namespaced path**: the result is
-lowercased and must contain a `/`, because GitLab resolves project paths
-case-insensitively (and stores them lowercase) and also accepts a bare numeric project
-id on the same parameter. Configured repository patterns must therefore be lowercase.
-The git proxy applies the same rule via `canonicalRepoPath`. The file path is
+The repository path is structurally validated by `validateRepo` (provider-neutral) and
+then normalized to the provider's canonical authorization key by
+`Provider.CanonicalRepository`; that canonical value is used for both policy matching
+and the provider call, so the two cannot diverge. `validateRepo` rejects absolute paths,
+backslashes, control characters, empty/relative segments and encoded traversal.
+`CanonicalRepository` rejects an identifier the backend would interpret differently from
+a namespaced path (the GitLab implementation rejects a bare numeric project id and
+lowercases, because GitLab resolves paths case-insensitively) and returns a stable
+canonical form; configured repository patterns must match that form. The git proxy
+applies the same provider method in `parseRoute`/`RemoteURL`. The file path is
 canonicalized by `validatePath` and the `ref` by `validateRef` (control characters,
 length bound).
 

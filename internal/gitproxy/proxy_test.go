@@ -136,6 +136,16 @@ func (f *fakeProvider) ResolveRef(_ context.Context, _, ref string) (string, err
 	return "", provider.ErrNotFound
 }
 
+// CanonicalRepository models the GitLab provider: lowercase namespaced path,
+// bare numeric id rejected. Proxy tests rely on it to prove the route uses the
+// provider's canonical form.
+func (f *fakeProvider) CanonicalRepository(repo string) (string, error) {
+	if !strings.Contains(repo, "/") {
+		return "", errors.New("must be a namespaced path")
+	}
+	return strings.ToLower(repo), nil
+}
+
 func (f *fakeProvider) MergeBase(_ context.Context, _ string, refs ...string) (string, error) {
 	f.mergeBaseCalls++
 	f.mergeBaseRefs = append(f.mergeBaseRefs, refs...)
@@ -1602,29 +1612,9 @@ func TestRemoteURL(t *testing.T) {
 	}
 }
 
-func TestCanonicalRepoPath(t *testing.T) {
-	valid := map[string]string{
-		"team/app":     "team/app",
-		"Team/App":     "team/app",
-		"team/sub/APP": "team/sub/app",
-	}
-	for in, want := range valid {
-		got, err := canonicalRepoPath(in)
-		if err != nil || got != want {
-			t.Errorf("canonicalRepoPath(%q) = %q, %v; want %q", in, got, err, want)
-		}
-	}
-	invalid := []string{"", "app", "42", "team/../x", "team//x", "team/app.git", "team/ap p"}
-	for _, in := range invalid {
-		if _, err := canonicalRepoPath(in); err == nil {
-			t.Errorf("canonicalRepoPath(%q) accepted an invalid path", in)
-		}
-	}
-}
-
-// TestRouteCanonicalizesRepoCase pins that the repository is lowercased before
-// it reaches the policy: a case-variant of a denied repository must resolve to
-// the denied canonical path (GitLab is case-insensitive), and a case-variant of
+// TestRouteCanonicalizesRepoCase pins that the repository is canonicalized via
+// the provider before it reaches the policy: a case-variant of a denied
+// repository must resolve to the denied canonical path, and a case-variant of
 // an allowed repository must still work.
 func TestRouteCanonicalizesRepoCase(t *testing.T) {
 	u := newUpstream(t, []byte(" advertisement "))

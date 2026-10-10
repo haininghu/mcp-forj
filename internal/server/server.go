@@ -532,11 +532,15 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -598,11 +602,15 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -628,11 +636,15 @@ func (s *Server) getMergeRequestDiff(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRDiff); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -697,11 +709,15 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -746,11 +762,15 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRComment); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -783,11 +803,15 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapRebase); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -823,11 +847,15 @@ func (s *Server) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	p, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRMerge); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -880,7 +908,6 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
 	ref, err := validateRef(in.Ref)
 	if err != nil {
 		return nil, nil, err
@@ -890,6 +917,11 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapRepoRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -945,10 +977,15 @@ func (s *Server) handleGitRemote(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, nil, err
 	}
-	in.Repo = repo
-	if _, err := s.resolveProvider(in.Provider); err != nil {
+	p, err := s.resolveProvider(in.Provider)
+	if err != nil {
 		return nil, nil, err
 	}
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
 	if err := s.guard.Authorize(ctx, in.Provider, in.Repo, policy.CapRepoRead); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
@@ -1041,13 +1078,13 @@ func withStatus(message string, status int) error {
 	return errors.New(message)
 }
 
-// validateRepo validates and canonicalizes a repository path. It rejects
-// absolute paths, backslashes, control characters, empty or relative segments
-// and encoded traversal, and returns the canonical lowercase namespace/project
-// path (a bare numeric project id is rejected because GitLab would read it as
-// an id). The canonical value must be used for both policy matching and the
-// provider call so the two cannot diverge (a mismatch would allow a deny rule
-// to be bypassed).
+// validateRepo performs provider-neutral structural validation of a repository
+// path. It rejects absolute paths, backslashes, control characters, empty or
+// relative segments and encoded traversal, and returns the lexically cleaned
+// path. The provider-specific canonical form is applied afterwards by
+// Provider.CanonicalRepository; the canonical value must be used
+// for both policy matching and the provider call so the two cannot diverge (a
+// mismatch would allow a deny rule to be bypassed).
 func validateRepo(repo string) (string, error) {
 	if repo == "" {
 		return "", errors.New("repo must not be empty")
@@ -1081,21 +1118,10 @@ func validateRepo(repo string) (string, error) {
 			return "", fmt.Errorf("repo %q contains an encoded traversal sequence", repo)
 		}
 	}
-	// GitLab identifies a project by its namespaced path ("namespace/project")
-	// but also accepts a bare numeric project id on the same parameter. A bare
-	// integer would diverge from the policy key: it cannot match a deny literal
-	// such as "group/secret" while the provider resolves it to that very
-	// project. Require a namespaced path so the numeric form is rejected.
-	if !strings.Contains(cleaned, "/") {
-		return "", fmt.Errorf("repo %q must be a namespaced path (namespace/project)", repo)
-	}
-	// GitLab resolves project paths case-insensitively and stores them in their
-	// lowercase canonical form, so lowercase the result. Policy matching and the
-	// provider call must see exactly the same canonical string: a mixed-case
-	// request that differed only in case could otherwise match a broader allow
-	// rule while the provider resolves the denied project. Configured repository
-	// patterns must therefore be lowercase.
-	return strings.ToLower(cleaned), nil
+	// The canonical provider-specific form is applied by
+	// Provider.CanonicalRepository; this function only enforces the
+	// provider-neutral, security-critical structure.
+	return cleaned, nil
 }
 
 // validateRef validates an optional git ref. An empty ref means the default

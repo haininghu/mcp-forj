@@ -203,4 +203,14 @@ type Provider interface {
 	// need not resolve. It must return an error wrapping ErrNotFound when the
 	// branch does not exist.
 	ResolveRef(ctx context.Context, repo, branch string) (string, error)
+
+	// CanonicalRepository returns the canonical authorization key for repo: the
+	// exact repository identifier this provider resolves. The result is used for
+	// BOTH policy matching and the provider call, so the two cannot diverge (a
+	// mismatch would let a deny rule be bypassed). An implementation must reject
+	// an identifier the backend would interpret differently from its namespaced
+	// path (e.g. a bare numeric project id) and otherwise return a stable,
+	// canonical value. Configured repository patterns must match that canonical
+	// form. The caller passes an already structurally validated path.
+	CanonicalRepository(repo string) (string, error)
 }
