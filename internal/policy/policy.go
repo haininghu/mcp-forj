@@ -21,13 +21,14 @@ const (
 	EffectDeny Effect = "deny"
 )
 
-// PathFilter constrains the repository-relative file path with doublestar globs.
-// An empty Include allows all paths (subject to Exclude); Include wins nothing —
-// Exclude always wins over Include.
+// PathFilter constrains one doublestar-matched string dimension, such as a
+// repository-relative file path or a push target branch name. An empty Include
+// allows everything of that dimension (subject to Exclude); Include wins
+// nothing — Exclude always wins over Include.
 type PathFilter struct {
-	// Include lists path globs; when non-empty the path must match one.
+	// Include lists globs; when non-empty the value must match one.
 	Include []string
-	// Exclude lists path globs; the path must match none (exclude wins).
+	// Exclude lists globs; the value must match none (exclude wins).
 	Exclude []string
 }
 
@@ -38,8 +39,10 @@ func (f PathFilter) IsZero() bool {
 
 // CapabilityFilter constrains a granted capability. Tags (Require/Exclude) are
 // matched by exact, case-sensitive equality; path globs (Paths) are matched
-// against a repository-relative file path with doublestar. An empty list imposes
-// no constraint of that kind.
+// against a repository-relative file path with doublestar; branch globs
+// (Branches) are matched against a push target branch name with doublestar and
+// are valid on repo:write only. An empty list imposes no constraint of that
+// kind.
 type CapabilityFilter struct {
 	// Require lists tags the subject must all carry.
 	Require []string
@@ -47,6 +50,9 @@ type CapabilityFilter struct {
 	Exclude []string
 	// Paths constrains the repository-relative file path.
 	Paths PathFilter
+	// Branches constrains the push target branch (repo:write only). A branch
+	// evaluation without an active branch filter denies (fail-closed).
+	Branches PathFilter
 	// NoAIExempt exempts the capability from the .noai default-deny overlay. It
 	// is an override, not a constraint: IsZero ignores it.
 	NoAIExempt bool
@@ -55,7 +61,7 @@ type CapabilityFilter struct {
 // IsZero reports whether the filter imposes no constraints. NoAIExempt is an
 // override and is not a constraint, so it does not affect IsZero.
 func (f CapabilityFilter) IsZero() bool {
-	return len(f.Require) == 0 && len(f.Exclude) == 0 && f.Paths.IsZero()
+	return len(f.Require) == 0 && len(f.Exclude) == 0 && f.Paths.IsZero() && f.Branches.IsZero()
 }
 
 // TagSet is an observed set of tags. Known=false means the tags could not be
@@ -154,6 +160,12 @@ func Build(specs []RuleSpec) (*Policy, error) {
 			if err := validatePathPatterns(grant.Filter.Paths.Exclude); err != nil {
 				return nil, fmt.Errorf("policy: rule %d: capability %q paths.exclude: %w", i, grant.Name, err)
 			}
+			if err := validatePathPatterns(grant.Filter.Branches.Include); err != nil {
+				return nil, fmt.Errorf("policy: rule %d: capability %q branches.include: %w", i, grant.Name, err)
+			}
+			if err := validatePathPatterns(grant.Filter.Branches.Exclude); err != nil {
+				return nil, fmt.Errorf("policy: rule %d: capability %q branches.exclude: %w", i, grant.Name, err)
+			}
 			caps[grant.Name] = grant.Filter
 		}
 		rules = append(rules, Rule{
@@ -182,8 +194,28 @@ func (p *Policy) EvaluateWithTags(repo string, c Capability, tags TagSet) Decisi
 // repo wins. An active tag filter fails closed when the tags are not known; an
 // active path filter fails closed when the path is empty. Both tag and path
 // constraints must pass; a deny path wins over an allow path. When no rule
-// matches, access is denied.
+// matches, access is denied. This entry point has no branch context, so a
+// branch filter is not applied; use EvaluateResourceBranch to authorize an
+// operation that names a branch.
 func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path string) Decision {
+	return p.evaluateResource(repo, c, tags, path, false, "")
+}
+
+// EvaluateResourceBranch is EvaluateResource extended with a branch dimension.
+// A non-empty branch requires a matching branch filter (a grant without one
+// denies, so an unfiltered repo:write grant never allows a push); an empty
+// branch against an active branch filter denies ("branch required"). Tags,
+// path and branch must all pass, checked in that order; the branch filter's
+// exclude list wins over its include list.
+func (p *Policy) EvaluateResourceBranch(repo string, c Capability, tags TagSet, path, branch string) Decision {
+	return p.evaluateResource(repo, c, tags, path, true, branch)
+}
+
+// evaluateResource is the shared first-match-wins evaluation. When withBranch
+// is false the caller has no branch context and the branch dimension imposes
+// nothing; when true the branch rules apply to the given branch (which may be
+// empty).
+func (p *Policy) evaluateResource(repo string, c Capability, tags TagSet, path string, withBranch bool, branch string) Decision {
 	for _, rule := range p.rules {
 		if !ruleMatches(rule, repo) {
 			continue
@@ -199,9 +231,6 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 			}
 		}
 		noai := filter.NoAIExempt
-		if filter.IsZero() {
-			return Decision{Allowed: true, CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "capability granted"}
-		}
 
 		if len(filter.Require) > 0 || len(filter.Exclude) > 0 {
 			if !tags.Known {
@@ -224,11 +253,32 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "path required"}
 			}
 			// Exclude wins over include.
-			if matchesAnyPath(filter.Paths.Exclude, path) {
+			if matchesAnyGlob(filter.Paths.Exclude, path) {
 				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "path excluded"}
 			}
-			if len(filter.Paths.Include) > 0 && !matchesAnyPath(filter.Paths.Include, path) {
+			if len(filter.Paths.Include) > 0 && !matchesAnyGlob(filter.Paths.Include, path) {
 				return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "path not allowed"}
+			}
+		}
+
+		if withBranch {
+			if filter.Branches.IsZero() {
+				// A named branch needs a branch filter to match against; without
+				// one the decision denies (fail-closed, variant b).
+				if branch != "" {
+					return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "branch filter required"}
+				}
+			} else {
+				if branch == "" {
+					return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "branch required"}
+				}
+				// Exclude wins over include.
+				if matchesAnyGlob(filter.Branches.Exclude, branch) {
+					return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "branch excluded"}
+				}
+				if len(filter.Branches.Include) > 0 && !matchesAnyGlob(filter.Branches.Include, branch) {
+					return Decision{CapabilityGranted: true, Matched: true, NoAIExempt: noai, Reason: "branch not allowed"}
+				}
 			}
 		}
 
@@ -237,9 +287,9 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 	return Decision{Matched: false, Reason: "no matching rule"}
 }
 
-func matchesAnyPath(patterns []string, path string) bool {
+func matchesAnyGlob(patterns []string, value string) bool {
 	for _, pattern := range patterns {
-		ok, err := doublestar.Match(pattern, path)
+		ok, err := doublestar.Match(pattern, value)
 		if err != nil {
 			// Patterns are validated at config load; treat an unexpected match
 			// error as a match so exclude patterns stay fail-closed.
@@ -318,8 +368,8 @@ func (p *Policy) GrantsAnywhere(c Capability) bool {
 }
 
 // HasFilter reports whether the first matching rule is an allow rule that grants
-// capability c with a non-zero filter (tags and/or paths). It is false for a deny
-// rule, no matching rule, or a missing/unfiltered capability. It is used to
+// capability c with a non-zero filter (tags, paths or branches). It is false for a
+// deny rule, no matching rule, or a missing/unfiltered capability. It is used to
 // decide whether tag information must be fetched before evaluating the
 // capability.
 func (p *Policy) HasFilter(repo string, c Capability) bool {
@@ -432,6 +482,10 @@ func cloneFilter(f CapabilityFilter) CapabilityFilter {
 		Paths: PathFilter{
 			Include: append([]string(nil), f.Paths.Include...),
 			Exclude: append([]string(nil), f.Paths.Exclude...),
+		},
+		Branches: PathFilter{
+			Include: append([]string(nil), f.Branches.Include...),
+			Exclude: append([]string(nil), f.Branches.Exclude...),
 		},
 		NoAIExempt: f.NoAIExempt,
 	}

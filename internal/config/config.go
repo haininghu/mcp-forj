@@ -29,7 +29,6 @@ const (
 	defaultRequestTimeout = 30 * time.Second
 	defaultProjectScope   = "accessible"
 	defaultGitProxyListen = "127.0.0.1:8417"
-	defaultGitProxyBranch = "ai/**"
 )
 
 // Config is the root configuration.
@@ -75,15 +74,6 @@ type GitProxyConfig struct {
 	// only, because the Basic-auth token would otherwise cross the network in
 	// clear text.
 	AllowInsecure bool `yaml:"allow_insecure"`
-	// Branches constrains which branches a push may target.
-	Branches BranchesConfig `yaml:"branches"`
-}
-
-// BranchesConfig constrains the branches a push may target.
-type BranchesConfig struct {
-	// Allow lists doublestar glob patterns matched against the branch name
-	// (the part after "refs/heads/"). An empty list allows no branch.
-	Allow []string `yaml:"allow"`
 }
 
 // NoAIConfig configures the .noai marker guard.
@@ -133,6 +123,9 @@ type RuleConfig struct {
 //	      exclude: [do-not-touch]
 //	  - repo:read:
 //	      noai: allow
+//	  - repo:write:
+//	      branches:
+//	        include: ["ai/**"]
 type CapabilityGrant struct {
 	// Name is the capability name.
 	Name string
@@ -142,12 +135,16 @@ type CapabilityGrant struct {
 	Exclude []string
 	// Paths constrains the repository-relative file path (repo:read/repo:write).
 	Paths PathFilter
+	// Branches constrains the push target branch (repo:write only). Without a
+	// branch filter a repo:write grant allows no push (fail-closed).
+	Branches PathFilter
 	// NoAIExempt, set by "noai: allow", exempts the capability from the .noai
 	// default-deny overlay.
 	NoAIExempt bool
 }
 
-// PathFilter is the nested path constraint for a capability grant.
+// PathFilter is a nested glob constraint for a capability grant, used for the
+// paths (file path) and branches (push target branch) dimensions.
 type PathFilter struct {
 	// Include lists path globs; when non-empty the file path must match one.
 	Include []string
@@ -206,6 +203,12 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 					return fmt.Errorf("capability %q: paths: %w", name, err)
 				}
 				g.Paths = paths
+			case "branches":
+				branches, err := decodePathFilter(val)
+				if err != nil {
+					return fmt.Errorf("capability %q: branches: %w", name, err)
+				}
+				g.Branches = branches
 			case "noai":
 				var value string
 				if err := val.Decode(&value); err != nil {
@@ -464,8 +467,24 @@ func (c *Config) Validate() error {
 				}
 				grant.Paths.Include, grant.Paths.Exclude = include, excludePaths
 
-				if len(require) == 0 && len(exclude) == 0 && len(include) == 0 && len(excludePaths) == 0 {
+				includeBranches, err := normalizePaths(p.Name, j, grant.Name, "branches.include", grant.Branches.Include)
+				if err != nil {
+					return err
+				}
+				excludeBranches, err := normalizePaths(p.Name, j, grant.Name, "branches.exclude", grant.Branches.Exclude)
+				if err != nil {
+					return err
+				}
+				grant.Branches.Include, grant.Branches.Exclude = includeBranches, excludeBranches
+
+				if len(require) == 0 && len(exclude) == 0 && len(include) == 0 && len(excludePaths) == 0 &&
+					len(includeBranches) == 0 && len(excludeBranches) == 0 {
 					continue
+				}
+				if len(includeBranches) > 0 || len(excludeBranches) > 0 {
+					if grant.Name != string(policy.CapRepoWrite) {
+						return fmt.Errorf("config: provider %q rule %d: branch filters are only supported for capability %q, not %q", p.Name, j, policy.CapRepoWrite, grant.Name)
+					}
 				}
 				if len(include) > 0 || len(excludePaths) > 0 {
 					if grant.Name != string(policy.CapRepoRead) && grant.Name != string(policy.CapRepoWrite) {
@@ -496,9 +515,9 @@ func (c *Config) Validate() error {
 
 // validate checks the git proxy section. It runs only when the proxy is
 // enabled. Defaults are applied before validation, so an unset listen address
-// and an absent branches.allow never fail here; an explicitly empty
-// branches.allow ([]) is not defaulted and is rejected, keeping a deliberate
-// "allow nothing" configuration a visible error instead of a silent default.
+// never fails here. Push target branches are no longer configured here: they
+// are governed by the branches filter of the repo:write capability in the
+// provider rules (a repo:write grant without a branch filter allows no push).
 // The token is optional: without it the proxy authenticates nobody and must
 // bind loopback only; a non-loopback listen therefore requires a token (and,
 // for plain HTTP, TLS or allow_insecure as before).
@@ -512,17 +531,6 @@ func (g *GitProxyConfig) validate() error {
 	}
 	if g.Token.Value() == "" && !listenIsLoopback(g.Listen) {
 		return fmt.Errorf("config: git_proxy: token is required for a non-loopback listen address %q", g.Listen)
-	}
-	if len(g.Branches.Allow) == 0 {
-		return fmt.Errorf("config: git_proxy: branches.allow must not be empty")
-	}
-	for _, pattern := range g.Branches.Allow {
-		if pattern == "" {
-			return fmt.Errorf("config: git_proxy: branches.allow: empty pattern")
-		}
-		if !doublestar.ValidatePattern(pattern) {
-			return fmt.Errorf("config: git_proxy: branches.allow: invalid pattern %q", pattern)
-		}
 	}
 	if (g.TLSCert == "") != (g.TLSKey == "") {
 		return fmt.Errorf("config: git_proxy: tls_cert and tls_key must be set together")
@@ -607,9 +615,6 @@ func (c *Config) applyDefaults() {
 	if c.Server.GitProxy.Enabled {
 		if c.Server.GitProxy.Listen == "" {
 			c.Server.GitProxy.Listen = defaultGitProxyListen
-		}
-		if c.Server.GitProxy.Branches.Allow == nil {
-			c.Server.GitProxy.Branches.Allow = []string{defaultGitProxyBranch}
 		}
 	}
 }

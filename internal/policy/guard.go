@@ -109,6 +109,38 @@ func (g *Guard) AuthorizeResourceRef(ctx context.Context, providerName, repo str
 	return g.checkMarkerRefs(ctx, providerName, repo, ref)
 }
 
+// AuthorizeBranch checks capability c for repo with the observed tags, an empty
+// path and the given branch. It evaluates the branch filter and then runs the
+// .noai marker check on the default branch and on branch (fail-closed). A
+// branch-less operation (empty branch) against an active branch filter denies,
+// and a named branch against a grant without a branch filter denies: push
+// access is fail-closed in both directions. Every decision is logged; tokens
+// are never logged.
+func (g *Guard) AuthorizeBranch(ctx context.Context, providerName, repo string, c Capability, tags TagSet, branch string) error {
+	p, ok := g.policies[providerName]
+	if !ok {
+		g.logDecision(providerName, repo, c, "deny", "unknown provider")
+		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+
+	decision := p.EvaluateResourceBranch(repo, c, tags, "", branch)
+	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
+
+	if !decision.Matched {
+		return fmt.Errorf("%w: %s", ErrUnknownRepository, repo)
+	}
+	if !decision.Allowed {
+		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
+	}
+
+	// .noai is a capability-level default-deny overlay: every capability is
+	// denied on a .noai repository unless the matched grant exempts it.
+	if decision.NoAIExempt {
+		return nil
+	}
+	return g.checkMarkerRefs(ctx, providerName, repo, branch)
+}
+
 // CheckNoAI enforces the .noai default-deny overlay for a repository whose
 // matched grant carries the given exemption. exempt=true skips the check. It is
 // used by tools that evaluate tags per item or per candidate and therefore

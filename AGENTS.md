@@ -94,13 +94,23 @@ Authorization is the product. These rules are security-critical:
 7. **Tag filters** match exact, case-sensitive values: GitLab MR **labels** for `mr:*`, project
    **topics** for `repo:*`. When the information is unknown, the decision fails closed.
 8. **Path filters** (doublestar) apply only to `repo:read`/`repo:write`; `paths.exclude` wins over
-   `paths.include`, and an active filter with an empty path fails closed.
+   `paths.include`, and an active filter with an empty path fails closed. Git traffic cannot
+   enforce path filters, so an active `paths` filter means **no git access** (fetch/clone/push) for
+   that capability (fail-closed).
 9. **Data hygiene.** Labels, topics and tokens are never returned in tool output or logs.
 10. **Error hygiene.** Provider errors are mapped to safe messages with the numeric HTTP status;
     forbidden errors name the resource permission the operation needs.
 11. **`.noai` is an integrity control, not a confidentiality control.** It blocks non-exempt
     operations; it does **not** stop content from reaching the agent through exempted reads
     (`repo:read`, `mr:read`, `mr:diff`). Confidentiality is enforced by the capability policy.
+12. **Branch control lives in the `repo:write` rule.** `branches` (doublestar, exclude wins over
+    include) is accepted **only** on `repo:write` (config error anywhere else). A `repo:write`
+    grant **without** a `branches` filter allows **no push** (fail-closed); every unique push
+    target branch is authorized with `Guard.AuthorizeBranch`, which also checks `.noai` on the
+    default branch and the target branch. Branch-less evaluations (`Evaluate`, `Authorize`,
+    `AuthorizeResource`, push discovery) do not apply the branch dimension. The proxy additionally
+    hard-blocks the default branch (not configurable), non-`refs/heads/` refs, deletes and
+    non-fast-forwards. There is **no** global `git_proxy.branches` allowlist.
 
 ## Authorization flow
 
@@ -123,6 +133,9 @@ registered only while the git proxy is enabled, gates `repo:read` via `Guard.Aut
 fail closed, `.noai` overlay included) before calling the proxy resolver, and never returns the
 proxy token. The proxy token is **optional**: without it the proxy binds loopback only and performs
 no authentication (`git_remote` then reports `auth.type: "none"`); with it clients use HTTP Basic.
+Fetch and push discovery use `Guard.Authorize` (branch-less context); each unique push target
+branch is authorized with `Guard.AuthorizeBranch` against the `repo:write` `branches` filter —
+a grant without one denies every push and a path-filtered grant gets no git access at all.
 
 ## Where to look
 

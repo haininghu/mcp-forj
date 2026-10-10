@@ -183,6 +183,12 @@ func TestBuildValidation(t *testing.T) {
 		{"empty pattern", []RuleSpec{{Repositories: []string{""}, Effect: "allow"}}},
 		{"unknown capability", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: grants("repo:teleport")}}},
 		{"invalid pattern", []RuleSpec{{Repositories: []string{"a/["}, Effect: "allow"}}},
+		{"invalid branch include pattern", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Include: []string{"ai/["}}}},
+		}}}},
+		{"empty branch exclude pattern", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Exclude: []string{""}}}},
+		}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -344,6 +350,84 @@ func TestEvaluateResource(t *testing.T) {
 				t.Errorf("EvaluateResource = %+v, want Allowed=%v Reason=%q", d, tt.wantAllowed, tt.wantReason)
 			}
 		})
+	}
+}
+
+// branchGrant builds a policy with a single team/app allow rule granting
+// repo:write with the given filter.
+func branchGrant(t *testing.T, f CapabilityFilter) *Policy {
+	t.Helper()
+	return mustBuild(t, []RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []CapabilityGrant{{Name: CapRepoWrite, Filter: f}},
+	}})
+}
+
+func TestEvaluateResourceBranch(t *testing.T) {
+	withBranches := CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}}
+	tests := []struct {
+		name        string
+		filter      CapabilityFilter
+		tags        TagSet
+		path        string
+		branch      string
+		wantAllowed bool
+		wantReason  string
+	}{
+		{"branch filter missing denies a named branch (fail-closed)", CapabilityFilter{}, TagSet{}, "", "ai/fix", false, "branch filter required"},
+		{"no branch and no filter imposes no branch constraint", CapabilityFilter{}, TagSet{}, "", "", true, "capability granted"},
+		{"include match", withBranches, TagSet{}, "", "ai/fix", true, "capability granted"},
+		{"include non-match", withBranches, TagSet{}, "", "feature/x", false, "branch not allowed"},
+		{"empty branch with active filter fails closed", withBranches, TagSet{}, "", "", false, "branch required"},
+		{"exclude match", CapabilityFilter{Branches: PathFilter{Exclude: []string{"ai/wip/**"}}}, TagSet{}, "", "ai/wip/tmp", false, "branch excluded"},
+		{"exclude-only other branch allowed", CapabilityFilter{Branches: PathFilter{Exclude: []string{"ai/wip/**"}}}, TagSet{}, "", "ai/fix", true, "capability granted"},
+		{"exclude wins over include", CapabilityFilter{Branches: PathFilter{Include: []string{"**"}, Exclude: []string{"ai/wip/**"}}}, TagSet{}, "", "ai/wip/tmp", false, "branch excluded"},
+		{"path filter runs before branch", CapabilityFilter{Paths: PathFilter{Include: []string{"src/**"}}, Branches: withBranches.Branches}, TagSet{}, "", "ai/fix", false, "path required"},
+		{"unknown tags run before branch", CapabilityFilter{Require: []string{"ai-ok"}, Branches: withBranches.Branches}, TagSet{}, "", "ai/fix", false, "tag information unavailable"},
+		{"tags paths and branch all pass", CapabilityFilter{Require: []string{"ai-ok"}, Paths: PathFilter{Include: []string{"src/**"}}, Branches: withBranches.Branches},
+			TagSet{Known: true, Values: []string{"ai-ok"}}, "src/a.go", "ai/fix", true, "capability granted"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := branchGrant(t, tt.filter).EvaluateResourceBranch("team/app", CapRepoWrite, tt.tags, tt.path, tt.branch)
+			if d.Allowed != tt.wantAllowed || d.Reason != tt.wantReason {
+				t.Errorf("EvaluateResourceBranch = %+v, want Allowed=%v Reason=%q", d, tt.wantAllowed, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestEvaluateResourceIgnoresBranchFilter pins the branch-less evaluation
+// context: Evaluate/Authorize-style calls carry no branch, so a branch filter
+// imposes no constraint there and the decision matches the pre-branch rules.
+func TestEvaluateResourceIgnoresBranchFilter(t *testing.T) {
+	p := branchGrant(t, CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}})
+	for _, d := range []Decision{
+		p.Evaluate("team/app", CapRepoWrite),
+		p.EvaluateResource("team/app", CapRepoWrite, TagSet{}, ""),
+	} {
+		if !d.Allowed || d.Reason != "capability granted" {
+			t.Errorf("branch-less evaluation = %+v, want allowed (no branch context)", d)
+		}
+	}
+	if !p.HasFilter("team/app", CapRepoWrite) {
+		t.Error("HasFilter(branch-filtered grant) = false, want true")
+	}
+}
+
+func TestCapabilityFilterBranchesIsZeroAndClone(t *testing.T) {
+	f := CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}}
+	if f.IsZero() {
+		t.Error("branch filter must make the capability filter non-zero")
+	}
+	c := cloneFilter(f)
+	if len(c.Branches.Include) != 1 || c.Branches.Include[0] != "ai/**" {
+		t.Errorf("cloneFilter dropped branches: %+v", c)
+	}
+	c.Branches.Include[0] = "mutated"
+	if f.Branches.Include[0] != "ai/**" {
+		t.Error("cloneFilter did not copy the branches slice")
 	}
 }
 

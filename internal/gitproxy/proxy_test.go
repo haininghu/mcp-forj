@@ -216,27 +216,28 @@ func (u *upstream) last() recorded {
 }
 
 // newTestServer builds a Server whose team/* allow rule grants exactly the given
-// capabilities with no filter (no path, no tag, not .noai-exempt).
-func newTestServer(t *testing.T, p *fakeProvider, grants []policy.Capability, branches []string) *Server {
+// capabilities with no filter (no branch, no path, no tag, not .noai-exempt).
+func newTestServer(t *testing.T, p *fakeProvider, grants []policy.Capability) *Server {
 	t.Helper()
 	caps := make([]policy.CapabilityGrant, len(grants))
 	for i, c := range grants {
 		caps[i] = policy.CapabilityGrant{Name: c}
 	}
-	return newTestServerGrants(t, p, caps, branches)
+	return newTestServerGrants(t, p, caps)
 }
 
 // newTestServerGrants builds a Server from explicit capability grants so a test
-// can attach a filter (for example the noai: allow exemption or a path/tag
-// constraint whose behavior in the proxy is fail-closed).
-func newTestServerGrants(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant, branches []string) *Server {
+// can attach a filter (the repo:write branches filter, the noai: allow
+// exemption, or a path/tag constraint whose behavior in the proxy is
+// fail-closed).
+func newTestServerGrants(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant) *Server {
 	t.Helper()
-	return newTestServerGrantsToken(t, p, grants, branches, proxyToken)
+	return newTestServerGrantsToken(t, p, grants, proxyToken)
 }
 
 // newTestServerGrantsToken is newTestServerGrants with an explicit proxy token;
 // an empty token selects the token-less loopback-only mode.
-func newTestServerGrantsToken(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant, branches []string, token string) *Server {
+func newTestServerGrantsToken(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant, token string) *Server {
 	t.Helper()
 	pol, err := policy.Build([]policy.RuleSpec{{
 		Repositories: []string{"team/*"},
@@ -257,12 +258,23 @@ func newTestServerGrantsToken(t *testing.T, p *fakeProvider, grants []policy.Cap
 		Listen:    "127.0.0.1:0",
 		PublicURL: "https://gitproxy.example.com/",
 		Token:     token,
-		Branches:  branches,
 	}, registry, guard, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return s
+}
+
+// branchFilter builds a repo:write grant whose branches filter carries the
+// given include and exclude globs: pushable branches are policy configuration
+// now, not a proxy setting.
+func branchFilter(include, exclude []string) []policy.CapabilityGrant {
+	return []policy.CapabilityGrant{{
+		Name: policy.CapRepoWrite,
+		Filter: policy.CapabilityFilter{
+			Branches: policy.PathFilter{Include: include, Exclude: exclude},
+		},
+	}}
 }
 
 func newFetchProvider(remoteBase string) *fakeProvider {
@@ -307,7 +319,7 @@ func pushBodyMulti(lines ...string) []byte {
 func TestAuthRequired(t *testing.T) {
 	u := newUpstream(t, []byte(" advertisement "))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	target := "/git/" + providerName + "/" + repo + ".git/info/refs?service=git-upload-pack"
 
@@ -342,7 +354,7 @@ func TestNoTokenModeSkipsAuthentication(t *testing.T) {
 	u := newUpstream(t, ad)
 	p := newFetchProvider(u.serverURL)
 	s := newTestServerGrantsToken(t, p,
-		[]policy.CapabilityGrant{{Name: policy.CapRepoRead}}, []string{"ai/**"}, "")
+		[]policy.CapabilityGrant{{Name: policy.CapRepoRead}}, "")
 
 	target := "/git/" + providerName + "/" + repo + ".git/info/refs?service=git-upload-pack"
 
@@ -369,10 +381,10 @@ func TestNoTokenModeSkipsAuthentication(t *testing.T) {
 
 func TestAuthRequiredReflectsToken(t *testing.T) {
 	p := newFetchProvider("http://upstream.invalid")
-	if !newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"}).AuthRequired() {
+	if !newTestServer(t, p, []policy.Capability{policy.CapRepoRead}).AuthRequired() {
 		t.Error("AuthRequired() = false with a token, want true")
 	}
-	s := newTestServerGrantsToken(t, p, []policy.CapabilityGrant{{Name: policy.CapRepoRead}}, []string{"ai/**"}, "")
+	s := newTestServerGrantsToken(t, p, []policy.CapabilityGrant{{Name: policy.CapRepoRead}}, "")
 	if s.AuthRequired() {
 		t.Error("AuthRequired() = true without a token, want false")
 	}
@@ -383,7 +395,7 @@ func TestFetchInfoRefsForwardsWithProviderAuth(t *testing.T) {
 	u := newUpstream(t, ad)
 	u.contentType = "application/x-git-upload-pack-advertisement"
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	rec := doRequest(t, s, http.MethodGet,
 		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
@@ -427,7 +439,7 @@ func TestInboundCredentialHeadersStripped(t *testing.T) {
 	ad := []byte("001e# service=git-upload-pack\n0000")
 	u := newUpstream(t, ad)
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil)
@@ -471,7 +483,7 @@ func TestInboundCredentialHeadersStripped(t *testing.T) {
 func TestFetchUploadPackPostForwardsBody(t *testing.T) {
 	u := newUpstream(t, []byte("pack-negotiation-response"))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	body := []byte("want " + sha1New + "\n")
 	rec := doRequest(t, s, http.MethodPost,
@@ -495,7 +507,7 @@ func TestRepositoryDeniedByPolicy(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
 	// repo:read only: every write path must be denied by policy.
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	rec := doRequest(t, s, http.MethodPost,
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack", pushBody(sha1Zero, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
@@ -518,7 +530,7 @@ func TestNoAIMarkerDenies(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
 	p.marker = true
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead, policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead, policy.CapRepoWrite})
 
 	rec := doRequest(t, s, http.MethodGet,
 		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
@@ -539,7 +551,7 @@ func TestNoAIMarkerDenies(t *testing.T) {
 func TestReceivePackDiscoveryRequiresWrite(t *testing.T) {
 	u := newUpstream(t, []byte("advertisement"))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	target := "/git/" + providerName + "/" + repo + ".git/info/refs?service=git-receive-pack"
 	rec := doRequest(t, s, http.MethodGet, target, nil, "git", proxyToken)
@@ -548,7 +560,7 @@ func TestReceivePackDiscoveryRequiresWrite(t *testing.T) {
 	}
 
 	sWrite := newTestServer(t, newFetchProvider(u.serverURL),
-		[]policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+		[]policy.Capability{policy.CapRepoWrite})
 	rec = doRequest(t, sWrite, http.MethodGet, target, nil, "git", proxyToken)
 	if rec.Code != http.StatusOK {
 		t.Errorf("receive-pack discovery with repo:write = %d, want 200", rec.Code)
@@ -561,7 +573,7 @@ func TestReceivePackDiscoveryRequiresWrite(t *testing.T) {
 func TestPushAllowedCreateForwardsBodyByteExact(t *testing.T) {
 	u := newUpstream(t, []byte("000cunpack ok\n0009"))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/fix")
 	rec := doRequest(t, s, http.MethodPost,
@@ -586,45 +598,45 @@ func TestPushAllowedCreateForwardsBodyByteExact(t *testing.T) {
 
 func TestPushDeniedCases(t *testing.T) {
 	tests := []struct {
-		name   string
-		old    string
-		new    string
-		ref    string
-		branch string
-		tips   map[string]string
-		mb     string
-		def    string
+		name    string
+		old     string
+		new     string
+		ref     string
+		include []string
+		tips    map[string]string
+		mb      string
+		def     string
 	}{
 		{
-			// "main" is allowlisted here so the default-branch rule rejects it,
-			// not the allowlist.
+			// The branch filter allows "main" here so the hard-coded
+			// default-branch rule rejects it, not the filter.
 			name: "default branch", old: sha1Old, new: sha1New,
-			ref: "refs/heads/main", branch: "main", def: "main",
+			ref: "refs/heads/main", include: []string{"**"}, def: "main",
 		},
 		{
-			name: "branch outside allowlist", old: sha1Zero, new: sha1New,
-			ref: "refs/heads/feature/x", branch: "ai/**", def: "main",
+			name: "branch outside policy filter", old: sha1Zero, new: sha1New,
+			ref: "refs/heads/feature/x", include: []string{"ai/**"}, def: "main",
 		},
 		{
 			name: "delete", old: sha1Old, new: sha1Zero,
-			ref: "refs/heads/ai/fix", branch: "ai/**", def: "main",
+			ref: "refs/heads/ai/fix", include: []string{"ai/**"}, def: "main",
 		},
 		{
 			name: "non fast-forward", old: sha1Old, new: sha1New,
-			ref: "refs/heads/ai/fix", branch: "ai/**",
+			ref: "refs/heads/ai/fix", include: []string{"ai/**"},
 			tips: map[string]string{"ai/fix": sha1Old}, mb: notFastFwd, def: "main",
 		},
 		{
 			name: "tag ref", old: sha1Zero, new: sha1New,
-			ref: "refs/tags/v1", branch: "ai/**", def: "main",
+			ref: "refs/tags/v1", include: []string{"ai/**"}, def: "main",
 		},
 		{
 			name: "note ref", old: sha1Zero, new: sha1New,
-			ref: "refs/notes/ai", branch: "ai/**", def: "main",
+			ref: "refs/notes/ai", include: []string{"ai/**"}, def: "main",
 		},
 		{
 			name: "invalid branch name", old: sha1Zero, new: sha1New,
-			ref: "refs/heads/ai/bad..name", branch: "ai/**", def: "main",
+			ref: "refs/heads/ai/bad..name", include: []string{"ai/**"}, def: "main",
 		},
 	}
 	for _, tc := range tests {
@@ -636,7 +648,7 @@ func TestPushDeniedCases(t *testing.T) {
 			for k, v := range tc.tips {
 				p.tips[k] = v
 			}
-			s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{tc.branch})
+			s := newTestServerGrants(t, p, branchFilter(tc.include, nil))
 
 			rec := doRequest(t, s, http.MethodPost,
 				"/git/"+providerName+"/"+repo+".git/git-receive-pack",
@@ -660,7 +672,7 @@ func TestPushFastForwardAllowed(t *testing.T) {
 	p := newFetchProvider(u.serverURL)
 	p.tips["ai/fix"] = branchTip
 	p.mergeBase = branchTip // merge base equals the tip: fast-forward
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	body := pushBody(branchTip, sha1New, "refs/heads/ai/fix")
 	rec := doRequest(t, s, http.MethodPost,
@@ -681,7 +693,7 @@ func TestPushUnresolvableBranchFailsClosed(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
 	p.tipsErr["ai/fix"] = &provider.HTTPError{Status: http.StatusNotFound, Err: provider.ErrNotFound}
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	rec := doRequest(t, s, http.MethodPost,
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
@@ -699,7 +711,7 @@ func TestPushMergeBaseFailureDenies(t *testing.T) {
 	p := newFetchProvider(u.serverURL)
 	p.tips["ai/fix"] = sha1Old
 	p.mergeBaseErr = errors.New("provider unavailable")
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	rec := doRequest(t, s, http.MethodPost,
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
@@ -712,10 +724,41 @@ func TestPushMergeBaseFailureDenies(t *testing.T) {
 	}
 }
 
+// TestPushStaleBaseDenied pins the advertised-base check: an update whose old
+// object id differs from the provider's current tip is a stale base (a
+// non-fast-forward/force push in disguise) and denies with the branch-policy 403
+// directly after ResolveRef — the merge base is never asked, because the base
+// comparison already fails.
+func TestPushStaleBaseDenied(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	// The client advertises sha1Old as its base, but the branch moved on.
+	p.tips["ai/fix"] = strings.Repeat("c", 40)
+	// mergeBase would claim a fast-forward; the stale base must deny before it.
+	p.mergeBase = strings.Repeat("c", 40)
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
+
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Old, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("push from a stale base = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if want := "git proxy: push rejected by branch policy\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the branch-policy denial %q", rec.Body.String(), want)
+	}
+	if p.mergeBaseCalls != 0 {
+		t.Errorf("merge base calls = %d, want 0: the stale base denies before the merge base", p.mergeBaseCalls)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+}
+
 func TestPushMalformedCommandSection(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	rec := doRequest(t, s, http.MethodPost,
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
@@ -740,7 +783,7 @@ func TestPushNoAIMarkerOnTargetBranchDenies(t *testing.T) {
 	p := newFetchProvider(u.serverURL)
 	// Marker only on the push target branch; the default branch stays clean.
 	p.markersByRef = map[string]bool{"ai/fix": true}
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/fix")
 	rec := doRequest(t, s, http.MethodPost,
@@ -779,8 +822,11 @@ func TestPushNoAIExemptGrantAllowsMarkedBranch(t *testing.T) {
 	p := newFetchProvider(u.serverURL)
 	p.markersByRef = map[string]bool{"": true, "ai/fix": true}
 	s := newTestServerGrants(t, p, []policy.CapabilityGrant{
-		{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{NoAIExempt: true}},
-	}, []string{"ai/**"})
+		{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{
+			NoAIExempt: true,
+			Branches:   policy.PathFilter{Include: []string{"ai/**"}},
+		}},
+	})
 
 	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/fix")
 	rec := doRequest(t, s, http.MethodPost,
@@ -803,7 +849,7 @@ func TestPushNoAIExemptGrantAllowsMarkedBranch(t *testing.T) {
 func TestPushDuplicateTargetBranchAuthorizedOnce(t *testing.T) {
 	u := newUpstream(t, []byte("000cunpack ok\n0009"))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 
 	// Two creates that target the same branch: one capability line with caps, one
 	// plain command line, both refs/heads/ai/fix.
@@ -828,16 +874,19 @@ func TestPushDuplicateTargetBranchAuthorizedOnce(t *testing.T) {
 // TestPushTagRefAuthorizedAtRepoLevel documents the fail-closed handling of a
 // non-branch ref: with repo:write granted it is authorized at repository level
 // (the default-branch marker only, because a tag maps to no branch), then
-// checkPush rejects it as a non-branch ref with the branch-policy 403. A
-// repository the client cannot write instead yields the generic "not accessible"
-// 403 before any marker read, because the capability layer denies first.
+// checkPush rejects it as a non-branch ref with the branch-policy 403. The
+// grant carries a branches filter here: repository-level authorization carries
+// no branch context, so the filter does not apply and only marks the ref type
+// for rejection. A repository the client cannot write instead yields the
+// generic "not accessible" 403 before any marker read, because the capability
+// layer denies first.
 func TestPushTagRefAuthorizedAtRepoLevel(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 
 	// repo:write granted: authorization passes on a clean default branch, the
 	// marker is checked at repository level only (ref ""), then checkPush denies.
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
 	body := pushBody(sha1Zero, sha1New, "refs/tags/v1")
 	rec := doRequest(t, s, http.MethodPost,
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
@@ -857,7 +906,7 @@ func TestPushTagRefAuthorizedAtRepoLevel(t *testing.T) {
 	// Without repo:write the capability layer denies before the marker read, so
 	// FileExists runs zero times and the answer is the generic denial.
 	pNo := newFetchProvider(u.serverURL)
-	sNo := newTestServer(t, pNo, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	sNo := newTestServer(t, pNo, []policy.Capability{policy.CapRepoRead})
 	rec = doRequest(t, sNo, http.MethodPost,
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
 	if rec.Code != http.StatusForbidden {
@@ -871,11 +920,285 @@ func TestPushTagRefAuthorizedAtRepoLevel(t *testing.T) {
 	}
 }
 
+// TestPushBranchWithoutBranchesFilterDenied pins the fail-closed push rule: a
+// repo:write grant without a branches filter allows no push. The denial comes
+// from the policy (AuthorizeBranch → "branch filter required") before any
+// provider metadata read or marker check, so the answer is the generic
+// "not accessible" 403 and no ref detail leaks.
+func TestPushBranchWithoutBranchesFilterDenied(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite})
+
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("push without a branches filter = %d, want 403", rec.Code)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+	// Policy denial precedes the marker check and every provider metadata read.
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none (denied before the marker check)", p.fileExistsRefs)
+	}
+	if p.defaultBranchCalls != 0 || p.resolveCalls != 0 || p.mergeBaseCalls != 0 {
+		t.Errorf("metadata calls = default %d resolve %d mergeBase %d, want 0/0/0",
+			p.defaultBranchCalls, p.resolveCalls, p.mergeBaseCalls)
+	}
+}
+
+// TestPushBranchExcludeAndNonMatchDenied pins the branch filter in the proxy:
+// branches.exclude wins over branches.include, and a branch outside the include
+// list denies alike. Both denials answer the generic policy 403; a branch the
+// same filter allows is still forwarded.
+func TestPushBranchExcludeAndNonMatchDenied(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	tests := []struct {
+		name    string
+		include []string
+		exclude []string
+		ref     string
+	}{
+		{"exclude wins over include", []string{"**"}, []string{"ai/wip/**"}, "refs/heads/ai/wip/tmp"},
+		{"include non-match", []string{"ai/**"}, nil, "refs/heads/bot/x"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newFetchProvider(u.serverURL)
+			s := newTestServerGrants(t, p, branchFilter(tc.include, tc.exclude))
+			rec := doRequest(t, s, http.MethodPost,
+				"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+				pushBody(sha1Zero, sha1New, tc.ref), "git", proxyToken)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("push %s = %d, want 403", tc.ref, rec.Code)
+			}
+			if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+				t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+			}
+		})
+	}
+
+	// A branch that passes the exclude filter (not excluded) is forwarded.
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, branchFilter([]string{"**"}, []string{"ai/wip/**"}))
+	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/fix")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("allowed branch through exclude filter = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+}
+
+// TestPushMalformedBranchNotAuthorizedViaGuard pins the validation order of
+// authorizePushRefs: a syntactically invalid branch name is never handed to
+// Guard.AuthorizeBranch, so the guard performs no provider marker read at an
+// unvalidated ref — even when the name would match the branches filter. The
+// denial comes from checkPush instead, and the client-visible answer stays a
+// 403 (the branch-policy one, as before this reordering).
+func TestPushMalformedBranchNotAuthorizedViaGuard(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
+
+	// "ai/bad..name" matches ai/** but fails check-ref-format (contains "..").
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/bad..name"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if want := "git proxy: push rejected by branch policy\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the branch-policy denial %q", rec.Body.String(), want)
+	}
+	// Skipping the guard means no marker read at the unvalidated ref.
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none: AuthorizeBranch must not see an invalid ref", p.fileExistsRefs)
+	}
+	// checkPush rejects the name before any provider metadata call.
+	if p.defaultBranchCalls != 0 || p.resolveCalls != 0 || p.mergeBaseCalls != 0 {
+		t.Errorf("metadata calls = default %d resolve %d mergeBase %d, want 0/0/0",
+			p.defaultBranchCalls, p.resolveCalls, p.mergeBaseCalls)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+}
+
+// TestPushExcludeOnlyBranchFilter pins a branches filter without include at the
+// proxy level: everything the exclude list does not name is pushable, and a
+// denied branch gets the generic policy 403 (the guard denies before any marker
+// read or metadata call, and nothing is forwarded).
+func TestPushExcludeOnlyBranchFilter(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, branchFilter(nil, []string{"ai/blocked"}))
+
+	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/ok")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push outside the exclude list = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	if !bytes.Equal(u.last().body, body) {
+		t.Error("upstream body differs from the original request body")
+	}
+
+	// A fresh provider records nothing from the allowed push above, so the
+	// marker-call assertion below speaks only about the denied one.
+	pDenied := newFetchProvider(u.serverURL)
+	sDenied := newTestServerGrants(t, pDenied, branchFilter(nil, []string{"ai/blocked"}))
+	rec = doRequest(t, sDenied, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/blocked"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("push of an excluded branch = %d, want 403", rec.Code)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+	if len(pDenied.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none (branch-filter denial precedes the marker check)",
+			pDenied.fileExistsRefs)
+	}
+	if u.count() != 1 {
+		t.Errorf("upstream calls = %d, want 1 (only the allowed push)", u.count())
+	}
+}
+
+// TestPushTagConstrainedGrantFailsClosed pins the documented proxy bound on the
+// push path: git traffic carries no tags, so a repo:write grant with a tag
+// requirement (alongside a matching branches filter) sees unknown tags and
+// denies fail-closed. The tag check runs inside the policy evaluation, before
+// the marker check and before any provider metadata read, and the answer is the
+// generic "not accessible" 403.
+func TestPushTagConstrainedGrantFailsClosed(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, []policy.CapabilityGrant{{
+		Name: policy.CapRepoWrite,
+		Filter: policy.CapabilityFilter{
+			Require:  []string{"ai-ok"},
+			Branches: policy.PathFilter{Include: []string{"ai/**"}},
+		},
+	}})
+
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("push with unknown tags = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none (tag denial precedes the marker check)", p.fileExistsRefs)
+	}
+	if p.defaultBranchCalls != 0 || p.resolveCalls != 0 || p.mergeBaseCalls != 0 {
+		t.Errorf("metadata calls = default %d resolve %d mergeBase %d, want 0/0/0",
+			p.defaultBranchCalls, p.resolveCalls, p.mergeBaseCalls)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+}
+
+// TestPushBranchFilterIsCaseSensitive pins exact, case-sensitive doublestar
+// matching for the branches filter at the proxy level: the syntactically valid
+// branch "AI/x" does not match the include "ai/**", so the push denies
+// fail-closed with the generic policy 403 before any marker read.
+func TestPushBranchFilterIsCaseSensitive(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
+
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/AI/x"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("branch differing only in case = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none (branch-filter denial precedes the marker check)", p.fileExistsRefs)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+}
+
+// TestReceivePackDiscoveryForBranchFilteredGrantPasses pins the single policy
+// core: push discovery carries no branch context, so the branches filter does
+// not apply there and the advertisement is served; the per-branch authorization
+// of the actual push still denies non-matching branches.
+func TestReceivePackDiscoveryForBranchFilteredGrantPasses(t *testing.T) {
+	ad := []byte("001e# service=git-receive-pack\n0000")
+	u := newUpstream(t, ad)
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, branchFilter([]string{"ai/**"}, nil))
+
+	target := "/git/" + providerName + "/" + repo + ".git/info/refs?service=git-receive-pack"
+	rec := doRequest(t, s, http.MethodGet, target, nil, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("discovery with a branch-filtered grant = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+
+	rec = doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/feature/x"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("push outside the filter = %d, want 403", rec.Code)
+	}
+}
+
+// TestPathFilteredGrantDeniesGitTraffic pins "paths ⇒ no git": an active paths
+// filter cannot be enforced over git traffic, so fetch discovery and push deny
+// fail-closed ("path required") even when the branch filter would match.
+func TestPathFilteredGrantDeniesGitTraffic(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+
+	read := newTestServerGrants(t, newFetchProvider(u.serverURL), []policy.CapabilityGrant{{
+		Name: policy.CapRepoRead,
+		Filter: policy.CapabilityFilter{
+			Paths: policy.PathFilter{Include: []string{"docs/**"}},
+		},
+	}})
+	rec := doRequest(t, read, http.MethodGet,
+		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("fetch with a path-filtered repo:read = %d, want 403", rec.Code)
+	}
+
+	write := newTestServerGrants(t, newFetchProvider(u.serverURL), []policy.CapabilityGrant{{
+		Name: policy.CapRepoWrite,
+		Filter: policy.CapabilityFilter{
+			Paths:    policy.PathFilter{Include: []string{"src/**"}},
+			Branches: policy.PathFilter{Include: []string{"ai/**"}},
+		},
+	}})
+	rec = doRequest(t, write, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("push with a path-filtered repo:write = %d, want 403", rec.Code)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0 for path-filtered denials", u.count())
+	}
+}
+
 func TestRoutingUnsupportedEndpoints(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
 	s := newTestServer(t, p,
-		[]policy.Capability{policy.CapRepoRead, policy.CapRepoWrite}, []string{"ai/**"})
+		[]policy.Capability{policy.CapRepoRead, policy.CapRepoWrite})
 
 	tests := []struct {
 		name   string
@@ -916,7 +1239,7 @@ func TestRoutingRejectsURLDelimiters(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
 	s := newTestServer(t, p,
-		[]policy.Capability{policy.CapRepoRead, policy.CapRepoWrite}, []string{"ai/**"})
+		[]policy.Capability{policy.CapRepoRead, policy.CapRepoWrite})
 
 	delimiters := []struct {
 		char string
@@ -962,7 +1285,7 @@ func TestUpstreamRedirectIsNotForwarded(t *testing.T) {
 	u.status = http.StatusFound
 	u.location = "http://redirect-target.invalid/"
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	rec := doRequest(t, s, http.MethodGet,
 		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
@@ -981,7 +1304,7 @@ func TestUpstreamRedirectIsNotForwarded(t *testing.T) {
 
 func TestRemoteURL(t *testing.T) {
 	p := newFetchProvider("http://upstream.invalid")
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
 	got, err := s.RemoteURL(providerName, repo)
 	if err != nil {
@@ -1065,10 +1388,6 @@ func TestNewValidatesConfig(t *testing.T) {
 	if _, err := New(Config{Listen: base.Listen, PublicURL: "git.example.com", Token: base.Token}, registry, guard, nil); err == nil {
 		t.Error("New accepted a relative public URL")
 	}
-	if _, err := New(Config{Listen: base.Listen, PublicURL: base.PublicURL, Token: base.Token,
-		Branches: []string{"ai/["}}, registry, guard, nil); err == nil {
-		t.Error("New accepted an invalid branch pattern")
-	}
 	if _, err := New(base, nil, guard, nil); err == nil {
 		t.Error("New accepted a nil registry")
 	}
@@ -1116,8 +1435,9 @@ func TestIsLoopbackAddr(t *testing.T) {
 func TestCheckRefUpdateBranchNameValidation(t *testing.T) {
 	u := newUpstream(t, []byte("nope"))
 	p := newFetchProvider(u.serverURL)
-	// A broad allowlist so only the name validation can reject.
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"**"})
+	// checkRefUpdate is exercised directly: branch filtering is policy work
+	// (Guard.AuthorizeBranch), so only the name validation can reject here.
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite})
 
 	for _, branch := range []string{"-lead", ".dot", "trail.", "a//b", "seg/../x", "with space", "with~tilde"} {
 		if err := s.checkRefUpdate(context.Background(), p, repo,
@@ -1150,7 +1470,7 @@ func freePort(t *testing.T) string {
 func TestListenAndServeGracefulShutdown(t *testing.T) {
 	u := newUpstream(t, []byte("advertisement"))
 	p := newFetchProvider(u.serverURL)
-	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 	s.cfg.Listen = freePort(t)
 
 	ctx, cancel := context.WithCancel(context.Background())

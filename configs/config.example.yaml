@@ -21,9 +21,10 @@ server:
   #   <public_url>/git/<provider>/<repo>.git/...
   # where <repo> is the namespace/project path. Fetch requires repo:read and
   # push requires repo:write from the provider rules below; `.noai` is enforced
-  # as always. Pushes are constrained to refs/heads/<branch> matching
-  # branches.allow, may not touch the default branch or delete, and must be a
-  # fast-forward.
+  # as always. Which branches may be pushed is NOT a proxy setting: it is the
+  # `branches` filter of the repo:write grant (see the rules below). The proxy
+  # additionally never allows the default branch, never deletes branches, and
+  # only accepts fast-forwards.
   # git_proxy:
   #   enabled: true
   #   listen: 127.0.0.1:8417             # bind address (defaults to this)
@@ -36,8 +37,6 @@ server:
   #   #                   "none". A non-loopback listen without token is a
   #   #                   config error.
   #   token: "${GIT_PROXY_TOKEN}"         # HTTP Basic password (username is ignored)
-  #   branches:
-  #     allow: ["ai/**"]                  # doublestar globs for pushable branches
   #   # TLS is optional; set both or neither. Plain HTTP without TLS is only
   #   # allowed on a loopback listen address; any other bind refuses to start
   #   # unless allow_insecure is set explicitly (the Basic-auth token would
@@ -88,6 +87,25 @@ providers:
           - mr:merge:
               require: [ai-reviewed]
 
+      # Git push via the proxy for one playground repository. `branches` is a
+      # doublestar filter on the push TARGET BRANCH and is accepted ONLY on
+      # repo:write: every unique target branch of a push must match
+      # branches.include (when non-empty) and must not match branches.exclude.
+      # A repo:write grant WITHOUT a branches filter allows NO push at all
+      # (fail-closed) — there is no global proxy allowlist any more. The proxy
+      # still never pushes the default branch, never deletes, and requires
+      # fast-forwards. Rules are first-match-wins, so this specific rule must
+      # come BEFORE the broader "team/*" rule below.
+      - repositories:
+          - "team/ai-playground"
+        effect: allow
+        capabilities:
+          - repo:read
+          - repo:write:
+              branches:
+                include: ["ai/**"]
+                exclude: ["ai/wip/**"]
+
       # Read-only access to all other repositories in this group.
       - repositories:
           - "team/*"
@@ -109,6 +127,9 @@ providers:
           # repo:read may also restrict which files are readable. Path globs
           # (doublestar) match the repository-relative path; exclude wins over
           # include, and an active path filter fails closed on an empty path.
+          # NOTE: the git proxy cannot enforce path filters (a fetch is
+          # whole-tree), so an ACTIVE paths filter switches off GIT access for
+          # this capability as well: fetch/clone and push deny fail-closed.
           - repo:read:
               paths:
                 include: ["docs/**", "*.md"]

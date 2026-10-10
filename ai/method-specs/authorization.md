@@ -44,6 +44,8 @@ N/A — this is the evaluator used by all tools.
 5. Final decision:
    - `Guard.AuthorizeWithTags` — tags only (no path). Used by MR tools.
    - `Guard.AuthorizeResource` — tags + path. Used by `read_file`.
+   - `Guard.AuthorizeBranch` — tags + branch (no path). Used by the git proxy per
+     push target branch; a grant without a `branches` filter denies the push.
    Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
 6. On allow, perform the provider call; map errors with `mapProviderError`.
 
@@ -60,6 +62,11 @@ Decision reasons (all fail closed unless allowed):
 - `tag requirement not met` / `excluded tag present` — exact, case-sensitive.
 - `path required` — active path filter, empty path.
 - `path not allowed` / `path excluded` — doublestar; exclude wins over include.
+- `branch filter required` — named branch, grant has no branches filter (no push).
+- `branch required` — branch filter active but no branch supplied to a branch-context
+  evaluation (`EvaluateResourceBranch`/`AuthorizeBranch`). Branch-less entry points
+  (`Evaluate`/`Authorize`/`AuthorizeResource`) never apply the branch dimension.
+- `branch not allowed` / `branch excluded` — doublestar; exclude wins over include.
 - `.noai` — marker present or marker check failed, for any capability whose
   matched grant is not `noai`-exempt.
 

@@ -15,8 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bmatcuk/doublestar/v4"
-
 	"github.com/hvo/mcp-forj/internal/policy"
 	"github.com/hvo/mcp-forj/internal/provider"
 )
@@ -80,16 +78,14 @@ type Config struct {
 	// AllowInsecure explicitly permits plain HTTP (no TLS) on a non-loopback
 	// listen address. Without it, New refuses such a configuration.
 	AllowInsecure bool
-	// Branches lists doublestar globs matched against branch names a push may
-	// target. An empty list allows no branch (deny by default).
-	Branches []string
 }
 
 // Server is an authenticated git smart-HTTP reverse proxy. It exposes only the
 // smart-HTTP endpoints (info/refs plus upload/receive-pack), authorizes every
 // request against the capability policy before touching the provider, and
-// enforces the push policy (branch allowlist, no default branch, no deletes,
-// fast-forward only).
+// enforces the push policy (target branches are decided by the repo:write
+// branches filter in the policy; the proxy itself additionally blocks the
+// default branch, deletes and non-fast-forwards).
 type Server struct {
 	cfg       Config
 	registry  *provider.Registry
@@ -100,9 +96,9 @@ type Server struct {
 }
 
 // New constructs a Server. registry resolves the provider segment of a route
-// and guard performs capability authorization including the .noai overlay. A
-// nil logger discards logs. Listen and PublicURL are mandatory; an empty
-// Branches list is valid and denies every push. Token is optional: with a
+// and guard performs capability authorization including the .noai overlay and
+// the repo:write branches filter for pushes. A nil logger discards logs.
+// Listen and PublicURL are mandatory. Token is optional: with a
 // token, clients authenticate via HTTP Basic; without one the proxy performs
 // no authentication and must bind loopback only, so an empty Token together
 // with a non-loopback listen is an error. Plain HTTP is only accepted on a
@@ -132,13 +128,6 @@ func New(cfg Config, registry *provider.Registry, guard *policy.Guard, logger *s
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, errors.New("gitproxy: public_url must be an absolute http(s) URL")
 	}
-	branches := append([]string(nil), cfg.Branches...)
-	for _, pattern := range branches {
-		if pattern == "" || !doublestar.ValidatePattern(pattern) {
-			return nil, fmt.Errorf("gitproxy: invalid branch pattern %q", pattern)
-		}
-	}
-	cfg.Branches = branches
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
@@ -306,14 +295,15 @@ func (s *Server) authorizeRequest(r *http.Request, rt *route) error {
 // preparePush runs the POST git-receive-pack pipeline. The pkt-line command
 // section is parsed first: it makes no provider call and is bounded to 1 MiB, so
 // it is safe before authorization. The target branches are then authorized for
-// repo:write (authorizePushRefs), which checks the .noai marker on the default
-// branch AND the branch itself and honors a noai: allow grant. Only after
-// authorization does the push branch policy (checkPush) touch provider metadata,
-// so a policy denial never precedes the guard. Finally the body is rewound with
-// io.MultiReader so the ReverseProxy forwards the original bytes unchanged; the
-// Content-Length stays correct because no byte is added or removed. The returned
-// error is already classified for writeDenied (errMalformedPush, errRepoDenied
-// or errPushDenied).
+// repo:write (authorizePushRefs), which applies the branches filter of the
+// matched grant — a grant without a branch filter never allows a push — and
+// checks the .noai marker on the default branch AND the branch itself, honoring
+// a noai: allow grant. Only after authorization does the push branch policy
+// (checkPush) touch provider metadata, so a policy denial never precedes the
+// guard. Finally the body is rewound with io.MultiReader so the ReverseProxy
+// forwards the original bytes unchanged; the Content-Length stays correct
+// because no byte is added or removed. The returned error is already classified
+// for writeDenied (errMalformedPush, errRepoDenied or errPushDenied).
 func (s *Server) preparePush(r *http.Request, rt *route, p provider.Provider) error {
 	br := bufio.NewReader(r.Body)
 	updates, consumed, err := ReadReceivePackCommands(br)
@@ -331,37 +321,54 @@ func (s *Server) preparePush(r *http.Request, rt *route, p provider.Provider) er
 	return nil
 }
 
-// authorizePushRefs authorizes repo:write for every unique push target. A branch
-// under refs/heads/ is authorized with its own ref, so the guard checks the
-// .noai marker on the default branch and on that branch; a noai: allow grant
-// still exempts the check. Any other ref (a tag or note the branch policy will
-// reject) is authorized at repository level so the capability denial stays the
-// generic "not accessible" 403 before checkPush runs. Duplicate targets are
-// authorized once. Tags stay unknown (fail closed). The first failure is
-// returned and mapped by the caller to the identical 403; no ref or repository
-// detail reaches the client.
+// authorizePushRefs authorizes repo:write for every unique push target. A
+// branch under refs/heads/ whose name passes the coarse syntactic validation is
+// authorized with Guard.AuthorizeBranch, so the matched grant must carry a
+// branches filter matching that branch (without one the push denies
+// fail-closed) and the .noai marker is checked on the default branch and on the
+// branch; a noai: allow grant still exempts the check. A syntactically invalid
+// branch name is never handed to the guard — its marker check would read the
+// provider at an unvalidated ref — and is left to checkPush, which rejects it
+// with the same 403 the client already saw before this validation moved up. Any
+// other ref (a tag or note the branch policy will reject) is authorized at
+// repository level, where the branch dimension is not applied, so the capability
+// denial stays the generic "not accessible" 403 before checkPush runs. Duplicate
+// targets are authorized once. Tags stay unknown (fail closed). The first
+// failure is returned and mapped by the caller to the identical 403; no ref or
+// repository detail reaches the client.
 func (s *Server) authorizePushRefs(ctx context.Context, rt *route, updates []RefUpdate) error {
 	seen := make(map[string]struct{}, len(updates))
 	for _, u := range updates {
-		ref := pushMarkerRef(u.Ref)
-		if _, ok := seen[ref]; ok {
+		branch := pushTargetBranch(u.Ref)
+		if _, ok := seen[branch]; ok {
 			continue
 		}
-		seen[ref] = struct{}{}
-		if err := s.guard.AuthorizeResourceRef(ctx, rt.providerName, rt.repo,
-			policy.CapRepoWrite, policy.TagSet{}, "", ref); err != nil {
+		seen[branch] = struct{}{}
+		if branch == "" {
+			if err := s.guard.Authorize(ctx, rt.providerName, rt.repo, policy.CapRepoWrite); err != nil {
+				return err
+			}
+			continue
+		}
+		// No provider marker call with an unvalidated ref: an invalid branch
+		// name skips the guard entirely and checkPush denies it below.
+		if !validBranchName(branch) {
+			continue
+		}
+		if err := s.guard.AuthorizeBranch(ctx, rt.providerName, rt.repo,
+			policy.CapRepoWrite, policy.TagSet{}, branch); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// pushMarkerRef returns the ref whose .noai marker the guard must check for one
-// push target: the branch name for a refs/heads/ ref (the marker is then checked
-// on the default branch and on the branch), or the empty string for any other
-// ref, which limits the marker check to the default branch before checkPush
-// rejects the non-branch ref afterwards.
-func pushMarkerRef(ref string) string {
+// pushTargetBranch returns the branch name Guard.AuthorizeBranch must check for
+// one push target: the branch for a refs/heads/ ref (the branches filter and the
+// .noai marker are then evaluated for that branch, the marker on the default
+// branch and on the branch), or the empty string for any other ref, which is
+// authorized at repository level before checkPush rejects the non-branch ref.
+func pushTargetBranch(ref string) string {
 	if branch, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
 		return branch
 	}

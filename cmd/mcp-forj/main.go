@@ -69,6 +69,10 @@ func run() error {
 							Include: grant.Paths.Include,
 							Exclude: grant.Paths.Exclude,
 						},
+						Branches: policy.PathFilter{
+							Include: grant.Branches.Include,
+							Exclude: grant.Branches.Exclude,
+						},
 						NoAIExempt: grant.NoAIExempt,
 					},
 				}
@@ -104,7 +108,6 @@ func run() error {
 			TLSCert:       gp.TLSCert,
 			TLSKey:        gp.TLSKey,
 			AllowInsecure: gp.AllowInsecure,
-			Branches:      gp.Branches.Allow,
 		}, registry, guard, logger)
 		if err != nil {
 			return fmt.Errorf("git proxy: %w", err)
@@ -121,11 +124,12 @@ func run() error {
 			}
 		}()
 		// The token is deliberately not part of this log line; auth_required
-		// names the mode only (false: loopback-only, no authentication).
+		// names the mode only (false: loopback-only, no authentication). Push
+		// branches are policy configuration (repo:write branches filter), not
+		// a proxy setting any more.
 		logger.Info("git proxy enabled",
 			"listen", gp.Listen,
 			"public_url", gp.PublicURL,
-			"branches", gp.Branches.Allow,
 			"auth_required", ps.AuthRequired(),
 		)
 	}

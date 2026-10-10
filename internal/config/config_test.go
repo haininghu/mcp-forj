@@ -1236,7 +1236,6 @@ func gitProxyTestConfig(mutate func(*GitProxyConfig)) *Config {
 				Listen:    "127.0.0.1:8417",
 				PublicURL: "https://git.example.com",
 				Token:     "proxy-secret",
-				Branches:  BranchesConfig{Allow: []string{"ai/**"}},
 			},
 		},
 		Providers: []ProviderConfig{{
@@ -1275,9 +1274,6 @@ providers:
 	gp := cfg.Server.GitProxy
 	if gp.Listen != defaultGitProxyListen {
 		t.Errorf("listen = %q, want default %q", gp.Listen, defaultGitProxyListen)
-	}
-	if got := gp.Branches.Allow; len(got) != 1 || got[0] != defaultGitProxyBranch {
-		t.Errorf("branches.allow = %v, want [%s]", got, defaultGitProxyBranch)
 	}
 	if gp.Token.Value() != "proxy-secret" {
 		t.Errorf("token = %q, want the resolved environment value", gp.Token.Value())
@@ -1340,9 +1336,6 @@ providers:
 	if cfg.Server.GitProxy.Listen != "" {
 		t.Errorf("disabled git_proxy listen = %q, want it untouched", cfg.Server.GitProxy.Listen)
 	}
-	if cfg.Server.GitProxy.Branches.Allow != nil {
-		t.Errorf("disabled git_proxy branches.allow = %v, want it untouched", cfg.Server.GitProxy.Branches.Allow)
-	}
 }
 
 func TestGitProxyValidationFailures(t *testing.T) {
@@ -1379,21 +1372,6 @@ func TestGitProxyValidationFailures(t *testing.T) {
 				g.AllowInsecure = true
 			},
 			wantErr: "token is required for a non-loopback listen address",
-		},
-		{
-			name:    "empty branches.allow",
-			mutate:  func(g *GitProxyConfig) { g.Branches.Allow = []string{} },
-			wantErr: "branches.allow must not be empty",
-		},
-		{
-			name:    "empty branch pattern",
-			mutate:  func(g *GitProxyConfig) { g.Branches.Allow = []string{""} },
-			wantErr: "empty pattern",
-		},
-		{
-			name:    "invalid branch pattern",
-			mutate:  func(g *GitProxyConfig) { g.Branches.Allow = []string{"ai/["} },
-			wantErr: `invalid pattern "ai/["`,
 		},
 		{
 			name: "tls_cert without tls_key",
@@ -1549,7 +1527,10 @@ func TestGitProxyInsecureListenRules(t *testing.T) {
 	}
 }
 
-func TestGitProxyExplicitEmptyAllowRejectedByParse(t *testing.T) {
+// TestGitProxyBranchesKeyRejected pins that the removed global
+// git_proxy.branches section is an unknown field, not a silently ignored one:
+// push branches are policy configuration on the repo:write capability now.
+func TestGitProxyBranchesKeyRejected(t *testing.T) {
 	yaml := `
 server:
   git_proxy:
@@ -1557,7 +1538,7 @@ server:
     public_url: https://git.example.com
     token: SECRET
     branches:
-      allow: []
+      allow: ["ai/**"]
 providers:
   - name: p
     type: gitlab
@@ -1570,9 +1551,150 @@ providers:
 `
 	_, err := Parse([]byte(yaml))
 	if err == nil {
-		t.Fatal("Parse accepted an explicit empty branches.allow")
+		t.Fatal("Parse accepted the removed git_proxy.branches section")
 	}
-	if !strings.Contains(err.Error(), "branches.allow must not be empty") {
-		t.Errorf("error = %q, want the empty branches.allow message", err)
+	if !strings.Contains(err.Error(), "branches") {
+		t.Errorf("error = %q, want it to name the branches field", err)
+	}
+}
+
+// TestGitProxyWithoutBranchesValid pins that a fully configured proxy no longer
+// needs any branches section: branch control lives in the capability rules.
+func TestGitProxyWithoutBranchesValid(t *testing.T) {
+	yaml := `
+server:
+  git_proxy:
+    enabled: true
+    public_url: https://git.example.com
+    token: SECRET
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:write:
+              branches:
+                include: ["ai/**"]
+`
+	if _, err := Parse([]byte(yaml)); err != nil {
+		t.Fatalf("Parse rejected a git_proxy without branches: %v", err)
+	}
+}
+
+// TestExampleConfigParses validates that the documented example configuration
+// stays loadable and valid, including its repo:write branches example.
+func TestExampleConfigParses(t *testing.T) {
+	t.Setenv("GITLAB_WORK_TOKEN", "example-token")
+	cfg, err := Load("../../configs/config.example.yaml")
+	if err != nil {
+		t.Fatalf("Load(configs/config.example.yaml): %v", err)
+	}
+	if len(cfg.Providers) == 0 {
+		t.Fatal("example config has no providers")
+	}
+}
+
+func TestCapabilityGrantBranchFilterAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - repo:write:
+              require: [ai-ok]
+              branches:
+                include: ["ai/**", "bot/*"]
+                exclude: ["ai/wip/**"]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected a repo:write branches filter: %v", err)
+	}
+	grant := cfg.Providers[0].Rules[0].Capabilities[0]
+	if grant.Name != "repo:write" {
+		t.Fatalf("grant = %+v", grant)
+	}
+	if len(grant.Branches.Include) != 2 || grant.Branches.Include[0] != "ai/**" || grant.Branches.Include[1] != "bot/*" {
+		t.Errorf("branches.include = %v", grant.Branches.Include)
+	}
+	if len(grant.Branches.Exclude) != 1 || grant.Branches.Exclude[0] != "ai/wip/**" {
+		t.Errorf("branches.exclude = %v", grant.Branches.Exclude)
+	}
+}
+
+func TestCapabilityGrantBranchFilterRejections(t *testing.T) {
+	caps := func(body string) string {
+		return `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+` + body
+	}
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "branches on repo:read",
+			body:    "          - repo:read:\n              branches:\n                include: [\"ai/**\"]\n",
+			wantErr: "branch filters are only supported",
+		},
+		{
+			name:    "branches on mr:read",
+			body:    "          - mr:read:\n              branches:\n                include: [\"ai/**\"]\n",
+			wantErr: "branch filters are only supported",
+		},
+		{
+			name:    "branches on repo:list",
+			body:    "          - repo:list:\n              branches:\n                exclude: [\"ai/**\"]\n",
+			wantErr: "branch filters are only supported",
+		},
+		{
+			name:    "invalid branch glob",
+			body:    "          - repo:write:\n              branches:\n                include: [\"ai/[\"]\n",
+			wantErr: `invalid path pattern "ai/["`,
+		},
+		{
+			name:    "empty branch entry",
+			body:    "          - repo:write:\n              branches:\n                include: [\"   \"]\n",
+			wantErr: "branches.include: path must not be empty",
+		},
+		{
+			name:    "unknown key inside branches",
+			body:    "          - repo:write:\n              branches:\n                bogus: [\"ai/**\"]\n",
+			wantErr: "unknown key",
+		},
+		{
+			name:    "duplicate filter key branches",
+			body:    "          - repo:write:\n              branches:\n                include: [\"a/**\"]\n              branches:\n                include: [\"b/**\"]\n",
+			wantErr: "duplicate filter key",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(caps(tt.body)))
+			if err == nil {
+				t.Fatal("Parse succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }

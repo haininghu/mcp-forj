@@ -31,7 +31,8 @@ const (
 	// (reserved).
 	CapMRWrite Capability = "mr:write"
 	// CapRepoWrite permits modifying repository content: it authorizes the
-	// git smart-HTTP push through the git proxy.
+	// git smart-HTTP push through the git proxy. It is the only capability
+	// that accepts a branches filter.
 	CapRepoWrite Capability = "repo:write"
 	// CapPolicyRead permits exposing the configured access rules
 	// (list_configured_rules). It is provider-scoped, not repository-scoped.

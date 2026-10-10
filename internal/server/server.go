@@ -203,6 +203,7 @@ type configuredCapability struct {
 	Require    []string              `json:"require,omitempty"`
 	Exclude    []string              `json:"exclude,omitempty"`
 	Paths      *configuredPathFilter `json:"paths,omitempty"`
+	Branches   *configuredPathFilter `json:"branches,omitempty"`
 	NoAIExempt bool                  `json:"noai_exempt,omitempty"`
 }
 
@@ -340,6 +341,12 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 				cap.Paths = &configuredPathFilter{
 					Include: grant.Filter.Paths.Include,
 					Exclude: grant.Filter.Paths.Exclude,
+				}
+			}
+			if !grant.Filter.Branches.IsZero() {
+				cap.Branches = &configuredPathFilter{
+					Include: grant.Filter.Branches.Include,
+					Exclude: grant.Filter.Branches.Exclude,
 				}
 			}
 			caps[i] = cap

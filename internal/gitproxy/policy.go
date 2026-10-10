@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bmatcuk/doublestar/v4"
-
 	"github.com/hvo/mcp-forj/internal/provider"
 )
 
@@ -45,10 +43,16 @@ func (s *Server) checkPush(ctx context.Context, p provider.Provider, repo string
 	return nil
 }
 
-// checkRefUpdate validates one ref update: only branches under refs/heads/,
-// a syntactically sane branch name inside the configured allowlist, never the
-// default branch, never a delete, and only fast-forward updates verified with
-// the provider's merge base.
+// checkRefUpdate validates one ref update: only branches under refs/heads/, a
+// syntactically sane branch name, never the default branch, never a delete, and
+// only updates that stay within the advertised history: the advertised old
+// object id must equal the provider's current branch tip and the new object id
+// must contain that tip (verified with the provider's merge base). A branch
+// whose advertised base differs is a stale push (a non-fast-forward/force
+// attempt) and denies. Which branches may be pushed at all is decided by the
+// repo:write branches filter in the policy (Guard.AuthorizeBranch); the
+// default-branch lock below is a hard-coded proxy guardrail on top of that
+// decision and is not configurable.
 func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo string, u RefUpdate) error {
 	if !strings.HasPrefix(u.Ref, "refs/heads/") {
 		return fmt.Errorf("%w: ref %q is not a branch under refs/heads/", errPushDenied, u.Ref)
@@ -56,9 +60,6 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 	branch := strings.TrimPrefix(u.Ref, "refs/heads/")
 	if !validBranchName(branch) {
 		return fmt.Errorf("%w: branch name %q is invalid", errPushDenied, branch)
-	}
-	if !s.branchAllowed(branch) {
-		return fmt.Errorf("%w: branch %q is outside branches.allow", errPushDenied, branch)
 	}
 	defaultBranch, err := p.DefaultBranch(ctx, repo)
 	if err != nil {
@@ -75,8 +76,11 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 		return nil
 	}
 
-	// Update of an existing branch: the advertised old id must equal the
-	// current tip and the new id must contain it (fast-forward). Unknown
+	// Update of an existing branch, checked against the provider's current
+	// state: (a) the advertised old id must equal the current tip — a stale
+	// advertised base means the client lost the race and the update would
+	// rewrite history (non-fast-forward/force), and (b) the new id must
+	// contain that tip, i.e. MergeBase(tip, new) == tip exactly. Unknown
 	// provider state fails closed.
 	tip, err := p.ResolveRef(ctx, repo, branch)
 	if err != nil {
@@ -84,30 +88,20 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 		// and every other error deny alike.
 		return fmt.Errorf("%w: cannot resolve branch %q: %v", errPushDenied, branch, err)
 	}
+	// Object ids are lowercase hex on the wire and from the provider, so an
+	// exact comparison is the fail-closed choice for both checks below.
+	if u.OldSHA != tip {
+		return fmt.Errorf("%w: advertised base of branch %q is stale: pushed from %s but the tip is %s",
+			errPushDenied, branch, u.OldSHA, tip)
+	}
 	mergeBase, err := p.MergeBase(ctx, repo, tip, u.NewSHA)
 	if err != nil {
 		return fmt.Errorf("%w: cannot compute merge base for branch %q: %v", errPushDenied, branch, err)
 	}
-	// Object ids are lowercase hex on the wire and from the provider, so an
-	// exact comparison is the fail-closed choice.
 	if mergeBase != tip {
 		return fmt.Errorf("%w: update of branch %q is not a fast-forward", errPushDenied, branch)
 	}
 	return nil
-}
-
-// branchAllowed reports whether branch matches one of the configured push
-// globs. An empty list allows nothing (deny by default). An unexpected match
-// error counts as no match so a broken pattern can never grant access;
-// patterns are validated in New.
-func (s *Server) branchAllowed(branch string) bool {
-	for _, pattern := range s.cfg.Branches {
-		ok, err := doublestar.Match(pattern, branch)
-		if err == nil && ok {
-			return true
-		}
-	}
-	return false
 }
 
 // validBranchName is a coarse git-check-ref-format check for the part after

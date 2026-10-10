@@ -18,6 +18,22 @@ func (f fakeChecker) FileExists(context.Context, string, string, string) (bool, 
 	return f.exists, f.err
 }
 
+// refChecker is a FileChecker whose marker presence depends on the ref and that
+// records the refs it was asked about, in call order.
+type refChecker struct {
+	exists map[string]bool
+	calls  []string
+	err    error
+}
+
+func (c *refChecker) FileExists(_ context.Context, _, _, ref string) (bool, error) {
+	c.calls = append(c.calls, ref)
+	if c.err != nil {
+		return false, c.err
+	}
+	return c.exists[ref], nil
+}
+
 func testGuard(t *testing.T, checker FileChecker) (*Guard, *bytes.Buffer) {
 	t.Helper()
 	p := mustBuild(t, []RuleSpec{
@@ -276,6 +292,191 @@ func TestAuthorizeRepoCapability(t *testing.T) {
 	}
 	if err := g.AuthorizeRepoCapability("missing", "team/app", CapMRComment); !errors.Is(err, ErrUnknownProvider) {
 		t.Fatalf("AuthorizeRepoCapability(missing provider) = %v, want ErrUnknownProvider", err)
+	}
+}
+
+func branchPolicy(t *testing.T, f CapabilityFilter) *Guard {
+	t.Helper()
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: f},
+		}},
+	})
+	return NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": &refChecker{}}, ".noai", nil)
+}
+
+func TestAuthorizeBranchMatchingBranchAllowsAndChecksMarkerOnBothRefs(t *testing.T) {
+	checker := &refChecker{}
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": checker}, ".noai", nil)
+
+	if err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix"); err != nil {
+		t.Fatalf("AuthorizeBranch(ai/fix) = %v, want nil", err)
+	}
+	// The marker is checked on the default branch and on the target branch.
+	if len(checker.calls) != 2 || checker.calls[0] != "" || checker.calls[1] != "ai/fix" {
+		t.Errorf("marker calls = %v, want [\"\", \"ai/fix\"]", checker.calls)
+	}
+}
+
+func TestAuthorizeBranchMarkerOnTargetBranchDenies(t *testing.T) {
+	checker := &refChecker{exists: map[string]bool{"ai/fix": true}}
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": checker}, ".noai", nil)
+
+	err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix")
+	if !errors.Is(err, ErrNoAI) {
+		t.Fatalf("marker on the target branch: error = %v, want ErrNoAI", err)
+	}
+}
+
+func TestAuthorizeBranchDeniesOutsideFilterWithoutMarkerCheck(t *testing.T) {
+	checker := &refChecker{}
+	g := branchPolicy(t, CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}})
+	g.checkers["fake"] = checker
+
+	err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "feature/x")
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("error = %v, want ErrDenied", err)
+	}
+	if len(checker.calls) != 0 {
+		t.Errorf("marker calls = %v, want none for a policy denial", checker.calls)
+	}
+}
+
+func TestAuthorizeBranchEmptyBranchWithFilterFailsClosed(t *testing.T) {
+	g := branchPolicy(t, CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}})
+	err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "")
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("error = %v, want ErrDenied (branch required)", err)
+	}
+	if !strings.Contains(err.Error(), "branch required") {
+		t.Errorf("error = %v, want it to mention branch required", err)
+	}
+}
+
+func TestAuthorizeBranchNamedBranchWithoutFilterFailsClosed(t *testing.T) {
+	g := branchPolicy(t, CapabilityFilter{})
+	err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix")
+	if !errors.Is(err, ErrDenied) {
+		t.Fatalf("error = %v, want ErrDenied (branch filter required)", err)
+	}
+	if !strings.Contains(err.Error(), "branch filter required") {
+		t.Errorf("error = %v, want it to mention branch filter required", err)
+	}
+}
+
+func TestAuthorizeBranchExcludeWinsOverInclude(t *testing.T) {
+	g := branchPolicy(t, CapabilityFilter{Branches: PathFilter{
+		Include: []string{"**"},
+		Exclude: []string{"ai/wip/**"},
+	}})
+	if err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix"); err != nil {
+		t.Errorf("included branch denied: %v", err)
+	}
+	err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/wip/tmp")
+	if !errors.Is(err, ErrDenied) || !strings.Contains(err.Error(), "branch excluded") {
+		t.Errorf("excluded branch: error = %v, want ErrDenied branch excluded", err)
+	}
+}
+
+func TestAuthorizeBranchExemptSkipsMarker(t *testing.T) {
+	checker := &refChecker{exists: map[string]bool{"": true, "ai/fix": true}}
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{
+				Branches:   PathFilter{Include: []string{"ai/**"}},
+				NoAIExempt: true,
+			}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": checker}, ".noai", nil)
+
+	if err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix"); err != nil {
+		t.Fatalf("exempt grant = %v, want nil even on a .noai repository", err)
+	}
+	if len(checker.calls) != 0 {
+		t.Errorf("marker calls = %v, want none for an exempt grant", checker.calls)
+	}
+}
+
+func TestAuthorizeBranchSentinelErrors(t *testing.T) {
+	g := branchPolicy(t, CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}})
+	ctx := context.Background()
+	if err := g.AuthorizeBranch(ctx, "missing", "team/app", CapRepoWrite, TagSet{}, "ai/fix"); !errors.Is(err, ErrUnknownProvider) {
+		t.Errorf("unknown provider = %v, want ErrUnknownProvider", err)
+	}
+	if err := g.AuthorizeBranch(ctx, "fake", "other/repo", CapRepoWrite, TagSet{}, "ai/fix"); !errors.Is(err, ErrUnknownRepository) {
+		t.Errorf("unknown repository = %v, want ErrUnknownRepository", err)
+	}
+	if err := g.AuthorizeBranch(ctx, "fake", "team/app", CapRepoRead, TagSet{}, "ai/fix"); !errors.Is(err, ErrDenied) {
+		t.Errorf("capability not granted = %v, want ErrDenied", err)
+	}
+}
+
+func TestAuthorizeBranchLogsDecision(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}}},
+		}},
+	})
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": &refChecker{}}, ".noai", logger)
+
+	if err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "feature/x"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("non-matching branch = %v, want ErrDenied", err)
+	}
+	logs := buf.String()
+	if !strings.Contains(logs, "decision=deny") || !strings.Contains(logs, "branch not allowed") {
+		t.Errorf("logs missing the branch denial decision: %s", logs)
+	}
+}
+
+func TestAuthorizeBranchMarkerCheckFailsClosed(t *testing.T) {
+	boom := errors.New("network down")
+	checker := &refChecker{err: boom}
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}}},
+		}},
+	})
+	g := NewGuard(map[string]*Policy{"fake": p}, map[string]FileChecker{"fake": checker}, ".noai", nil)
+	err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix")
+	if !errors.Is(err, ErrMarkerCheck) || !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want ErrMarkerCheck wrapping the checker error", err)
+	}
+}
+
+func TestAuthorizeBranchTagConstraintFailsClosedOnUnknownTags(t *testing.T) {
+	g := branchPolicy(t, CapabilityFilter{
+		Require:  []string{"ai-ok"},
+		Branches: PathFilter{Include: []string{"ai/**"}},
+	})
+	if err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "ai/fix"); !errors.Is(err, ErrDenied) {
+		t.Fatalf("unknown tags = %v, want ErrDenied (fail-closed)", err)
+	}
+	// With matching tags but no .noai marker, the branch authorizes.
+	known := TagSet{Known: true, Values: []string{"ai-ok"}}
+	if err := g.AuthorizeBranch(context.Background(), "fake", "team/app", CapRepoWrite, known, "ai/fix"); err != nil {
+		t.Errorf("known tags + matching branch = %v, want nil", err)
+	}
+}
+
+func TestAuthorizeResourceRefStillIgnoresBranchFilter(t *testing.T) {
+	// AuthorizeResourceRef has no branch dimension: a ref alone does not trigger
+	// the branches filter, only AuthorizeBranch does.
+	g := branchPolicy(t, CapabilityFilter{Branches: PathFilter{Include: []string{"ai/**"}}})
+	if err := g.AuthorizeResourceRef(context.Background(), "fake", "team/app", CapRepoWrite, TagSet{}, "", "feature/x"); err != nil {
+		t.Errorf("AuthorizeResourceRef = %v, want nil (no branch dimension)", err)
 	}
 }
 
