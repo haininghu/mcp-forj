@@ -10,7 +10,7 @@ truncating.
 ## Impact
 
 - Silent incompleteness: a client could not tell there were more MRs or notes.
-- Misleading error text ("not in a rebaseable state") for `read_file`,
+- Misleading error text ("not in a readable state") for `read_file`,
   `add_merge_request_note`, `list_merge_requests`, etc.
 - `read_file` peak memory was about twice the file size for a large file (DoS surface).
 

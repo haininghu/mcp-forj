@@ -195,7 +195,7 @@ func negotiatesPushOptions(payload []byte) bool {
 	if !ok {
 		return false
 	}
-	for _, capability := range strings.Fields(string(capabilities)) {
+	for capability := range strings.FieldsSeq(string(capabilities)) {
 		if name, _, _ := strings.Cut(capability, "="); name == pushOptionsCapability {
 			return true
 		}
@@ -293,14 +293,14 @@ func hasControl(s string) bool {
 // message, bounded so malformed input cannot bloat logs. %q escapes control
 // characters, keeping the message single-line.
 func quoteBrief(s []byte) string {
-	const max = 64
-	if len(s) > max {
-		return fmt.Sprintf("%q...", s[:max])
+	const limit = 64
+	if len(s) > limit {
+		return fmt.Sprintf("%q...", s[:limit])
 	}
 	return fmt.Sprintf("%q", s)
 }
 
-// isObjectID reports whether s is a SHA-1 (40) or SHA-256 (64) object id in
+// isObjectID reports whether s is an SHA-1 (40) or SHA-256 (64) object id in
 // lowercase hex, the exact form git emits on the wire. Anything else (including
 // uppercase hex) is rejected so the policy check fails closed.
 func isObjectID(s string) bool {

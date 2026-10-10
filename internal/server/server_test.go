@@ -845,7 +845,7 @@ func TestListRepositoriesTruncation(t *testing.T) {
 	fake := newFake()
 	fake.repos = nil
 	for i := range maxListResults + 5 {
-		fake.repos = append(fake.repos, provider.Repository{Provider: "fake", Path: "archive/r" + string(rune('a'+i%26)) + string(rune('0'+i/26))})
+		fake.repos = append(fake.repos, provider.Repository{Provider: "fake", Path: "archive/r" + string('a'+i%26) + string('0'+i/26)})
 	}
 	env := newTestEnv(t, listReposRules("archive/**"), fake)
 
@@ -1349,15 +1349,15 @@ func TestListConfiguredRulesExposesFilters(t *testing.T) {
 	if len(out.Repositories) != 1 {
 		t.Fatalf("configured rules = %+v", out)
 	}
-	cap, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "mr:read")
+	c, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "mr:read")
 	if !ok {
 		t.Fatalf("mr:read missing from configured rules: %+v", out)
 	}
-	if len(cap.Require) != 1 || cap.Require[0] != "ai-reviewed" {
-		t.Errorf("require = %v, want [ai-reviewed]", cap.Require)
+	if len(c.Require) != 1 || c.Require[0] != "ai-reviewed" {
+		t.Errorf("require = %v, want [ai-reviewed]", c.Require)
 	}
-	if len(cap.Exclude) != 1 || cap.Exclude[0] != "do-not-touch" {
-		t.Errorf("exclude = %v, want [do-not-touch]", cap.Exclude)
+	if len(c.Exclude) != 1 || c.Exclude[0] != "do-not-touch" {
+		t.Errorf("exclude = %v, want [do-not-touch]", c.Exclude)
 	}
 }
 
@@ -2099,18 +2099,18 @@ func TestListConfiguredRulesExposesPathFilters(t *testing.T) {
 	if len(out.Repositories) != 1 {
 		t.Fatalf("configured rules = %+v", out)
 	}
-	cap, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "repo:read")
+	c, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "repo:read")
 	if !ok {
 		t.Fatalf("repo:read missing from configured rules: %+v", out)
 	}
-	if cap.Paths == nil {
-		t.Fatalf("paths missing from configured capability: %+v", cap)
+	if c.Paths == nil {
+		t.Fatalf("paths missing from configured capability: %+v", c)
 	}
-	if len(cap.Paths.Include) != 1 || cap.Paths.Include[0] != "docs/**" {
-		t.Errorf("paths.include = %v, want [docs/**]", cap.Paths.Include)
+	if len(c.Paths.Include) != 1 || c.Paths.Include[0] != "docs/**" {
+		t.Errorf("paths.include = %v, want [docs/**]", c.Paths.Include)
 	}
-	if len(cap.Paths.Exclude) != 1 || cap.Paths.Exclude[0] != "**/.env" {
-		t.Errorf("paths.exclude = %v, want [**/.env]", cap.Paths.Exclude)
+	if len(c.Paths.Exclude) != 1 || c.Paths.Exclude[0] != "**/.env" {
+		t.Errorf("paths.exclude = %v, want [**/.env]", c.Paths.Exclude)
 	}
 }
 

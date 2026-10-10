@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -666,9 +667,7 @@ func TestPushDeniedCases(t *testing.T) {
 			p := newFetchProvider(u.serverURL)
 			p.defaultBranch = tc.def
 			p.mergeBase = tc.mb
-			for k, v := range tc.tips {
-				p.tips[k] = v
-			}
+			maps.Copy(p.tips, tc.tips)
 			s := newTestServerGrants(t, p, branchFilter(tc.include, nil))
 
 			rec := doRequest(t, s, http.MethodPost,

@@ -222,7 +222,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		srv.Close()
+		_ = srv.Close()
 		return fmt.Errorf("gitproxy: shutdown: %w", err)
 	}
 	return <-serveErr
@@ -303,7 +303,7 @@ func (s *Server) authorizeRequest(r *http.Request, rt *route) error {
 // branch policy (checkPush) touch provider metadata, so a policy denial never
 // precedes the guard. The push options are checked last (checkPushOptions): they
 // gate provider-side actions (merge-request creation, auto-merge) on the
-// capabilities the ref updates do not need. Finally the body is rewound with
+// capabilities the ref updates do not need. Finally, the body is rewound with
 // io.MultiReader so the ReverseProxy forwards the original bytes unchanged —
 // command section, options section and packfile alike; the Content-Length stays
 // correct because no byte is added or removed. The returned error is already

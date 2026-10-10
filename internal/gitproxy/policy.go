@@ -216,7 +216,7 @@ func validBranchName(name string) bool {
 	if strings.HasPrefix(name, ".") || strings.HasSuffix(name, ".") {
 		return false
 	}
-	for _, segment := range strings.Split(name, "/") {
+	for segment := range strings.SplitSeq(name, "/") {
 		if segment == "" || strings.HasPrefix(segment, ".") {
 			return false
 		}

@@ -54,7 +54,7 @@ request on a `.noai` repository.
 
 ## Consequences
 
-- The provider token must be able to read repository files on the default branch. Otherwise the
+- The provider token must be able to read repository files on the default branch. Otherwise, the
   fail-closed marker check denies every non-exempt capability on every repository, not only
   `read_file`.
 - Every non-exempt operation costs one extra provider call, and discovery costs one per candidate.

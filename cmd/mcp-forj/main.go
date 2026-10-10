@@ -24,7 +24,7 @@ var version = "dev"
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "mcp-forj:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "mcp-forj:", err)
 		os.Exit(1)
 	}
 }
@@ -116,17 +116,15 @@ func run() error {
 		// git_remote tool exists exactly when the proxy does. The token stays
 		// inside the proxy; RemoteURL only returns the credential-free URL.
 		srv.SetGitRemoteResolver(ps)
-		proxyWG.Add(1)
-		go func() {
-			defer proxyWG.Done()
+		proxyWG.Go(func() {
 			if err := ps.ListenAndServe(ctx); err != nil {
 				logger.Error("git proxy terminated", "error", err.Error())
 			}
-		}()
+		})
 		// The token is deliberately not part of this log line; auth_required
 		// names the mode only (false: loopback-only, no authentication). Push
 		// branches are policy configuration (repo:write branches filter), not
-		// a proxy setting any more.
+		// a proxy setting anymore.
 		logger.Info("git proxy enabled",
 			"listen", gp.Listen,
 			"public_url", gp.PublicURL,

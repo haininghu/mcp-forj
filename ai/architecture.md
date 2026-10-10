@@ -106,9 +106,9 @@ Order matters: **policy first, provider metadata second.** The pkt-line command 
 before authorization (bounded, no provider call); every unique, syntactically valid target branch
 is then authorized against the `repo:write` **`branches` filter** — a grant without one denies every
 push, and an invalid branch name never reaches the guard (no marker read at an unvalidated ref).
-Only afterwards do the additive guardrails read provider state: no non-branch refs, never the
+Only afterward do the additive guardrails read provider state: no non-branch refs, never the
 default branch (hard-coded), no deletes, advertised base must equal the current tip (stale base =
-force push in disguise) and `MergeBase(tip, new) == tip`. Finally every **push option** is checked
+force push in disguise) and `MergeBase(tip, new) == tip`. Finally, every **push option** is checked
 (`merge_request.*` → `mr:write`, auto-merge → also `mr:merge`, anything else → deny), because an
 option makes the provider perform actions no ref update covers. The body — commands, options and
 packfile — is replayed unchanged via `io.MultiReader`, so the upstream sees the exact bytes the

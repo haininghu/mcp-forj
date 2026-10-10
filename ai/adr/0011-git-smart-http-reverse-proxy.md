@@ -31,7 +31,7 @@ the same configuration.
 
 The branch decision itself lives in the policy: `Policy.EvaluateResourceBranch` (reached through
 `Guard.AuthorizeBranch`) applies the `branches` filter of the matched grant, and the proxy holds
-**no** branch allowlist of its own any more. The branch dimension is only evaluated where a
+**no** branch allowlist of its own anymore. The branch dimension is only evaluated where a
 branch is known: operations without branch context (fetch, push discovery, repository-level
 authorization) carry `branch == ""` and the branch filter imposes nothing there — otherwise a
 `branches`-filtered grant could never complete discovery and no push would be possible at all.

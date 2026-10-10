@@ -62,7 +62,7 @@ func New(guard *policy.Guard, registry *provider.Registry, logger *slog.Logger) 
 // must be called before MCPServer to register the tool.
 func (s *Server) SetGitRemoteResolver(r GitRemoteResolver) { s.gitRemote = r }
 
-// MCPServer builds an mcp.Server with all tools registered. version is
+// MCPServer builds a mcp.Server with all tools registered. version is
 // advertised to clients and is typically injected at build time.
 func (s *Server) MCPServer(version string) *mcp.Server {
 	srv := mcp.NewServer(&mcp.Implementation{Name: "mcp-forj", Version: version}, nil)
@@ -331,25 +331,25 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 		}
 		caps := make([]configuredCapability, len(rule.Capabilities))
 		for i, grant := range rule.Capabilities {
-			cap := configuredCapability{
+			c := configuredCapability{
 				Name:       string(grant.Name),
 				Require:    grant.Filter.Require,
 				Exclude:    grant.Filter.Exclude,
 				NoAIExempt: grant.Filter.NoAIExempt,
 			}
 			if !grant.Filter.Paths.IsZero() {
-				cap.Paths = &configuredPathFilter{
+				c.Paths = &configuredPathFilter{
 					Include: grant.Filter.Paths.Include,
 					Exclude: grant.Filter.Paths.Exclude,
 				}
 			}
 			if !grant.Filter.Branches.IsZero() {
-				cap.Branches = &configuredPathFilter{
+				c.Branches = &configuredPathFilter{
 					Include: grant.Filter.Branches.Include,
 					Exclude: grant.Filter.Branches.Exclude,
 				}
 			}
-			caps[i] = cap
+			caps[i] = c
 		}
 		repos = append(repos, configuredRepository{
 			Provider:               rule.Provider,
@@ -1064,7 +1064,7 @@ func validateRepo(repo string) (string, error) {
 	if strings.Contains(repo, "//") {
 		return "", fmt.Errorf("repo %q contains an empty segment", repo)
 	}
-	for _, segment := range strings.Split(repo, "/") {
+	for segment := range strings.SplitSeq(repo, "/") {
 		if segment == ".." || segment == "." {
 			return "", fmt.Errorf("repo %q contains a relative segment", repo)
 		}
