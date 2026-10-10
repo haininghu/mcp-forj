@@ -8,6 +8,7 @@ the exact contract of every MCP tool. Prefer these documents over `git log`.
 
 | Folder             | Purpose                                                                 |
 |--------------------|-------------------------------------------------------------------------|
+| `architecture.md`  | The two entry points and the shared policy core, with diagrams — **start here**. |
 | `adr/`             | Architecture Decision Records: one decision per file, immutable once accepted. |
 | `bug-analysis/`    | Symptom -> root cause -> fix -> lesson for real defects.                 |
 | `method-specs/`    | Specification of each MCP tool and the shared authorization pipeline.    |

@@ -24,7 +24,7 @@ It exposes tools that let an AI agent inspect and (limitedly) act on code hostin
 | `internal/provider/gitlab`      | GitLab implementation (official `client-go`).                   |
 | `internal/gitproxy`             | Authenticated git smart-HTTP reverse proxy (pkt-line, policy).  |
 | `internal/server`               | MCP server, tool handlers, argument validation, limits.         |
-| `ai/`                           | Agent docs: ADRs, bug analyses, method specs (see below).       |
+| `ai/`                           | Agent docs: architecture overview, ADRs, bug analyses, method specs.  |
 | `configs/config.example.yaml`   | Documented example configuration.                               |
 | `README.md`, `AGENTS.md`        | User-facing overview and this file.                            |
 
@@ -139,6 +139,8 @@ a grant without one denies every push and a path-filtered grant gets no git acce
 
 ## Where to look
 
+- **System overview / flows**: `ai/architecture.md` — the two entry points (MCP tools, git proxy)
+  and the shared `policy.Guard` core, with component and sequence diagrams.
 - **Architecture decisions**: `ai/adr/` (start at `0001`).
 - **Bugs and lessons**: `ai/bug-analysis/`.
 - **MCP tool/operation specifications**: `ai/method-specs/`.

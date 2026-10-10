@@ -78,24 +78,82 @@ opencode loads its configuration once at startup, so restart it after editing.
 ¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
 [GitLab token permissions](#gitlab-token-permissions).
 
-`git_remote` is registered only while `server.git_proxy` is enabled. It returns the proxy clone URL
-and the authentication mode: with a configured **git proxy token** clients use HTTP Basic (any
-username, the token as password; the token itself is never returned by the tool or by
-`list_configured_rules`). The token is optional — without it the proxy binds loopback only and needs
-no authentication, and `git_remote` reports `auth.type: "none"`.
+`git_remote` is registered only while `server.git_proxy` is enabled — see [Git proxy](#git-proxy).
+
+## Git proxy
+
+Besides the MCP tools, the server can embed a **git smart-HTTP reverse proxy**: a second, HTTP
+entry point in the same process that serves real `git clone`/`fetch`/`push` through the **same**
+`policy.Guard` — same rules, capabilities and `.noai` overlay; the proxy holds no allowlist of its
+own.
+
+```mermaid
+flowchart LR
+  A["Agent / git client"]
+  subgraph P["mcp-forj (one process)"]
+    T["MCP tools (stdio)"]
+    G["policy.Guard"]
+    X["git proxy (HTTP listener)"]
+  end
+  GL[("GitLab")]
+  A -- "tool calls incl. git_remote" --> T
+  A -- "clone / fetch (repo:read)" --> X
+  A -- "push (repo:write + branches filter)" --> X
+  T --> G
+  X --> G
+  T -- "provider API (provider token)" --> GL
+  X -- "git smart-HTTP (provider token injected)" --> GL
+```
+
+**Usage.** Enable the proxy in the config; the agent learns the URL from the `git_remote` tool
+(repo:read-gated, the URL is credential-free and the token is never returned by any tool):
+
+```yaml
+server:
+  git_proxy:
+    enabled: true
+    listen: 127.0.0.1:8417
+    public_url: http://127.0.0.1:8417
+    # token: "${GIT_PROXY_TOKEN}"   # optional; selects the auth mode
+```
+
+- **Fetch/clone** requires `repo:read`, **push** requires `repo:write` with a `branches` filter
+  (doublestar on the target branch; without one **no push** is allowed, fail-closed). The proxy
+  additionally never pushes the default branch, never deletes branches and accepts only
+  fast-forwards.
+- **Client auth** is HTTP Basic with the optional `git_proxy.token` as password (username
+  ignored). Without a token the proxy binds **loopback only** and authenticates nobody;
+  `git_remote` then reports `auth.type: "none"`. The token is never logged and never returned by
+  any tool.
+- **Provider auth** stays separate: the proxy strips every inbound credential header and injects
+  the provider's own git credential, so client and provider identities never mix and only the
+  server's token ever reaches GitLab.
+
+**Limits** (all fail-closed by design; see [ADR 0011](ai/adr/0011-git-smart-http-reverse-proxy.md)
+and [`ai/architecture.md`](ai/architecture.md)):
+
+- An active `paths` filter cannot be enforced over git (a fetch is whole-tree), so a
+  path-filtered `repo:read`/`repo:write` grant gets **no git access** at all.
+- Git traffic carries no tags and the proxy keeps no cache, so **tag-constrained grants** always
+  deny over git.
+- `.noai` on a **fetch** can only be checked on the **default branch**; a **push** checks the
+  default branch and the target branch.
+- No Git LFS: the LFS endpoints are not served (404).
 
 ## Capabilities
 
 - `policy:read` – expose the configured rules for a provider (`list_configured_rules`).
 - `repo:list` – discover repositories through the provider API.
-- `repo:read` – read repository files.
+- `repo:read` – read repository files; also gates **git fetch/clone** through the git proxy.
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:diff` – read merge request file diffs (`get_merge_request_diff`).
 - `mr:comment` – comment on merge requests.
 - `mr:rebase` – trigger an asynchronous merge request rebase.
 - `mr:merge` – merge a merge request.
 - `mr:write` – reserved (create/update/close merge requests).
-- `repo:write` – reserved.
+- `repo:write` – gates **git push** through the git proxy. The `branches` filter of the grant
+  (doublestar on the target branch, exclude wins) decides which branches may be pushed; without
+  one **no push** is allowed. The only capability that accepts a `branches` filter.
 
 ## Configuration
 
@@ -219,8 +277,13 @@ Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **g
 | `merge_merge_request` (`mr:merge`)   | **Merge Request: Update** (+ Merge Request: Read; merge role, e.g. Developer) |
 | `list_merge_request_notes`           | **Work Item: Read** (+ Merge Request: Read)                                   |
 | `add_merge_request_note`             | **Work Item: Create** (+ Merge Request: Read)                                 |
-| `repo:write` (reserved)              | Repository: Create/Update/Delete                                              |
+| git fetch/clone via proxy (`repo:read`) | **Repository: Read**                                                       |
+| git push via proxy (`repo:write`)    | **Repository: Write**                                                         |
 | `mr:write` (reserved)                | Merge Request: Create/Update/Close                                            |
+
+Every **non-exempt** operation also reads the `.noai` marker file, so **Repository: Read** (on the
+default branch) is required regardless of the granted capabilities; otherwise those operations fail
+closed.
 
 Classic tokens: use the `api` scope (read+write) or `read_api` (read only). A rebase also needs at least
 the **Developer** role (push access to the source branch); merging also needs a role allowed to merge
@@ -244,11 +307,17 @@ the **Developer** role (push access to the source branch); merging also needs a 
 - No caching: labels, topics and markers are fetched on every operation.
 - `mr:diff` is denied on a `.noai` repository unless the grant is exempted with `noai: allow`; diffs are
   repository content, but the marker is an integrity control, not a confidentiality control.
-- `repo:write`/`mr:write` are reserved; only the capabilities listed above have tools.
+- `mr:write` is reserved; `repo:write` has no MCP tool — it gates git push through the proxy.
+- Git proxy (fail-closed): an active `paths` filter or a tag filter on `repo:read`/`repo:write`
+  means **no git access**; there is no Git LFS support; `.noai` on fetch is checked on the default
+  branch only (push: default **and** target branch); no packfile size limit. See
+  [ADR 0011](ai/adr/0011-git-smart-http-reverse-proxy.md).
 
 ## Docs
 
 - [`AGENTS.md`](AGENTS.md) — repo map, commands, conventions and authorization invariants.
+- [`ai/architecture.md`](ai/architecture.md) — the two entry points and the shared policy core
+  (component and flow diagrams; start here for the big picture).
 - [`ai/README.md`](ai/README.md) — index of the agent documentation.
 - [`ai/adr/`](ai/adr/) — architecture decision records (start at `0001`).
 - [`ai/bug-analysis/`](ai/bug-analysis/) — symptom -> root cause -> fix -> lesson.

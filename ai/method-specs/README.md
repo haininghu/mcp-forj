@@ -2,7 +2,9 @@
 
 Precise contracts for the MCP tools exposed by `mcp-forj`, plus the shared
 authorization pipeline (`authorization.md`). Use these to align the server code,
-tests, and configuration documentation.
+tests, and configuration documentation. The git smart-HTTP proxy
+(`../architecture.md`, ADR 0011) is a second, policy-governed entry point next to
+these tools; `git_remote` is its clone-URL discovery tool.
 
 ## Index
 
@@ -19,6 +21,7 @@ tests, and configuration documentation.
 | `rebase_merge_request.md`     | Trigger an asynchronous MR rebase.                         |
 | `merge_merge_request.md`      | Merge a merge request and return the merged MR.            |
 | `read_file.md`                | Read a repository file.                                    |
+| `git_remote.md`               | Git proxy clone URL (`repo:read`, token never returned).   |
 
 ## Template
 
