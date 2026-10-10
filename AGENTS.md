@@ -121,7 +121,8 @@ Every capability-gated tool follows the same pipeline:
 candidates (omitting `.noai` ones unless the `repo:list` grant is `noai`-exempt); `git_remote` is
 registered only while the git proxy is enabled, gates `repo:read` via `Guard.Authorize` (unknown tags
 fail closed, `.noai` overlay included) before calling the proxy resolver, and never returns the
-proxy token.
+proxy token. The proxy token is **optional**: without it the proxy binds loopback only and performs
+no authentication (`git_remote` then reports `auth.type: "none"`); with it clients use HTTP Basic.
 
 ## Where to look
 

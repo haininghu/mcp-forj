@@ -70,7 +70,9 @@ type Config struct {
 	// PublicURL is the absolute http(s) URL at which clients reach the proxy.
 	PublicURL string
 	// Token is the HTTP Basic password the proxy accepts; the username is
-	// ignored. It is never logged and never forwarded upstream.
+	// ignored. It is never logged and never forwarded upstream. It is
+	// optional: without it the proxy does not authenticate clients and must
+	// bind loopback only (New rejects a non-loopback listen).
 	Token string
 	// TLSCert and TLSKey enable HTTPS when both are set.
 	TLSCert string
@@ -99,10 +101,13 @@ type Server struct {
 
 // New constructs a Server. registry resolves the provider segment of a route
 // and guard performs capability authorization including the .noai overlay. A
-// nil logger discards logs. Token, Listen and PublicURL are mandatory; an
-// empty Branches list is valid and denies every push. Plain HTTP is only
-// accepted on a loopback listen address unless TLS is configured or
-// AllowInsecure is set explicitly.
+// nil logger discards logs. Listen and PublicURL are mandatory; an empty
+// Branches list is valid and denies every push. Token is optional: with a
+// token, clients authenticate via HTTP Basic; without one the proxy performs
+// no authentication and must bind loopback only, so an empty Token together
+// with a non-loopback listen is an error. Plain HTTP is only accepted on a
+// loopback listen address unless TLS is configured or AllowInsecure is set
+// explicitly.
 func New(cfg Config, registry *provider.Registry, guard *policy.Guard, logger *slog.Logger) (*Server, error) {
 	if registry == nil {
 		return nil, errors.New("gitproxy: provider registry is required")
@@ -113,8 +118,8 @@ func New(cfg Config, registry *provider.Registry, guard *policy.Guard, logger *s
 	if cfg.Listen == "" {
 		return nil, errors.New("gitproxy: listen address is required")
 	}
-	if cfg.Token == "" {
-		return nil, errors.New("gitproxy: token is required")
+	if cfg.Token == "" && !isLoopbackAddr(cfg.Listen) {
+		return nil, fmt.Errorf("gitproxy: token is required for a non-loopback listen address %q", cfg.Listen)
 	}
 	hasCert, hasKey := cfg.TLSCert != "", cfg.TLSKey != ""
 	if hasCert != hasKey {
@@ -212,8 +217,11 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		serveErr <- err
 	}()
 
+	// The auth field names the mode only (token set or not); the token itself
+	// is never logged.
 	s.logger.Info("git proxy listening",
-		"listen", s.cfg.Listen, "public_url", s.cfg.PublicURL, "tls", tls)
+		"listen", s.cfg.Listen, "public_url", s.cfg.PublicURL, "tls", tls,
+		"auth", s.AuthRequired())
 
 	select {
 	case err := <-serveErr:

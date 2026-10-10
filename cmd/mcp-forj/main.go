@@ -120,11 +120,13 @@ func run() error {
 				logger.Error("git proxy terminated", "error", err.Error())
 			}
 		}()
-		// The token is deliberately not part of this log line.
+		// The token is deliberately not part of this log line; auth_required
+		// names the mode only (false: loopback-only, no authentication).
 		logger.Info("git proxy enabled",
 			"listen", gp.Listen,
 			"public_url", gp.PublicURL,
 			"branches", gp.Branches.Allow,
+			"auth_required", ps.AuthRequired(),
 		)
 	}
 

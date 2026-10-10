@@ -33,11 +33,13 @@ const (
 	truncatedMarker   = "\n[truncated]"
 )
 
-// GitRemoteResolver resolves the git proxy clone URL for a repository. It is
-// implemented by the git proxy server. A nil resolver disables the git_remote
-// tool.
+// GitRemoteResolver resolves the git proxy clone URL for a repository and
+// reports whether the proxy requires clients to authenticate with the proxy
+// token (false in the token-less loopback-only mode). It is implemented by the
+// git proxy server. A nil resolver disables the git_remote tool.
 type GitRemoteResolver interface {
 	RemoteURL(providerName, repo string) (string, error)
+	AuthRequired() bool
 }
 
 // Server holds the MCP tool handlers and their dependencies.
@@ -120,7 +122,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	if s.gitRemote != nil {
 		mcp.AddTool(srv, &mcp.Tool{
 			Name:        "git_remote",
-			Description: "Return the git smart-HTTP proxy clone URL for a repository. Cloning through the proxy requires HTTP Basic auth with any username and the configured git proxy token as the password; the token is never returned by this tool. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
+			Description: "Return the git smart-HTTP proxy clone URL for a repository together with the authentication mode: HTTP Basic with any username and the configured git proxy token as the password (the token is never returned by this tool), or auth.type `none` for a loopback-only proxy running without a token. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
 		}, s.handleGitRemote)
 	}
 
@@ -293,12 +295,13 @@ type readFileOutput struct {
 }
 
 // gitRemoteAuthJSON describes how to authenticate against the git proxy. It
-// deliberately carries no secret: the password is the configured proxy token,
-// which this tool never outputs.
+// deliberately carries no secret: in "http-basic" mode the password is the
+// configured proxy token, which this tool never outputs; "none" is the
+// token-less loopback-only mode.
 type gitRemoteAuthJSON struct {
-	Type     string `json:"type"`     // "http-basic"
-	Username string `json:"username"` // "any": the proxy ignores the username
-	Note     string `json:"note"`     // where the password comes from
+	Type     string `json:"type"`               // "http-basic" or "none"
+	Username string `json:"username,omitempty"` // "any": the proxy ignores the username
+	Note     string `json:"note"`               // where the password comes from
 }
 
 type gitRemoteOutput struct {
@@ -926,8 +929,10 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 // authorizes repo:read with the full guard (unknown tags plus the .noai
 // overlay) before calling the resolver, mirroring the proxy's own fetch gate:
 // a grant with a tag constraint fails closed and a .noai denial stays
-// indistinguishable from an unknown repository. The proxy token is never part
-// of the output; resolver details are logged server-side only.
+// indistinguishable from an unknown repository. The auth mode comes from the
+// resolver: "http-basic" when a proxy token is configured, "none" in the
+// token-less loopback-only mode. The proxy token is never part of the output;
+// resolver details are logged server-side only.
 func (s *Server) handleGitRemote(ctx context.Context, _ *mcp.CallToolRequest, in gitRemoteInput) (*mcp.CallToolResult, any, error) {
 	repo, err := validateRepo(in.Repo)
 	if err != nil {
@@ -948,15 +953,22 @@ func (s *Server) handleGitRemote(ctx context.Context, _ *mcp.CallToolRequest, in
 			"provider", in.Provider, "repo", in.Repo, "error", err.Error())
 		return nil, nil, errors.New("could not determine the git remote URL")
 	}
+	auth := gitRemoteAuthJSON{
+		Type:     "http-basic",
+		Username: "any",
+		Note:     "Use the configured git proxy token as the password; it is never returned by this tool.",
+	}
+	if !s.gitRemote.AuthRequired() {
+		auth = gitRemoteAuthJSON{
+			Type: "none",
+			Note: "No authentication required (loopback only).",
+		}
+	}
 	return jsonResult(gitRemoteOutput{
 		Provider:  in.Provider,
 		Repo:      in.Repo,
 		RemoteURL: cloneURL,
-		Auth: gitRemoteAuthJSON{
-			Type:     "http-basic",
-			Username: "any",
-			Note:     "Use the configured git proxy token as the password; it is never returned by this tool.",
-		},
+		Auth:      auth,
 	})
 }
 

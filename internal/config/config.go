@@ -61,7 +61,9 @@ type GitProxyConfig struct {
 	// PublicURL is the absolute http(s) URL at which clients reach the proxy.
 	PublicURL string `yaml:"public_url"`
 	// Token is the HTTP Basic password the proxy accepts (resolved by Parse,
-	// literal or ${NAME} env reference like the provider tokens).
+	// literal or ${NAME} env reference like the provider tokens). It is
+	// optional: without it the proxy binds loopback only and serves without
+	// authentication (see validate).
 	Token Secret `yaml:"token"`
 	// TLSCert is an optional certificate file; when set with TLSKey the proxy
 	// serves HTTPS.
@@ -337,7 +339,10 @@ func Parse(data []byte) (*Config, error) {
 		}
 		cfg.Providers[i].Token = resolved
 	}
-	if cfg.Server.GitProxy.Token.Value() != "" {
+	// The proxy token is optional: an absent (or blank) raw value stays empty
+	// and selects the unauthenticated loopback-only mode; validate enforces
+	// the loopback bound.
+	if strings.TrimSpace(cfg.Server.GitProxy.Token.Value()) != "" {
 		resolved, err := resolveSecret(string(cfg.Server.GitProxy.Token))
 		if err != nil {
 			return nil, fmt.Errorf("config: git_proxy: %w", err)
@@ -494,6 +499,9 @@ func (c *Config) Validate() error {
 // and an absent branches.allow never fail here; an explicitly empty
 // branches.allow ([]) is not defaulted and is rejected, keeping a deliberate
 // "allow nothing" configuration a visible error instead of a silent default.
+// The token is optional: without it the proxy authenticates nobody and must
+// bind loopback only; a non-loopback listen therefore requires a token (and,
+// for plain HTTP, TLS or allow_insecure as before).
 func (g *GitProxyConfig) validate() error {
 	if g.Listen == "" {
 		return fmt.Errorf("config: git_proxy: listen is required")
@@ -502,8 +510,8 @@ func (g *GitProxyConfig) validate() error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("config: git_proxy: public_url must be an absolute http(s) URL")
 	}
-	if g.Token.Value() == "" {
-		return fmt.Errorf("config: git_proxy: token is required")
+	if g.Token.Value() == "" && !listenIsLoopback(g.Listen) {
+		return fmt.Errorf("config: git_proxy: token is required for a non-loopback listen address %q", g.Listen)
 	}
 	if len(g.Branches.Allow) == 0 {
 		return fmt.Errorf("config: git_proxy: branches.allow must not be empty")

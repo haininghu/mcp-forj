@@ -231,6 +231,13 @@ func newTestServer(t *testing.T, p *fakeProvider, grants []policy.Capability, br
 // constraint whose behavior in the proxy is fail-closed).
 func newTestServerGrants(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant, branches []string) *Server {
 	t.Helper()
+	return newTestServerGrantsToken(t, p, grants, branches, proxyToken)
+}
+
+// newTestServerGrantsToken is newTestServerGrants with an explicit proxy token;
+// an empty token selects the token-less loopback-only mode.
+func newTestServerGrantsToken(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant, branches []string, token string) *Server {
+	t.Helper()
 	pol, err := policy.Build([]policy.RuleSpec{{
 		Repositories: []string{"team/*"},
 		Effect:       string(policy.EffectAllow),
@@ -249,7 +256,7 @@ func newTestServerGrants(t *testing.T, p *fakeProvider, grants []policy.Capabili
 	s, err := New(Config{
 		Listen:    "127.0.0.1:0",
 		PublicURL: "https://gitproxy.example.com/",
-		Token:     proxyToken,
+		Token:     token,
 		Branches:  branches,
 	}, registry, guard, nil)
 	if err != nil {
@@ -323,6 +330,51 @@ func TestAuthRequired(t *testing.T) {
 	rec = doRequest(t, s, http.MethodGet, target, nil, "git", proxyToken)
 	if rec.Code != http.StatusOK {
 		t.Errorf("correct password = %d, want 200", rec.Code)
+	}
+}
+
+// TestNoTokenModeSkipsAuthentication pins the token-less mode: on a loopback
+// listen without a proxy token, requests carrying no Authorization header are
+// forwarded (still upstream-authenticated with the provider credential only),
+// and a stray client credential neither authenticates nor leaks upstream.
+func TestNoTokenModeSkipsAuthentication(t *testing.T) {
+	ad := []byte("001e# service=git-upload-pack\n0000")
+	u := newUpstream(t, ad)
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrantsToken(t, p,
+		[]policy.CapabilityGrant{{Name: policy.CapRepoRead}}, []string{"ai/**"}, "")
+
+	target := "/git/" + providerName + "/" + repo + ".git/info/refs?service=git-upload-pack"
+
+	rec := doRequest(t, s, http.MethodGet, target, nil, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("anonymous without token = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	if ch := rec.Header().Get("WWW-Authenticate"); ch != "" {
+		t.Errorf("WWW-Authenticate = %q, want no challenge without a token", ch)
+	}
+
+	rec = doRequest(t, s, http.MethodGet, target, nil, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("stray credentials without token = %d, want 200", rec.Code)
+	}
+	got := u.last()
+	if got.authorization != fakeGitAuth {
+		t.Errorf("upstream Authorization = %q, want the provider credential", got.authorization)
+	}
+	if strings.Contains(got.authorization, proxyToken) {
+		t.Error("upstream Authorization contains the proxy token")
+	}
+}
+
+func TestAuthRequiredReflectsToken(t *testing.T) {
+	p := newFetchProvider("http://upstream.invalid")
+	if !newTestServer(t, p, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"}).AuthRequired() {
+		t.Error("AuthRequired() = false with a token, want true")
+	}
+	s := newTestServerGrantsToken(t, p, []policy.CapabilityGrant{{Name: policy.CapRepoRead}}, []string{"ai/**"}, "")
+	if s.AuthRequired() {
+		t.Error("AuthRequired() = true without a token, want false")
 	}
 }
 
@@ -1000,8 +1052,15 @@ func TestNewValidatesConfig(t *testing.T) {
 	if _, err := New(Config{PublicURL: base.PublicURL, Token: base.Token}, registry, guard, nil); err == nil {
 		t.Error("New accepted an empty listen address")
 	}
-	if _, err := New(Config{Listen: base.Listen, PublicURL: base.PublicURL}, registry, guard, nil); err == nil {
-		t.Error("New accepted an empty token")
+	// An empty token is the token-less loopback-only mode: valid on loopback.
+	if _, err := New(Config{Listen: base.Listen, PublicURL: base.PublicURL}, registry, guard, nil); err != nil {
+		t.Errorf("New rejected the token-less loopback mode: %v", err)
+	}
+	// Without a token a non-loopback listen fails even with allow_insecure, so
+	// the rejection is the token rule, not the plain-HTTP rule.
+	if _, err := New(Config{Listen: "0.0.0.0:8417", PublicURL: base.PublicURL,
+		AllowInsecure: true}, registry, guard, nil); err == nil {
+		t.Error("New accepted a token-less proxy on a non-loopback listen address")
 	}
 	if _, err := New(Config{Listen: base.Listen, PublicURL: "git.example.com", Token: base.Token}, registry, guard, nil); err == nil {
 		t.Error("New accepted a relative public URL")

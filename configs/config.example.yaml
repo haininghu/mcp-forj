@@ -16,8 +16,8 @@ server:
     # The provider token below MUST be able to read repository files on the
     # default branch, otherwise non-exempt operations fail closed.
 
-  # Authenticated git smart-HTTP reverse proxy (optional, disabled by default).
-  # It serves "git clone/fetch/push" over HTTP Basic at
+  # Git smart-HTTP reverse proxy (optional, disabled by default). It serves
+  # "git clone/fetch/push" at
   #   <public_url>/git/<provider>/<repo>.git/...
   # where <repo> is the namespace/project path. Fetch requires repo:read and
   # push requires repo:write from the provider rules below; `.noai` is enforced
@@ -28,6 +28,13 @@ server:
   #   enabled: true
   #   listen: 127.0.0.1:8417             # bind address (defaults to this)
   #   public_url: https://git.example.com # absolute http(s) URL clients use
+  #   # token is OPTIONAL and selects the mode:
+  #   #   with token    - clients authenticate via HTTP Basic (username ignored,
+  #   #                   password = token); non-loopback binds become possible.
+  #   #   without token - the proxy binds loopback ONLY and requires no
+  #   #                   authentication; git_remote then reports auth.type
+  #   #                   "none". A non-loopback listen without token is a
+  #   #                   config error.
   #   token: "${GIT_PROXY_TOKEN}"         # HTTP Basic password (username is ignored)
   #   branches:
   #     allow: ["ai/**"]                  # doublestar globs for pushable branches

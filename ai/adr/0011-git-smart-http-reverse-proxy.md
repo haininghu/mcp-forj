@@ -41,13 +41,21 @@ than the tools for the same configuration.
   must likewise escape the repository path when building the remote URL (see below).
   The provider segment is resolved against the registry before authorization
   (unknown provider = 404, like any unsupported endpoint).
-- **Authentication**: HTTP Basic; the username is ignored, the password must equal
-  `git_proxy.token`, compared with `crypto/subtle.ConstantTimeCompare`. Failures answer 401 with
-  a `WWW-Authenticate: Basic` challenge. The proxy token is never logged and never forwarded
-  upstream; the upstream receives only the provider's own header from `GitAuthHeader`.
+- **Authentication** has two modes, selected by `git_proxy.token`:
+  - **With token**: HTTP Basic; the username is ignored, the password must equal
+    `git_proxy.token`, compared with `crypto/subtle.ConstantTimeCompare`. Failures answer 401 with
+    a `WWW-Authenticate: Basic` challenge. The proxy token is never logged and never forwarded
+    upstream; the upstream receives only the provider's own header from `GitAuthHeader`.
+  - **Without token**: the proxy authenticates nobody (`Server.AuthRequired` reports false and no
+    `WWW-Authenticate` is ever sent) and therefore must bind **loopback only** — a non-loopback
+    listen without a token is a configuration error (validated in config and again in
+    `gitproxy.New`). Capability authorization, push policy and the `.noai` overlay still apply
+    unchanged; only the client-facing credential gate is absent, so every local process on the
+    host may use the proxy under the server's identity.
 - **Clone URL discovery**: the `git_remote` MCP tool (registered only while the proxy is enabled)
   exposes `Server.RemoteURL` so an agent can learn the credential-free clone URL; the token itself
-  is never returned by the tool.
+  is never returned by the tool. The tool's `auth` object mirrors `Server.AuthRequired`:
+  `http-basic` with any username when a token is configured, `none` (loopback-only note) without.
 - **Authorization before the provider call**, using the existing guard. Fetch
   (`info/refs?service=git-upload-pack`, `POST git-upload-pack`) needs `repo:read`; push discovery
   (`info/refs?service=git-receive-pack`, GET) needs `repo:write`. Both go through `Guard.Authorize`
@@ -94,12 +102,14 @@ than the tools for the same configuration.
   rejected in `ModifyResponse` and surface as 502: a `Location` must never reach the client, or
   the git client would resend its proxy credentials to the redirect target.
 - **Config**: `server.git_proxy` with `enabled`, `listen` (default `127.0.0.1:8417`),
-  `public_url`, `token` (secret handling per ADR 0005, `${NAME}` env references supported),
-  optional `tls_cert`/`tls_key` (both or neither), `allow_insecure` (explicit opt-in for plain
-  HTTP on a non-loopback address), and `branches.allow` (validated doublestar globs; an explicit
-  empty list is a config error, not a default). Plain HTTP on a non-loopback `listen` without TLS
-  is a hard configuration error (validated in config and again in `gitproxy.New`); an
-  unparsable listen host counts as non-loopback (fail-safe).
+  `public_url`, optional `token` (secret handling per ADR 0005, `${NAME}` env references supported;
+  an absent or blank token selects the unauthenticated **loopback-only** mode), optional
+  `tls_cert`/`tls_key` (both or neither), `allow_insecure` (explicit opt-in for plain HTTP on a
+  non-loopback address), and `branches.allow` (validated doublestar globs; an explicit empty list
+  is a config error, not a default). A token-less proxy on a non-loopback `listen`, and plain HTTP
+  with a token on a non-loopback `listen` without TLS, are hard configuration errors (validated in
+  config and again in `gitproxy.New`); an unparsable listen host counts as non-loopback
+  (fail-safe).
 
 ## Known MVP limitations
 
@@ -156,4 +166,5 @@ These are deliberate scope decisions, not bugs; they are listed so operators can
 - The MCP tool `git_remote` (registered only while the proxy is enabled) returns the clone URL through
   `Server.RemoteURL`; the proxy token is never part of the tool output. It authorizes `repo:read` with
   the full guard (unknown tags fail closed, `.noai` overlay included) before calling the resolver, so
-  the tool sees exactly what the proxy would allow for a fetch.
+  the tool sees exactly what the proxy would allow for a fetch. The `auth` object reports `http-basic`
+  when a token is configured and `none` (no authentication, loopback only) in the token-less mode.

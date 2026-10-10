@@ -78,9 +78,11 @@ opencode loads its configuration once at startup, so restart it after editing.
 ¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
 [GitLab token permissions](#gitlab-token-permissions).
 
-`git_remote` is registered only while `server.git_proxy` is enabled. It returns the proxy clone URL;
-authentication is HTTP Basic with any username and the configured **git proxy token** as the
-password — the token itself is never returned by the tool or by `list_configured_rules`.
+`git_remote` is registered only while `server.git_proxy` is enabled. It returns the proxy clone URL
+and the authentication mode: with a configured **git proxy token** clients use HTTP Basic (any
+username, the token as password; the token itself is never returned by the tool or by
+`list_configured_rules`). The token is optional — without it the proxy binds loopback only and needs
+no authentication, and `git_remote` reports `auth.type: "none"`.
 
 ## Capabilities
 

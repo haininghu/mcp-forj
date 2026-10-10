@@ -227,7 +227,8 @@ type testEnv struct {
 
 // fakeGitRemote is a GitRemoteResolver test stub. It records the calls and
 // returns a fixed URL; the token field mirrors the real proxy holding a secret
-// that must never reach the tool output.
+// that must never reach the tool output, and a non-empty token mirrors the
+// authenticated mode (AuthRequired).
 type fakeGitRemote struct {
 	url          string
 	token        string
@@ -245,6 +246,8 @@ func (f *fakeGitRemote) RemoteURL(providerName, repo string) (string, error) {
 	}
 	return f.url, nil
 }
+
+func (f *fakeGitRemote) AuthRequired() bool { return f.token != "" }
 
 func newTestEnv(t *testing.T, rules []policy.RuleSpec, fake *fakeProvider) *testEnv {
 	t.Helper()
@@ -2517,12 +2520,44 @@ func TestGitRemoteAllowedReturnsURLWithoutToken(t *testing.T) {
 	if out.Auth.Type != "http-basic" || out.Auth.Username != "any" {
 		t.Errorf("auth = %+v, want http-basic/any", out.Auth)
 	}
+	if !strings.Contains(out.Auth.Note, "git proxy token") {
+		t.Errorf("auth note = %q, want it to point at the configured git proxy token", out.Auth.Note)
+	}
 	// Data hygiene: the proxy token never appears in tool output or logs.
 	if strings.Contains(resultText(t, res), proxyToken) {
 		t.Errorf("token leaked into tool output: %s", resultText(t, res))
 	}
 	if strings.Contains(env.logs.String(), proxyToken) {
 		t.Errorf("token leaked into logs: %s", env.logs.String())
+	}
+}
+
+// TestGitRemoteAuthNoneWithoutProxyToken pins the token-less mode: a resolver
+// reporting AuthRequired false yields auth.type "none" with the loopback note
+// and no username.
+func TestGitRemoteAuthNoneWithoutProxyToken(t *testing.T) {
+	resolver := &fakeGitRemote{url: proxyCloneURL}
+	env := newTestEnvWithResolver(t, allowRules("repo:read"), newFake(), resolver)
+
+	res := env.call(t, "git_remote", gitRemoteArgs())
+	if res.IsError {
+		t.Fatalf("git_remote denied: %s", resultText(t, res))
+	}
+	var out gitRemoteOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.RemoteURL != proxyCloneURL {
+		t.Errorf("remote_url = %q, want %q", out.RemoteURL, proxyCloneURL)
+	}
+	if out.Auth.Type != "none" {
+		t.Errorf("auth.type = %q, want \"none\"", out.Auth.Type)
+	}
+	if out.Auth.Username != "" {
+		t.Errorf("auth.username = %q, want it empty in the none mode", out.Auth.Username)
+	}
+	if !strings.Contains(out.Auth.Note, "No authentication required (loopback only)") {
+		t.Errorf("auth note = %q, want the loopback-only note", out.Auth.Note)
 	}
 }
 

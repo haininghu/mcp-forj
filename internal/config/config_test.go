@@ -1372,9 +1372,13 @@ func TestGitProxyValidationFailures(t *testing.T) {
 			wantErr: "public_url must be an absolute http(s) URL",
 		},
 		{
-			name:    "missing token",
-			mutate:  func(g *GitProxyConfig) { g.Token = "" },
-			wantErr: "token is required",
+			name: "missing token on non-loopback listen",
+			mutate: func(g *GitProxyConfig) {
+				g.Token = ""
+				g.Listen = "0.0.0.0:8417"
+				g.AllowInsecure = true
+			},
+			wantErr: "token is required for a non-loopback listen address",
 		},
 		{
 			name:    "empty branches.allow",
@@ -1437,6 +1441,74 @@ func TestGitProxyValidTLSBoth(t *testing.T) {
 	})
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate rejected a complete TLS pair: %v", err)
+	}
+}
+
+// TestGitProxyTokenOptionalModes pins the two proxy modes: without a token the
+// proxy must stay loopback-only (and is then valid there), with a token a
+// non-loopback listen is allowed subject to the existing TLS/allow_insecure
+// rule.
+func TestGitProxyTokenOptionalModes(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*GitProxyConfig)
+		wantErr bool
+	}{
+		{"loopback without token", func(g *GitProxyConfig) { g.Token = "" }, false},
+		{"localhost without token", func(g *GitProxyConfig) {
+			g.Token = ""
+			g.Listen = "localhost:8417"
+		}, false},
+		{"loopback with token", func(g *GitProxyConfig) {}, false},
+		{"non-loopback without token", func(g *GitProxyConfig) {
+			g.Token = ""
+			g.Listen = "0.0.0.0:8417"
+			g.AllowInsecure = true
+		}, true},
+		{"non-loopback with token and allow_insecure", func(g *GitProxyConfig) {
+			g.Listen = "0.0.0.0:8417"
+			g.AllowInsecure = true
+		}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := gitProxyTestConfig(tc.mutate)
+			err := cfg.Validate()
+			if tc.wantErr && err == nil {
+				t.Errorf("Validate accepted %s, want an error", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("Validate rejected %s: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestGitProxyParseWithoutToken(t *testing.T) {
+	yaml := `
+server:
+  git_proxy:
+    enabled: true
+    public_url: http://127.0.0.1:8417
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities: [mr:read]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected a token-less loopback proxy: %v", err)
+	}
+	if cfg.Server.GitProxy.Token.Value() != "" {
+		t.Errorf("token = %q, want it to stay empty", cfg.Server.GitProxy.Token.Value())
+	}
+	if cfg.Server.GitProxy.Listen != defaultGitProxyListen {
+		t.Errorf("listen = %q, want the loopback default", cfg.Server.GitProxy.Listen)
 	}
 }
 
