@@ -17,6 +17,21 @@ import (
 // bounds the packfile, which the parser does not touch.
 const maxCommandSection = 1 << 20
 
+// maxPushOptionsSection bounds the pkt-line push-options section of a
+// git-receive-pack request the same way maxCommandSection bounds the command
+// section: an oversized section is rejected fail-closed and never reached the
+// provider.
+const maxPushOptionsSection = 1 << 20
+
+// maxPushOption bounds one push option. Options are short "key[=value]" strings,
+// so a longer payload is malformed or hostile input and fails closed. It also
+// keeps option-sized data out of the policy decision and the logs.
+const maxPushOption = 4096
+
+// pushOptionsCapability is the capability a client announces on the first
+// command line to say that a push-options section follows the command flush.
+const pushOptionsCapability = "push-options"
+
 // Pkt-line lengths of the special (non-data) packets.
 const (
 	flushPktLen        = 0
@@ -38,60 +53,171 @@ type RefUpdate struct {
 	Ref string
 }
 
-// ReadReceivePackCommands reads the pkt-line command section of a
-// git-receive-pack request from br, returning the parsed updates and the exact
-// bytes consumed (commands plus the terminating flush packet). It stops at the
-// flush packet, so br still yields the packfile that follows; the caller
-// reassembles the request body as io.MultiReader(bytes.NewReader(consumed), br).
-// A malformed or oversized command section is an error (fail-closed).
+// ReceivePack is the parsed preamble of a git-receive-pack request.
+type ReceivePack struct {
+	// Updates are the ref commands of the command section.
+	Updates []RefUpdate
+	// PushOptions are the pkt-line push options (empty when none were sent).
+	PushOptions []string
+	// Consumed is every byte read (command section and, when present, the
+	// push-options section, each including its flush), so callers reassemble
+	// the body as io.MultiReader(bytes.NewReader(Consumed), br).
+	Consumed []byte
+}
+
+// ReadReceivePack reads the command section of a git-receive-pack request and,
+// when the client negotiated the "push-options" capability, the following
+// push-options section. It stops at the packfile; a malformed or oversized
+// section is an error (fail-closed).
 //
 // The command section grammar is one pkt-line per ref update, the first of the
-// form "<old-sha> <new-sha> <ref>\0<capabilities>" (the capability list is
-// parsed but discarded) and later ones "<old-sha> <new-sha> <ref>"; a trailing
-// LF is optional. consumed is a fresh, stable snapshot: the caller may retain
-// and replay it independently of br.
-func ReadReceivePackCommands(br *bufio.Reader) (updates []RefUpdate, consumed []byte, err error) {
-	var buf bytes.Buffer
+// form "<old-sha> <new-sha> <ref>\0<capabilities>" and later ones
+// "<old-sha> <new-sha> <ref>"; a trailing LF is optional. The capability list
+// after the NUL is parsed to detect the push-options negotiation. Each
+// push-options payload is one option, sent with an optional trailing LF that is
+// stripped, mirroring what git's receive-pack does. Consumed is a fresh, stable
+// snapshot of both sections including their flush packets: the caller may retain
+// and replay it independently of br, and the packfile is never touched.
+func ReadReceivePack(br *bufio.Reader) (*ReceivePack, error) {
+	var consumed bytes.Buffer
+	var updates []RefUpdate
+	pushOptions := false
+	commandBytes := 0
 	for {
-		header := make([]byte, pktLineHeaderLen)
-		if _, err := io.ReadFull(br, header); err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil, nil, errors.New("gitproxy: command section ended without a flush packet")
-			}
-			return nil, nil, fmt.Errorf("gitproxy: truncated pkt-line length prefix: %w", err)
-		}
-		length, err := parsePktLen(header)
+		payload, flush, err := nextPktLine(br, &consumed, commandBytes, maxCommandSection, "command")
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
-		switch length {
-		case flushPktLen:
-			buf.Write(header)
+		if flush {
 			if len(updates) == 0 {
-				return nil, nil, errors.New("gitproxy: command section contains no ref update")
+				return nil, errors.New("gitproxy: command section contains no ref update")
 			}
-			return updates, buf.Bytes(), nil
-		case delimPktLen, responseEndPktLen:
-			return nil, nil, fmt.Errorf("gitproxy: pkt-line %q is not valid in a command section", header)
+			rp := &ReceivePack{Updates: updates}
+			if pushOptions {
+				// Only a client that negotiated the capability may send the
+				// section; reading it whenever the capability is present is the
+				// fail-closed choice. Without it the packfile follows the flush
+				// directly and stays untouched in br.
+				rp.PushOptions, err = readPushOptions(br, &consumed)
+				if err != nil {
+					return nil, err
+				}
+			}
+			// Snapshot last: Consumed then covers every section read so far, each
+			// including its flush packet, while br holds exactly the packfile.
+			rp.Consumed = consumed.Bytes()
+			return rp, nil
 		}
-		if length < minDataPktLineLen {
-			return nil, nil, fmt.Errorf("gitproxy: invalid pkt-line length %q", header)
-		}
-		if buf.Len()+length > maxCommandSection {
-			return nil, nil, fmt.Errorf("gitproxy: command section exceeds %d bytes", maxCommandSection)
-		}
-		payload := make([]byte, length-pktLineHeaderLen)
-		if _, err := io.ReadFull(br, payload); err != nil {
-			return nil, nil, fmt.Errorf("gitproxy: truncated pkt-line payload: %w", err)
-		}
-		buf.Write(header)
-		buf.Write(payload)
 		update, err := parseCommand(payload)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
+		if len(updates) == 0 {
+			pushOptions = negotiatesPushOptions(payload)
+		}
+		commandBytes += len(payload) + pktLineHeaderLen
 		updates = append(updates, update)
 	}
+}
+
+// readPushOptions reads the push-options section that follows the command flush
+// and appends every byte to consumed, so the section replays verbatim. Each
+// payload is one option; the section ends at the next flush packet.
+func readPushOptions(br *bufio.Reader, consumed *bytes.Buffer) ([]string, error) {
+	var options []string
+	optionBytes := 0
+	for {
+		payload, flush, err := nextPktLine(br, consumed, optionBytes, maxPushOptionsSection, "push-options")
+		if err != nil {
+			return nil, err
+		}
+		if flush {
+			return options, nil
+		}
+		option, err := parsePushOption(payload)
+		if err != nil {
+			return nil, err
+		}
+		optionBytes += len(payload) + pktLineHeaderLen
+		options = append(options, option)
+	}
+}
+
+// nextPktLine reads one pkt-line from br, appends its exact bytes (length prefix
+// plus payload, or just the flush packet) to consumed, and returns the payload.
+// sectionBytes is what the section already holds and limit bounds it; a
+// malformed packet, a special packet that never appears in a request section or
+// an oversized section is an error, so the caller fails closed. section names
+// the section in the error messages.
+func nextPktLine(
+	br *bufio.Reader, consumed *bytes.Buffer, sectionBytes, limit int, section string,
+) (payload []byte, flush bool, err error) {
+	header := make([]byte, pktLineHeaderLen)
+	if _, err := io.ReadFull(br, header); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, false, fmt.Errorf("gitproxy: %s section ended without a flush packet", section)
+		}
+		return nil, false, fmt.Errorf("gitproxy: truncated pkt-line length prefix: %w", err)
+	}
+	length, err := parsePktLen(header)
+	if err != nil {
+		return nil, false, err
+	}
+	switch length {
+	case flushPktLen:
+		consumed.Write(header)
+		return nil, true, nil
+	case delimPktLen, responseEndPktLen:
+		return nil, false, fmt.Errorf("gitproxy: pkt-line %q is not valid in a %s section", header, section)
+	}
+	if length < minDataPktLineLen {
+		return nil, false, fmt.Errorf("gitproxy: invalid pkt-line length %q", header)
+	}
+	if sectionBytes+length > limit {
+		return nil, false, fmt.Errorf("gitproxy: %s section exceeds %d bytes", section, limit)
+	}
+	payload = make([]byte, length-pktLineHeaderLen)
+	if _, err := io.ReadFull(br, payload); err != nil {
+		return nil, false, fmt.Errorf("gitproxy: truncated pkt-line payload: %w", err)
+	}
+	consumed.Write(header)
+	consumed.Write(payload)
+	return payload, false, nil
+}
+
+// negotiatesPushOptions reports whether the first command payload carries the
+// "push-options" capability after its NUL. The list is space-separated and a
+// capability may carry an "=value" suffix, so the token name decides: reading
+// the section whenever the name appears is the fail-closed choice, because a
+// provider that honored such a token would otherwise receive unchecked options.
+func negotiatesPushOptions(payload []byte) bool {
+	_, capabilities, ok := bytes.Cut(payload, []byte{0})
+	if !ok {
+		return false
+	}
+	for _, capability := range strings.Fields(string(capabilities)) {
+		if name, _, _ := strings.Cut(capability, "="); name == pushOptionsCapability {
+			return true
+		}
+	}
+	return false
+}
+
+// parsePushOption validates one push-options payload: git terminates each option
+// with an optional LF that receive-pack strips, the option itself must not
+// contain a NUL, must not be empty and must stay within maxPushOption.
+func parsePushOption(payload []byte) (string, error) {
+	option := bytes.TrimSuffix(payload, []byte("\n"))
+	if bytes.IndexByte(option, 0) >= 0 {
+		return "", fmt.Errorf("gitproxy: push option %s contains a NUL", quoteBrief(option))
+	}
+	if len(option) == 0 {
+		return "", errors.New("gitproxy: empty push option")
+	}
+	if len(option) > maxPushOption {
+		return "", fmt.Errorf("gitproxy: push option exceeds %d bytes", maxPushOption)
+	}
+	return string(option), nil
 }
 
 // parsePktLen decodes the 4-hex-ASCII length prefix, which counts itself.

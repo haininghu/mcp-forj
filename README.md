@@ -121,6 +121,11 @@ server:
   (doublestar on the target branch; without one **no push** is allowed, fail-closed). The proxy
   additionally never pushes the default branch, never deletes branches and accepts only
   fast-forwards.
+- **Push options** (`git push -o …`) are parsed and policy-checked before forwarding:
+  `merge_request.*` requires `mr:write` (so MR creation via git is gated), auto-merge options
+  additionally `mr:merge`. `merge_request.target_project=…` (cross-project), `ci.*` and any unknown
+  option are denied fail-closed. Allowed options are forwarded verbatim; their values are never
+  logged or returned.
 - **Client auth** is HTTP Basic with the optional `git_proxy.token` as password (username
   ignored). Without a token the proxy binds **loopback only** and authenticates nobody;
   `git_remote` then reports `auth.type: "none"`. The token is never logged and never returned by
@@ -149,8 +154,9 @@ and [`ai/architecture.md`](ai/architecture.md)):
 - `mr:diff` – read merge request file diffs (`get_merge_request_diff`).
 - `mr:comment` – comment on merge requests.
 - `mr:rebase` – trigger an asynchronous merge request rebase.
-- `mr:merge` – merge a merge request.
-- `mr:write` – reserved (create/update/close merge requests).
+- `mr:merge` – merge a merge request; also gates push options that arm **auto-merge**.
+- `mr:write` – create/update/close merge requests. No MCP tool uses it yet; it gates **merge-request
+  creation through git push options** in the proxy.
 - `repo:write` – gates **git push** through the git proxy. The `branches` filter of the grant
   (doublestar on the target branch, exclude wins) decides which branches may be pushed; without
   one **no push** is allowed. The only capability that accepts a `branches` filter.
@@ -279,7 +285,7 @@ Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **g
 | `add_merge_request_note`             | **Work Item: Create** (+ Merge Request: Read)                                 |
 | git fetch/clone via proxy (`repo:read`) | **Repository: Read**                                                       |
 | git push via proxy (`repo:write`)    | **Repository: Write**                                                         |
-| `mr:write` (reserved)                | Merge Request: Create/Update/Close                                            |
+| `mr:write` (push options)            | Merge Request: Create/Update/Close                                            |
 
 Every **non-exempt** operation also reads the `.noai` marker file, so **Repository: Read** (on the
 default branch) is required regardless of the granted capabilities; otherwise those operations fail
@@ -307,11 +313,13 @@ the **Developer** role (push access to the source branch); merging also needs a 
 - No caching: labels, topics and markers are fetched on every operation.
 - `mr:diff` is denied on a `.noai` repository unless the grant is exempted with `noai: allow`; diffs are
   repository content, but the marker is an integrity control, not a confidentiality control.
-- `mr:write` is reserved; `repo:write` has no MCP tool — it gates git push through the proxy.
+- `mr:write` and `repo:write` have no MCP tool — they gate git push and its push options through the
+  proxy.
 - Git proxy (fail-closed): an active `paths` filter or a tag filter on `repo:read`/`repo:write`
-  means **no git access**; there is no Git LFS support; `.noai` on fetch is checked on the default
-  branch only (push: default **and** target branch); no packfile size limit. See
-  [ADR 0011](ai/adr/0011-git-smart-http-reverse-proxy.md).
+  means **no git access**; a push option outside the checked vocabulary (`ci.*`,
+  `merge_request.target_project`, unknown) is denied; there is no Git LFS support; `.noai` on fetch
+  is checked on the default branch only (push: default **and** target branch); no packfile size
+  limit. See [ADR 0011](ai/adr/0011-git-smart-http-reverse-proxy.md).
 
 ## Docs
 

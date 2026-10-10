@@ -82,8 +82,8 @@ providers:
           - mr:rebase:
               require: [ai-reviewed]
           # Merge review-approved MRs. This is a separate, least-privilege
-          # capability (not the reserved mr:write) and is denied on `.noai`
-          # repositories unless the grant is exempted with `noai: allow`.
+          # capability (not mr:write) and is denied on `.noai` repositories
+          # unless the grant is exempted with `noai: allow`.
           - mr:merge:
               require: [ai-reviewed]
 
@@ -94,8 +94,11 @@ providers:
       # A repo:write grant WITHOUT a branches filter allows NO push at all
       # (fail-closed) — there is no global proxy allowlist any more. The proxy
       # still never pushes the default branch, never deletes, and requires
-      # fast-forwards. Rules are first-match-wins, so this specific rule must
-      # come BEFORE the broader "team/*" rule below.
+      # fast-forwards. Push OPTIONS are checked against their own capability:
+      # `git push -o merge_request.create` needs `mr:write`, arming auto-merge
+      # additionally `mr:merge`; `merge_request.target_project`, `ci.*` and
+      # unknown options are always denied. Rules are first-match-wins, so this
+      # specific rule must come BEFORE the broader "team/*" rule below.
       - repositories:
           - "team/ai-playground"
         effect: allow

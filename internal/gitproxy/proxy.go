@@ -85,7 +85,8 @@ type Config struct {
 // request against the capability policy before touching the provider, and
 // enforces the push policy (target branches are decided by the repo:write
 // branches filter in the policy; the proxy itself additionally blocks the
-// default branch, deletes and non-fast-forwards).
+// default branch, deletes and non-fast-forwards, and gates every push option on
+// the capability that governs the action it performs).
 type Server struct {
 	cfg       Config
 	registry  *provider.Registry
@@ -292,32 +293,38 @@ func (s *Server) authorizeRequest(r *http.Request, rt *route) error {
 	return nil
 }
 
-// preparePush runs the POST git-receive-pack pipeline. The pkt-line command
-// section is parsed first: it makes no provider call and is bounded to 1 MiB, so
-// it is safe before authorization. The target branches are then authorized for
-// repo:write (authorizePushRefs), which applies the branches filter of the
-// matched grant — a grant without a branch filter never allows a push — and
-// checks the .noai marker on the default branch AND the branch itself, honoring
-// a noai: allow grant. Only after authorization does the push branch policy
-// (checkPush) touch provider metadata, so a policy denial never precedes the
-// guard. Finally the body is rewound with io.MultiReader so the ReverseProxy
-// forwards the original bytes unchanged; the Content-Length stays correct
-// because no byte is added or removed. The returned error is already classified
-// for writeDenied (errMalformedPush, errRepoDenied or errPushDenied).
+// preparePush runs the POST git-receive-pack pipeline. The pkt-line preamble is
+// parsed first: it makes no provider call and both its sections are bounded to
+// 1 MiB each, so it is safe before authorization. The target branches are then
+// authorized for repo:write (authorizePushRefs), which applies the branches
+// filter of the matched grant — a grant without a branch filter never allows a
+// push — and checks the .noai marker on the default branch AND the branch
+// itself, honoring a noai: allow grant. Only after authorization does the push
+// branch policy (checkPush) touch provider metadata, so a policy denial never
+// precedes the guard. The push options are checked last (checkPushOptions): they
+// gate provider-side actions (merge-request creation, auto-merge) on the
+// capabilities the ref updates do not need. Finally the body is rewound with
+// io.MultiReader so the ReverseProxy forwards the original bytes unchanged —
+// command section, options section and packfile alike; the Content-Length stays
+// correct because no byte is added or removed. The returned error is already
+// classified for writeDenied (errMalformedPush, errRepoDenied or errPushDenied).
 func (s *Server) preparePush(r *http.Request, rt *route, p provider.Provider) error {
 	br := bufio.NewReader(r.Body)
-	updates, consumed, err := ReadReceivePackCommands(br)
+	rp, err := ReadReceivePack(br)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errMalformedPush, err)
 	}
 	// Policy and marker first, provider metadata second (invariant 5).
-	if err := s.authorizePushRefs(r.Context(), rt, updates); err != nil {
+	if err := s.authorizePushRefs(r.Context(), rt, rp.Updates); err != nil {
 		return fmt.Errorf("%w: %w", errRepoDenied, err)
 	}
-	if err := s.checkPush(r.Context(), p, rt.repo, updates); err != nil {
+	if err := s.checkPush(r.Context(), p, rt.repo, rp.Updates); err != nil {
 		return err
 	}
-	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(consumed), br))
+	if err := s.checkPushOptions(r.Context(), rt, rp.PushOptions); err != nil {
+		return err
+	}
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(rp.Consumed), br))
 	return nil
 }
 

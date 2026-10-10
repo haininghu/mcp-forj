@@ -87,14 +87,18 @@ sequenceDiagram
   X->>U: forward discovery (provider token injected)
   U-->>X: ref advertisement
   X-->>A: ref advertisement
-  A->>X: POST git-receive-pack (pkt-line commands + packfile)
-  X->>X: parse command section (1 MiB bound, no provider call)
+  A->>X: POST git-receive-pack (pkt-line commands, push options, packfile)
+  X->>X: parse command section + push-options section (bounded, no provider call)
   loop each unique target branch
     X->>G: AuthorizeBranch(repo:write, branch)
     Note over G: branches filter of the grant (without one: deny); .noai on default AND target branch
   end
   X->>U: DefaultBranch, ResolveRef, MergeBase (guardrail state)
   Note over X: only refs/heads/, never default branch, no deletes, fast-forward incl. stale base
+  opt push options present
+    X->>G: Authorize(mr:write) for merge_request.*, Authorize(mr:merge) for auto-merge
+    Note over X: target_project, ci.* and unknown options: deny (fail-closed)
+  end
   X->>U: forward receive-pack (original bytes, provider token injected)
 ```
 
@@ -104,8 +108,11 @@ is then authorized against the `repo:write` **`branches` filter** — a grant wi
 push, and an invalid branch name never reaches the guard (no marker read at an unvalidated ref).
 Only afterwards do the additive guardrails read provider state: no non-branch refs, never the
 default branch (hard-coded), no deletes, advertised base must equal the current tip (stale base =
-force push in disguise) and `MergeBase(tip, new) == tip`. The body is replayed unchanged via
-`io.MultiReader`, so the upstream sees the exact bytes the client sent.
+force push in disguise) and `MergeBase(tip, new) == tip`. Finally every **push option** is checked
+(`merge_request.*` → `mr:write`, auto-merge → also `mr:merge`, anything else → deny), because an
+option makes the provider perform actions no ref update covers. The body — commands, options and
+packfile — is replayed unchanged via `io.MultiReader`, so the upstream sees the exact bytes the
+client sent.
 
 ## Why fail-closed where git cannot check
 

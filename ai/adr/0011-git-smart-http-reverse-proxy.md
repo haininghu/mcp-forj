@@ -74,8 +74,9 @@ authorization) carry `branch == ""` and the branch filter imposes nothing there 
   marker at before serving the whole tree, and a branch-less context applies no `branches` filter
   (see "One policy core").
 - A **`POST git-receive-pack` push** is authorized **per target branch**. The order is: authenticate,
-  route, resolve the provider, parse the pkt-line command section (no provider call, bounded to
-  1 MiB), then authorize each unique branch whose name passes the coarse `validBranchName` check
+  route, resolve the provider, parse the pkt-line preamble (command section plus, when the client
+  negotiated `push-options`, the options section — no provider call, each section bounded to 1 MiB),
+  then authorize each unique branch whose name passes the coarse `validBranchName` check
   with `Guard.AuthorizeBranch(..., repo:write, {}, branch)`. A syntactically invalid branch name is
   **never handed to the guard** — its `.noai` marker read would hit the provider at an unvalidated
   ref — and is left to the push policy below, which rejects it with the same 403 the client saw
@@ -86,7 +87,9 @@ authorization) carry `branch == ""` and the branch filter imposes nothing there 
   Duplicate branch targets are authorized once; a non-branch ref (tag/notes) is authorized at
   repository level — without the branch dimension — and rejected later by the push policy. Only
   after authorization does the push policy read provider metadata (`DefaultBranch`/`ResolveRef`/
-  `MergeBase`), so a repository the client may not write is denied before any such call.
+  `MergeBase`), so a repository the client may not write is denied before any such call. The push
+  options of the same request are gated last, before forwarding (see "Push options are parsed and
+  policy-checked").
 - Git traffic carries no tag information and the proxy keeps no topic cache, so a grant with a tag
   constraint sees unknown tags and **fails closed** (same rule as invariant 7 — deliberately more
   conservative than the tools, never laxer). A grant with an active path filter is likewise denied
@@ -94,8 +97,8 @@ authorization) carry `branch == ""` and the branch filter imposes nothing there 
   `paths` filter therefore means **no git access** for that capability (fetch, clone and push).
   Every authorization denial (fetch, discovery, push) answers with one identical 403 body, keeping
   `.noai` indistinguishable from an unknown repository (invariant 6).
-- **Push policy** is enforced on the pkt-line command section of `git-receive-pack`
-  (`ReadReceivePackCommands`). The section is parsed first (no provider call), each branch is then
+- **Push policy** is enforced on the pkt-line preamble of `git-receive-pack`
+  (`ReadReceivePack`). The command section is parsed first (no provider call), each branch is then
   authorized against the `repo:write` **branches filter in the policy** (see the push flow above),
   and only afterwards does this policy run: every ref update must pass, or the whole push is
   denied with 403 before any byte is forwarded. The former global `git_proxy.branches.allow`
@@ -113,6 +116,32 @@ authorization) carry `branch == ""` and the branch filter imposes nothing there 
     (all-zero old id) stays separate: nothing to fast-forward from, no merge-base call.
   The body is then reassembled with `io.MultiReader(bytes.NewReader(consumed), br)` so the
   upstream receives the original bytes exactly (Content-Length untouched).
+- **Push options are parsed and policy-checked** (`checkPushOptions`), before the body is forwarded.
+  A `git-receive-pack` request may carry a push-options section — one pkt-line per option, sent only
+  after the client negotiated the `push-options` capability on the first command line — and GitLab
+  acts on those options **in the provider**: they create merge requests, arm auto-merge or steer CI.
+  Forwarding them unchecked would let a push perform actions no MCP capability was ever asked for, so
+  every option must fall into the handled vocabulary:
+
+  | Option                                   | Requirement                                     |
+  |------------------------------------------|-------------------------------------------------|
+  | none at all                              | no capability check (behavior unchanged)        |
+  | `merge_request.*`                        | `mr:write` (gates MR creation through git push) |
+  | `merge_request.auto_merge`               | `mr:write` **and** `mr:merge`                   |
+  | `merge_request.merge_when_pipeline_succeeds` | `mr:write` **and** `mr:merge`               |
+  | `merge_request.target=<branch>`          | as above, plus a valid branch name              |
+  | `merge_request.target_project=…`         | **never** — cross-project escape                |
+  | `ci.*`                                   | **never**                                       |
+  | anything unknown                         | **never** (fail-closed)                         |
+
+  The capability checks go through the **same guard** as every other operation
+  (`Guard.Authorize(..., mr:write/mr:merge)`), so the `.noai` overlay applies, an unknown-tag grant
+  fails closed, and a denied capability answers the identical generic 403. A vocabulary violation
+  answers the same branch-policy 403 as the other push guardrails. Options are still forwarded
+  verbatim once allowed (the replayed bytes are untouched), and no option name, value or ref ever
+  reaches the client or the log: option values can carry titles, descriptions and labels.
+  `mr:write` therefore acquires its first real meaning — it gates merge-request creation through
+  `git push -o merge_request.create` — and `mr:merge` gates arming auto-merge the same way.
 - **Provider interface extension**: `GitRemoteURL`, `DefaultBranch` and `ResolveRef` join
   `Provider` (next to the phase-1 `GitAuthHeader`/`MergeBase`). `GitRemoteURL` returns the
   credential-free clone URL; it must build the URL with proper path escaping (the repository
@@ -159,9 +188,14 @@ These are deliberate scope decisions, not bugs; they are listed so operators can
   deliberately **more conservative than the tools** (which fetch the tags before deciding) and is the
   chosen MVP bound; closing it would need a topic cache or a fresh per-request metadata fetch, both
   out of scope here.
-- **No packfile size limit**: only the pkt-line command section is bounded
-  (`maxCommandSection`). The pack body is streamed untouched, so a push can transfer an
-  arbitrarily large pack, as it would against the provider directly.
+- **No packfile size limit**: only the pkt-line command section and the push-options section are
+  bounded (`maxCommandSection`, `maxPushOptionsSection`). The pack body is streamed untouched, so a
+  push can transfer an arbitrarily large pack, as it would against the provider directly.
+- **Push options are checked, the pushed content is not**: the option vocabulary decides which
+  provider-side *actions* a push may trigger, but the proxy still does not open the packfile. What
+  the push contains therefore stays governed by the `repo:write` branch rules alone:
+  **gitlink/submodule updates, file modes (e.g. a symlink pointing outside the worktree) and LFS
+  pointer files cannot be inspected here and are not covered by any push-option rule.**
 - **Coarse branch name validation**: `validBranchName` approximates `git check-ref-format`
   (forbidden characters, `..`, leading/trailing and empty/dot segments) but is not a full
   implementation of every Git rule.
@@ -170,13 +204,14 @@ These are deliberate scope decisions, not bugs; they are listed so operators can
   differ even though the answer body and status stay identical (invariant 6).
 - **Branch-policy denials are distinguishable**: a push whose capability authorization **passed**
   but that then fails an additive push guardrail (non-branch ref, invalid name, default branch,
-  delete, stale base, non-fast-forward) answers "push rejected by branch policy" rather than the
-  generic "repository is not accessible". This is accepted deliberately: the message can only
-  ever appear for a repository the client is already allowed to write — push discovery and the
-  per-branch `repo:write` authorization ran first — so it discloses a permission the caller has
-  just exercised, not one it lacks, and no ref detail beyond "branch policy" is named. Every
-  capability, tag, path, branch-filter and `.noai` denial still answers the one identical
-  generic 403 (invariant 6).
+  delete, stale base, non-fast-forward, or a push option outside the checked vocabulary) answers
+  "push rejected by branch policy" rather than the generic "repository is not accessible". This is
+  accepted deliberately: the message can only ever appear for a repository the client is already
+  allowed to write — push discovery and the per-branch `repo:write` authorization ran first — so it
+  discloses a permission the caller has just exercised, not one it lacks, and the client-visible
+  answer names no ref, option value or repository detail (the log detail only ever names a constant
+  vocabulary key). Every capability, tag, path, branch-filter and `.noai` denial still answers the
+  one identical generic 403 (invariant 6).
 - **No Git LFS**: the LFS endpoints (`<repo>.git/info/lfs/objects/batch` and friends) are not
   part of the served smart-HTTP surface and answer 404. Cloning or pushing a repository with
   LFS objects therefore fails once the client tries to transfer them — fail-closed by

@@ -109,8 +109,14 @@ Authorization is the product. These rules are security-critical:
     target branch is authorized with `Guard.AuthorizeBranch`, which also checks `.noai` on the
     default branch and the target branch. Branch-less evaluations (`Evaluate`, `Authorize`,
     `AuthorizeResource`, push discovery) do not apply the branch dimension. The proxy additionally
-    hard-blocks the default branch (not configurable), non-`refs/heads/` refs, deletes and
-    non-fast-forwards. There is **no** global `git_proxy.branches` allowlist.
+     hard-blocks the default branch (not configurable), non-`refs/heads/` refs, deletes and
+     non-fast-forwards. There is **no** global `git_proxy.branches` allowlist.
+13. **Git push options are policy-gated.** The proxy parses the negotiated push-options section and
+     authorizes every option before forwarding: `merge_request.*` requires `mr:write` (so `mr:write`
+     gates merge-request creation via git push), auto-merge options additionally `mr:merge`. A
+     cross-project target (`merge_request.target_project`, an escape from the authorized repository),
+     `ci.*` and any unknown option are denied **fail-closed**. Guard checks include the `.noai`
+     overlay and fail closed on unknown tags; no option content or ref ever reaches the client.
 
 ## Authorization flow
 
@@ -135,7 +141,9 @@ proxy token. The proxy token is **optional**: without it the proxy binds loopbac
 no authentication (`git_remote` then reports `auth.type: "none"`); with it clients use HTTP Basic.
 Fetch and push discovery use `Guard.Authorize` (branch-less context); each unique push target
 branch is authorized with `Guard.AuthorizeBranch` against the `repo:write` `branches` filter —
-a grant without one denies every push and a path-filtered grant gets no git access at all.
+a grant without one denies every push and a path-filtered grant gets no git access at all. Push
+options are parsed and gated last, before forwarding: `merge_request.*` needs `mr:write`, auto-merge
+additionally `mr:merge`, everything else denies (see invariant 13).
 
 ## Where to look
 

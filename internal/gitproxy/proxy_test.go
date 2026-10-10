@@ -316,6 +316,27 @@ func pushBodyMulti(lines ...string) []byte {
 	return append(pkts(lines...), packBody...)
 }
 
+// pushBodyWithOptions builds a receive-pack body whose first command line
+// negotiates the push-options capability and whose options section carries the
+// given options (empty options send the section flush only), followed by the
+// pack body.
+func pushBodyWithOptions(oldSHA, newSHA, ref string, options ...string) []byte {
+	body := pkts(oldSHA + " " + newSHA + " " + ref + "\x00report-status side-band-64k push-options\n")
+	body = append(body, optionPkts(options...)...)
+	return append(body, packBody...)
+}
+
+// pushOptionGrants is the repo:write branch filter plus the capabilities that
+// gate push options, so a test grants exactly what an option needs — or withholds
+// it.
+func pushOptionGrants(include []string, mr ...policy.Capability) []policy.CapabilityGrant {
+	grants := branchFilter(include, nil)
+	for _, c := range mr {
+		grants = append(grants, policy.CapabilityGrant{Name: c})
+	}
+	return grants
+}
+
 func TestAuthRequired(t *testing.T) {
 	u := newUpstream(t, []byte(" advertisement "))
 	p := newFetchProvider(u.serverURL)
@@ -768,6 +789,247 @@ func TestPushMalformedCommandSection(t *testing.T) {
 	}
 	if u.count() != 0 {
 		t.Errorf("upstream calls = %d, want 0 for a malformed push", u.count())
+	}
+}
+
+// TestPushMergeRequestOptionRequiresMRWrite pins the mr:write gate: the very same
+// push is forwarded with the grant and denied without it, and the denial never
+// reaches the upstream.
+func TestPushMergeRequestOptionRequiresMRWrite(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	body := pushBodyWithOptions(sha1Zero, sha1New, "refs/heads/ai/fix", "merge_request.create")
+
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, pushOptionGrants([]string{"ai/**"}, policy.CapMRWrite))
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("push option with mr:write = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	// The options are policy-checked but forwarded verbatim: the upstream must
+	// still create the merge request from the original bytes.
+	if !bytes.Equal(u.last().body, body) {
+		t.Errorf("upstream body = %q, want the original %q", u.last().body, body)
+	}
+
+	pNo := newFetchProvider(u.serverURL)
+	sNo := newTestServerGrants(t, pNo, pushOptionGrants([]string{"ai/**"}))
+	rec = doRequest(t, sNo, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("push option without mr:write = %d, want 403", rec.Code)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic capability denial %q", rec.Body.String(), want)
+	}
+	if u.count() != 1 {
+		t.Errorf("upstream calls = %d, want 1 (only the allowed push)", u.count())
+	}
+	// The capability denial precedes every marker read for mr:write: the guard
+	// answers from the policy, so only the two branch-authorization reads remain.
+	if want := []string{"", "ai/fix"}; !slices.Equal(pNo.fileExistsRefs, want) {
+		t.Errorf("marker refs = %v, want %v (denied by policy, before any mr:write marker read)",
+			pNo.fileExistsRefs, want)
+	}
+}
+
+// TestPushMergeRequestOptionDeniedByNoAIOverlay pins that the mr:write check of a
+// push option runs through the guard with the .noai overlay: the repo:write grant
+// is exempt here, so the branch authorization passes on a marked repository, but
+// the non-exempt mr:write grant denies — and the answer is the one identical
+// "not accessible" 403.
+func TestPushMergeRequestOptionDeniedByNoAIOverlay(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	p.marker = true
+	s := newTestServerGrants(t, p, []policy.CapabilityGrant{
+		{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{
+			NoAIExempt: true,
+			Branches:   policy.PathFilter{Include: []string{"ai/**"}},
+		}},
+		{Name: policy.CapMRWrite},
+	})
+
+	body := pushBodyWithOptions(sha1Zero, sha1New, "refs/heads/ai/fix", "merge_request.create")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("push option on a .noai repository = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+	// The exempt branch authorization read no marker; the mr:write check did, on
+	// the default branch.
+	if want := []string{""}; !slices.Equal(p.fileExistsRefs, want) {
+		t.Errorf("marker refs = %v, want %v (the .noai overlay applies to mr:write)", p.fileExistsRefs, want)
+	}
+}
+
+// TestPushAutoMergeOptionRequiresMRMerge pins the additional mr:merge gate for
+// auto-merge: mr:write alone is not enough, both capabilities together allow it.
+func TestPushAutoMergeOptionRequiresMRMerge(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	for _, option := range []string{"merge_request.auto_merge", "merge_request.merge_when_pipeline_succeeds"} {
+		body := pushBodyWithOptions(sha1Zero, sha1New, "refs/heads/ai/fix", "merge_request.create", option)
+
+		writeOnly := newTestServerGrants(t, newFetchProvider(u.serverURL),
+			pushOptionGrants([]string{"ai/**"}, policy.CapMRWrite))
+		rec := doRequest(t, writeOnly, http.MethodPost,
+			"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s with mr:write only = %d, want 403", option, rec.Code)
+		}
+
+		both := newTestServerGrants(t, newFetchProvider(u.serverURL),
+			pushOptionGrants([]string{"ai/**"}, policy.CapMRWrite, policy.CapMRMerge))
+		rec = doRequest(t, both, http.MethodPost,
+			"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+		if rec.Code != http.StatusOK {
+			t.Errorf("%s with mr:write and mr:merge = %d, want 200, body %q", option, rec.Code, rec.Body)
+		}
+	}
+	if want := 2; u.count() != want {
+		t.Errorf("upstream calls = %d, want %d (only the two allowed pushes)", u.count(), want)
+	}
+}
+
+// TestPushOptionsDeniedCases pins the fail-closed option vocabulary: every option
+// outside the allowed merge_request namespace denies with the push-policy 403,
+// before a single byte is forwarded, and the denial never names the option value.
+func TestPushOptionsDeniedCases(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	tests := []struct {
+		name    string
+		options []string
+		leaks   []string
+	}{
+		{
+			name:    "cross-project merge request",
+			options: []string{"merge_request.target_project=other/secret"},
+			leaks:   []string{"other/secret", "target_project"},
+		},
+		{
+			name:    "invalid merge_request.target",
+			options: []string{"merge_request.target=bad..name"},
+			leaks:   []string{"bad..name"},
+		},
+		{"ci option", []string{"ci.skip"}, []string{"ci"}},
+		{"unknown option", []string{"deploy.production=true"}, []string{"deploy"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// mr:write and mr:merge are granted here: only the option itself may
+			// deny, so a 403 proves the vocabulary bound rather than a capability.
+			p := newFetchProvider(u.serverURL)
+			s := newTestServerGrants(t, p,
+				pushOptionGrants([]string{"ai/**"}, policy.CapMRWrite, policy.CapMRMerge))
+			body := pushBodyWithOptions(sha1Zero, sha1New, "refs/heads/ai/fix", tc.options...)
+
+			rec := doRequest(t, s, http.MethodPost,
+				"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+			if rec.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403, body %q", rec.Code, rec.Body)
+			}
+			if want := "git proxy: push rejected by branch policy\n"; rec.Body.String() != want {
+				t.Errorf("body = %q, want the push-policy denial %q", rec.Body.String(), want)
+			}
+			if u.count() != 0 {
+				t.Errorf("upstream calls = %d, want 0 for a denied push option", u.count())
+			}
+			// No option content, value or ref ever reaches the client.
+			for _, leak := range append(tc.leaks, "refs/", "merge_request.create", "ai/fix") {
+				if strings.Contains(rec.Body.String(), leak) {
+					t.Errorf("denial body leaks %q: %q", leak, rec.Body.String())
+				}
+			}
+		})
+	}
+}
+
+// TestPushOptionsCrossProjectDeniedWithoutMRWrite pins that the cross-project
+// escape is refused outright, not merely gated: no guard read happens at all, so
+// an unprivileged client learns nothing more than the identical 403.
+func TestPushOptionsCrossProjectDeniedWithoutMRWrite(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, pushOptionGrants([]string{"ai/**"}))
+
+	body := pushBodyWithOptions(sha1Zero, sha1New, "refs/heads/ai/fix", "merge_request.target_project=other/secret")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+	// Only the repo:write branch authorization read the marker; the mr:write guard
+	// was never asked, so no third marker read happened.
+	if want := []string{"", "ai/fix"}; !slices.Equal(p.fileExistsRefs, want) {
+		t.Errorf("marker refs = %v, want %v (the hard denial precedes the guard)", p.fileExistsRefs, want)
+	}
+}
+
+// TestPushNoOptionsUnchanged pins that a push without options behaves exactly as
+// before: the negotiated-but-empty section costs no capability check, so a grant
+// without mr:write still forwards, byte for byte.
+func TestPushNoOptionsUnchanged(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, pushOptionGrants([]string{"ai/**"}))
+
+	// Negotiated capability, empty options section.
+	body := pushBodyWithOptions(sha1Zero, sha1New, "refs/heads/ai/fix")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("negotiated empty options = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	if !bytes.Equal(u.last().body, body) {
+		t.Error("upstream body differs from the original request body")
+	}
+	// The mr:write capability was never asked: only the branch authorization read
+	// the marker (default branch and target branch).
+	if want := []string{"", "ai/fix"}; !slices.Equal(p.fileExistsRefs, want) {
+		t.Errorf("marker refs = %v, want %v (no capability check without options)", p.fileExistsRefs, want)
+	}
+
+	// Nothing negotiated at all: the classic body still forwards.
+	pPlain := newFetchProvider(u.serverURL)
+	sPlain := newTestServerGrants(t, pPlain, pushOptionGrants([]string{"ai/**"}))
+	rec = doRequest(t, sPlain, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("plain push = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+}
+
+// TestPushMalformedOptionsSection pins that a broken options section is a
+// protocol error (400) and never reaches the provider, even though the
+// capabilities would allow the push.
+func TestPushMalformedOptionsSection(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerGrants(t, p, pushOptionGrants([]string{"ai/**"}, policy.CapMRWrite))
+
+	// The capability is negotiated but the section has no terminating flush.
+	body := append(pkts(sha1Zero+" "+sha1New+" refs/heads/ai/fix\x00push-options\n"),
+		pkt("merge_request.create\n")...)
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0 for a malformed push", u.count())
+	}
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none: parsing precedes authorization", p.fileExistsRefs)
 	}
 }
 

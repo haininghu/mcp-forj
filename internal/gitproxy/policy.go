@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hvo/mcp-forj/internal/policy"
 	"github.com/hvo/mcp-forj/internal/provider"
 )
 
@@ -26,7 +27,7 @@ var errRepoDenied = errors.New("gitproxy: repository not accessible")
 
 // isZeroOID reports whether s is an all-zero object id (creation when it is
 // the old id, deletion when it is the new one). Callers receive only values
-// validated as hex object ids by ReadReceivePackCommands.
+// validated as hex object ids by ReadReceivePack.
 func isZeroOID(s string) bool {
 	return s != "" && strings.Trim(s, "0") == ""
 }
@@ -100,6 +101,97 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 	}
 	if mergeBase != tip {
 		return fmt.Errorf("%w: update of branch %q is not a fast-forward", errPushDenied, branch)
+	}
+	return nil
+}
+
+// Push-option namespaces. A push option changes provider state beyond the ref
+// update itself (it can open a merge request, arm auto-merge or steer CI), so
+// only the explicitly handled namespaces ever pass and everything else is
+// denied fail-closed.
+const (
+	// optionMergeRequest is the GitLab prefix for merge-request options, gated
+	// by mr:write.
+	optionMergeRequest = "merge_request."
+	// optionMergeRequestTargetProject retargets the merge request to a different
+	// project, which escapes the authorized repository, so it is always denied.
+	optionMergeRequestTargetProject = "merge_request.target_project"
+	// optionMergeRequestTarget names the target branch of the merge request; its
+	// value is validated as a branch name.
+	optionMergeRequestTarget = "merge_request.target"
+	// optionMergeRequestAutoMerge and optionMergeRequestMergeWhenPipelineSucceeds
+	// arm auto-merge, so they additionally require mr:merge.
+	optionMergeRequestAutoMerge                 = "merge_request.auto_merge"
+	optionMergeRequestMergeWhenPipelineSucceeds = "merge_request.merge_when_pipeline_succeeds"
+	// optionCI is the GitLab prefix for CI options; they are never allowed.
+	optionCI = "ci."
+)
+
+// checkPushOptions authorizes the GitLab push options of a push. Every option
+// must be known; merge-request options require mr:write, auto-merge options
+// additionally mr:merge, and anything else (ci.*, cross-project, unknown) is
+// denied fail-closed. All checks run against the same guard.
+//
+// Options arrive as "key" or "key=value" and are evaluated in two passes: the
+// first applies the syntactic rules to every option and records which
+// capabilities the set needs, the second asks the guard — at most once per
+// capability, so a create+title+description group costs one decision. Asking
+// the guard is a provider read (the .noai marker), and a rule violation such as
+// a cross-project target denies before that read. A capability denial therefore
+// wraps errRepoDenied (the identical generic "not accessible" 403 every other
+// capability denial produces, keeping .noai indistinguishable), while an option
+// the vocabulary rejects wraps errPushDenied, the same branch-policy 403 the
+// other push guardrails produce. Client-visible text stays fixed either way, and
+// the logged detail names only a constant vocabulary key — never a
+// client-supplied key, value or ref, because option values carry titles,
+// descriptions and labels that must not reach the log.
+func (s *Server) checkPushOptions(ctx context.Context, rt *route, options []string) error {
+	var (
+		needsMRWrite  bool
+		needsMRMerge  bool
+		invalidBranch bool
+	)
+	for _, option := range options {
+		key, value, _ := strings.Cut(option, "=")
+		switch {
+		// The denied keys below are fixed vocabulary constants, never client
+		// input, so naming them leaks nothing.
+		case key == optionMergeRequestTargetProject:
+			return fmt.Errorf("%w: %s targets another project", errPushDenied, key)
+		case strings.HasPrefix(key, optionMergeRequest):
+			needsMRWrite = true
+			switch key {
+			case optionMergeRequestAutoMerge, optionMergeRequestMergeWhenPipelineSucceeds:
+				needsMRMerge = true
+			case optionMergeRequestTarget:
+				// A target branch is a branch the merge request will be opened
+				// against: reject a syntactically invalid name outright, so no
+				// provider call ever sees it.
+				if !validBranchName(value) {
+					invalidBranch = true
+				}
+			}
+		case strings.HasPrefix(key, optionCI):
+			return fmt.Errorf("%w: %s* options are not allowed", errPushDenied, optionCI)
+		default:
+			return fmt.Errorf("%w: unrecognized push option", errPushDenied)
+		}
+	}
+	if invalidBranch {
+		return fmt.Errorf("%w: %s names an invalid branch", errPushDenied, optionMergeRequestTarget)
+	}
+	// Repository capability authorization for the options, through the same
+	// guard as the ref updates: unknown tags fail closed and the .noai overlay
+	// applies unless the matched grant is exempt.
+	if needsMRWrite {
+		if err := s.guard.Authorize(ctx, rt.providerName, rt.repo, policy.CapMRWrite); err != nil {
+			return fmt.Errorf("%w: %w", errRepoDenied, err)
+		}
+	}
+	if needsMRMerge {
+		if err := s.guard.Authorize(ctx, rt.providerName, rt.repo, policy.CapMRMerge); err != nil {
+			return fmt.Errorf("%w: %w", errRepoDenied, err)
+		}
 	}
 	return nil
 }
