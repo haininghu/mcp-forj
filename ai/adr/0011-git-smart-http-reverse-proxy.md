@@ -11,8 +11,20 @@ agent sometimes needs real `git clone`/`push` against allowed branches. Granting
 git credentials would bypass policy entirely. The MVP therefore embeds an authenticated git
 smart-HTTP **reverse proxy** in the server: a separate HTTP listener that adds capability
 authorization, branch constraints and fast-forward enforcement between the git client and the
-provider. Repositories and branches are filtered; **paths are not** (path filters stay a
-`repo:read`/`repo:write` tool concept).
+provider. Repositories and branches are filtered; **paths are not enforced** — the proxy does not
+parse packfiles, so a path-filtered grant is denied fail-closed (see "One policy core" below).
+
+## One policy core
+
+Both entry points — the MCP tools and the git proxy — call **the same** `policy.Guard` with the
+identical tuple `(provider, repository, capability, tags, ref)`. The guard is the single source of
+the allow/deny decision and of the `.noai` overlay; neither entry point re-implements authorization.
+Entry-point-specific checks are **additive on top of** that same repository/capability decision:
+the tools additionally validate paths and tool arguments, the proxy additionally validates the
+pushed branch, its allowlist and the fast-forward relation. Where the git protocol cannot express a
+check the tools perform (packfile paths, a per-ref fetch tag), the proxy does not relax the rule —
+it **fails closed** and the limit is documented below. The proxy is therefore never more lenient
+than the tools for the same configuration.
 
 ## Decision
 
@@ -36,15 +48,30 @@ provider. Repositories and branches are filtered; **paths are not** (path filter
 - **Clone URL discovery**: the `git_remote` MCP tool (registered only while the proxy is enabled)
   exposes `Server.RemoteURL` so an agent can learn the credential-free clone URL; the token itself
   is never returned by the tool.
-- **Authorization before the provider call**, using the existing guard: fetch
-  (`info/refs?service=git-upload-pack`, `POST git-upload-pack`) needs `repo:read`; push
-  (`info/refs?service=git-receive-pack`, `POST git-receive-pack`) needs `repo:write`. The `.noai`
-  overlay applies. Git traffic carries no tag information, so a grant with a tag constraint sees
-  unknown tags and **fails closed** (same rule as invariant 7). All denials answer with one
-  identical 403 body, keeping `.noai` indistinguishable from unknown repositories (invariant 6).
+- **Authorization before the provider call**, using the existing guard. Fetch
+  (`info/refs?service=git-upload-pack`, `POST git-upload-pack`) needs `repo:read`; push discovery
+  (`info/refs?service=git-receive-pack`, GET) needs `repo:write`. Both go through `Guard.Authorize`
+  and are **repository-level**: the `.noai` overlay is checked on the **default branch** only,
+  because the fetch protocol carries no ref the proxy could read the marker at before serving the
+  whole tree.
+- A **`POST git-receive-pack` push** is authorized **per target branch**. The order is: authenticate,
+  route, resolve the provider, parse the pkt-line command section (no provider call, bounded to
+  1 MiB), then authorize each unique branch with `Guard.AuthorizeResourceRef(..., repo:write, {},
+  "", branch)`. That checks the `.noai` marker on the **default branch and on the branch** and
+  honors a `noai: allow` grant. Duplicate branch targets are authorized once; a non-branch ref
+  (tag/notes) is authorized at repository level and rejected later by the push policy. Only after
+  authorization does the push policy read provider metadata (`DefaultBranch`/`ResolveRef`/
+  `MergeBase`), so a repository the client may not write is denied before any such call.
+- Git traffic carries no tag information and the proxy keeps no topic cache, so a grant with a tag
+  constraint sees unknown tags and **fails closed** (same rule as invariant 7 — deliberately more
+  conservative than the tools, never laxer). A grant with an active path filter is likewise denied
+  fail-closed: the proxy passes an **empty path**, so the guard returns "path required". Every
+  authorization denial (fetch, discovery, push) answers with one identical 403 body, keeping
+  `.noai` indistinguishable from an unknown repository (invariant 6).
 - **Push policy** is enforced on the pkt-line command section of `git-receive-pack`
-  (`ReadReceivePackCommands`, phase 1). Every ref update must pass, or the whole push is denied
-  with 403 before any byte is forwarded:
+  (`ReadReceivePackCommands`). The section is parsed first (no provider call), each branch is then
+  authorized (see the push flow above), and only afterwards does this policy run: every ref update
+  must pass, or the whole push is denied with 403 before any byte is forwarded.
   - only `refs/heads/<branch>` (no tags/notes);
   - coarse git-style branch name validation;
   - branch must match `git_proxy.branches.allow` (doublestar globs, default `ai/**`; an empty
@@ -78,10 +105,22 @@ provider. Repositories and branches are filtered; **paths are not** (path filter
 
 These are deliberate scope decisions, not bugs; they are listed so operators can weigh them:
 
-- **`.noai` scope on git traffic**: the marker is checked on the repository's **default branch**
-  (the guard's `ref=HEAD` file read), not on the branch being pushed. A push to a feature branch
-  of a repository whose `.noai` marker exists only on that branch is still governed by the
-  default-branch decision.
+- **`.noai` scope on git traffic**: a **push** checks the marker on the **default branch and on the
+  target branch** (`AuthorizeResourceRef` per branch), so a marker present only on the pushed branch
+  denies that push. A **fetch or push-discovery** request can only be checked on the **default
+  branch**: the fetch protocol carries no ref the proxy could read the marker at before serving the
+  whole tree, so ref-accurate enforcement there is not possible and the default branch is the
+  fail-closed choice. A `noai: allow` grant skips the check on every ref.
+- **Path filters are not enforceable on git traffic**: the proxy does not parse packfiles and a fetch
+  is whole-tree, so `paths.include`/`paths.exclude` of a `repo:read`/`repo:write` grant cannot be
+  applied. The proxy passes an **empty path** to the guard; an active path filter then matches no
+  path and the request is denied **fail-closed** (the "path required" rule). Git traffic for a
+  path-filtered grant is therefore never more permissive than the tools.
+- **Tag filters stay fail-closed in the proxy**: the proxy does not fetch repository topics or MR
+  labels and keeps no cache, so any tag-constrained grant sees unknown tags and denies. This is
+  deliberately **more conservative than the tools** (which fetch the tags before deciding) and is the
+  chosen MVP bound; closing it would need a topic cache or a fresh per-request metadata fetch, both
+  out of scope here.
 - **No packfile size limit**: only the pkt-line command section is bounded
   (`maxCommandSection`). The pack body is streamed untouched, so a push can transfer an
   arbitrarily large pack, as it would against the provider directly.
@@ -106,10 +145,12 @@ These are deliberate scope decisions, not bugs; they are listed so operators can
 - The proxy is a second, policy-governed entry point next to the MCP tools; it reuses the same
   guard and provider abstraction, so adding a backend (GitHub, Forgejo) means implementing the
   five git-capable provider methods and nothing else.
-- Push authorization is repository-level `repo:write`; the branch allowlist plus fast-forward
-  rule is the additional guardrail, not a substitute for the capability.
-- No path filtering on git traffic: `repo:write` grants whole-branch content. Path filters remain
-  a `read_file` concept. This is deliberate for the MVP.
+- Push authorization is `repo:write` **per target branch** (marker on the default branch and the
+  branch, `noai: allow` honored); the branch allowlist plus fast-forward rule is the additional
+  guardrail on top of that same capability decision, never a substitute for it.
+- Path filters do not apply to git traffic and, because the proxy cannot enforce them, a
+  path-filtered `repo:read`/`repo:write` grant is denied **fail-closed** rather than silently
+  widened to whole-branch content. Path filtering remains a `read_file`/`write_file` concept.
 - `.noai` remains an integrity control (invariant 11): the proxy denies non-exempt operations on
   marked repositories but an exempt `repo:read` still serves content, as everywhere else.
 - The MCP tool `git_remote` (registered only while the proxy is enabled) returns the clone URL through

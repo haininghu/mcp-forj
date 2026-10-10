@@ -35,14 +35,25 @@ var packBody = []byte("PACKDATA-BYTES-0123456789\n")
 // fakeProvider is a configurable provider.Provider stand-in for proxy tests.
 type fakeProvider struct {
 	name string
-	// marker is what FileExists reports for the .noai check.
+	// marker is what FileExists reports for the .noai check, regardless of ref
+	// (the blunt switch used by the existing tests).
 	marker bool
+	// markersByRef makes FileExists ref-accurate: a present key returns its value
+	// for that ref ("" is the default branch), overriding nothing when marker is
+	// already true. It lets a test place the marker only on a push target branch.
+	markersByRef map[string]bool
+	// fileExistsRefs records every ref FileExists was asked about, in call order,
+	// so tests can pin that a marker is checked on both the default branch and the
+	// target branch (and that duplicate targets are deduplicated).
+	fileExistsRefs []string
 	// gitAuth is returned by GitAuthHeader; authCalls counts the lookups.
 	gitAuth string
 	// remoteBase is the prefix returned by GitRemoteURL (the upstream URL).
 	remoteBase string
-	// defaultBranch is returned by DefaultBranch.
-	defaultBranch string
+	// defaultBranch is returned by DefaultBranch; defaultBranchCalls counts it so a
+	// test can prove authorization precedes the provider metadata reads.
+	defaultBranch      string
+	defaultBranchCalls int
 	// tips maps branch names to resolved SHAs; tipsErr forces an error.
 	tips    map[string]string
 	tipsErr map[string]error
@@ -88,8 +99,14 @@ func (f *fakeProvider) MergeMergeRequest(context.Context, string, int64) (*provi
 func (f *fakeProvider) ReadFile(context.Context, string, string, string) ([]byte, error) {
 	return nil, provider.ErrNotFound
 }
-func (f *fakeProvider) FileExists(context.Context, string, string, string) (bool, error) {
-	return f.marker, nil
+func (f *fakeProvider) FileExists(_ context.Context, _, _, ref string) (bool, error) {
+	f.fileExistsRefs = append(f.fileExistsRefs, ref)
+	if f.marker {
+		return true, nil
+	}
+	// Ref-accurate markers: a per-ref value denies only that ref, so a marker on a
+	// push target branch is invisible on the (clean) default branch and vice versa.
+	return f.markersByRef[ref], nil
 }
 
 func (f *fakeProvider) GitAuthHeader(context.Context, string) (string, error) {
@@ -103,6 +120,7 @@ func (f *fakeProvider) GitRemoteURL(context.Context, string) (string, error) {
 }
 
 func (f *fakeProvider) DefaultBranch(context.Context, string) (string, error) {
+	f.defaultBranchCalls++
 	return f.defaultBranch, nil
 }
 
@@ -197,16 +215,26 @@ func (u *upstream) last() recorded {
 	return u.requests[len(u.requests)-1]
 }
 
+// newTestServer builds a Server whose team/* allow rule grants exactly the given
+// capabilities with no filter (no path, no tag, not .noai-exempt).
 func newTestServer(t *testing.T, p *fakeProvider, grants []policy.Capability, branches []string) *Server {
 	t.Helper()
 	caps := make([]policy.CapabilityGrant, len(grants))
 	for i, c := range grants {
 		caps[i] = policy.CapabilityGrant{Name: c}
 	}
+	return newTestServerGrants(t, p, caps, branches)
+}
+
+// newTestServerGrants builds a Server from explicit capability grants so a test
+// can attach a filter (for example the noai: allow exemption or a path/tag
+// constraint whose behavior in the proxy is fail-closed).
+func newTestServerGrants(t *testing.T, p *fakeProvider, grants []policy.CapabilityGrant, branches []string) *Server {
+	t.Helper()
 	pol, err := policy.Build([]policy.RuleSpec{{
 		Repositories: []string{"team/*"},
 		Effect:       string(policy.EffectAllow),
-		Capabilities: caps,
+		Capabilities: grants,
 	}})
 	if err != nil {
 		t.Fatalf("policy.Build: %v", err)
@@ -261,6 +289,12 @@ func doRequest(t *testing.T, s *Server, method, target string, body []byte, user
 
 func pushBody(oldSHA, newSHA, ref string) []byte {
 	return append(pkts(oldSHA+" "+newSHA+" "+ref+"\x00report-status side-band-64k\n"), packBody...)
+}
+
+// pushBodyMulti builds a command section from fully framed command lines (the
+// first must carry the capability list after a NUL) followed by the pack body.
+func pushBodyMulti(lines ...string) []byte {
+	return append(pkts(lines...), packBody...)
 }
 
 func TestAuthRequired(t *testing.T) {
@@ -639,6 +673,149 @@ func TestPushMalformedCommandSection(t *testing.T) {
 	}
 	if u.count() != 0 {
 		t.Errorf("upstream calls = %d, want 0 for a malformed push", u.count())
+	}
+}
+
+// TestPushNoAIMarkerOnTargetBranchDenies pins the .noai target-branch check. The
+// default branch is marker-free, but the branch being pushed carries the marker.
+// A push is authorized per unique target branch, so the guard checks the marker
+// on the default branch AND on the branch; the branch occurrence denies. This
+// happens in authorization, before any provider metadata call in checkPush, so
+// the upstream is never contacted and DefaultBranch/ResolveRef/MergeBase never
+// run. The denial is the one indistinguishable "not accessible" 403.
+func TestPushNoAIMarkerOnTargetBranchDenies(t *testing.T) {
+	u := newUpstream(t, []byte("should not be called"))
+	p := newFetchProvider(u.serverURL)
+	// Marker only on the push target branch; the default branch stays clean.
+	p.markersByRef = map[string]bool{"ai/fix": true}
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+
+	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/fix")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("push to a .noai target branch = %d, want 403, body %q", rec.Code, rec.Body)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0 for a .noai branch push", u.count())
+	}
+	// The marker was checked on the default branch and on the target branch.
+	if !slices.Contains(p.fileExistsRefs, "") || !slices.Contains(p.fileExistsRefs, "ai/fix") {
+		t.Errorf("marker refs = %v, want the default branch and ai/fix checked", p.fileExistsRefs)
+	}
+	// Authorization precedes every provider metadata call of checkPush.
+	if p.defaultBranchCalls != 0 || p.resolveCalls != 0 || p.mergeBaseCalls != 0 {
+		t.Errorf("metadata calls = default %d resolve %d mergeBase %d, want 0/0/0 before a denied authorization",
+			p.defaultBranchCalls, p.resolveCalls, p.mergeBaseCalls)
+	}
+	// The denial is byte-identical to the unknown-repository denial.
+	recUnknown := doRequest(t, s, http.MethodGet,
+		"/git/"+providerName+"/other/secret.git/info/refs?service=git-upload-pack", nil, "git", proxyToken)
+	if rec.Body.String() != recUnknown.Body.String() {
+		t.Errorf(".noai branch denial %q differs from the unknown-repository denial %q",
+			rec.Body.String(), recUnknown.Body.String())
+	}
+}
+
+// TestPushNoAIExemptGrantAllowsMarkedBranch pins that a noai: allow grant skips
+// the .noai marker on BOTH the default branch and the push target branch, so a
+// push to a marked branch is permitted once the branch policy passes. The marker
+// is present everywhere here to prove the exemption, not an absent marker, is
+// what allows the push.
+func TestPushNoAIExemptGrantAllowsMarkedBranch(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	p := newFetchProvider(u.serverURL)
+	p.markersByRef = map[string]bool{"": true, "ai/fix": true}
+	s := newTestServerGrants(t, p, []policy.CapabilityGrant{
+		{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{NoAIExempt: true}},
+	}, []string{"ai/**"})
+
+	body := pushBody(sha1Zero, sha1New, "refs/heads/ai/fix")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exempt push to a .noai branch = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	// An exempt grant skips the marker read entirely: FileExists was never asked.
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none for an exempt grant", p.fileExistsRefs)
+	}
+	if !bytes.Equal(u.last().body, body) {
+		t.Error("upstream body differs from the original request body")
+	}
+}
+
+// TestPushDuplicateTargetBranchAuthorizedOnce pins ref deduplication: two
+// commands that resolve to the same branch authorize that branch once, so the
+// marker is checked on the default branch and the branch exactly one time each.
+func TestPushDuplicateTargetBranchAuthorizedOnce(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	p := newFetchProvider(u.serverURL)
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+
+	// Two creates that target the same branch: one capability line with caps, one
+	// plain command line, both refs/heads/ai/fix.
+	body := pushBodyMulti(
+		sha1Zero+" "+sha1New+" refs/heads/ai/fix\x00report-status side-band-64k\n",
+		sha1Zero+" "+sha1New+" refs/heads/ai/fix\n",
+	)
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	// Deduplicated: the default branch ("") and ai/fix are each checked once.
+	if want := []string{"", "ai/fix"}; !slices.Equal(p.fileExistsRefs, want) {
+		t.Errorf("marker refs = %v, want exactly %v (deduplicated)", p.fileExistsRefs, want)
+	}
+	if !bytes.Equal(u.last().body, body) {
+		t.Error("upstream body differs from the original request body")
+	}
+}
+
+// TestPushTagRefAuthorizedAtRepoLevel documents the fail-closed handling of a
+// non-branch ref: with repo:write granted it is authorized at repository level
+// (the default-branch marker only, because a tag maps to no branch), then
+// checkPush rejects it as a non-branch ref with the branch-policy 403. A
+// repository the client cannot write instead yields the generic "not accessible"
+// 403 before any marker read, because the capability layer denies first.
+func TestPushTagRefAuthorizedAtRepoLevel(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+
+	// repo:write granted: authorization passes on a clean default branch, the
+	// marker is checked at repository level only (ref ""), then checkPush denies.
+	p := newFetchProvider(u.serverURL)
+	s := newTestServer(t, p, []policy.Capability{policy.CapRepoWrite}, []string{"ai/**"})
+	body := pushBody(sha1Zero, sha1New, "refs/tags/v1")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if want := []string{""}; !slices.Equal(p.fileExistsRefs, want) {
+		t.Errorf("marker refs = %v, want %v (repository-level authorization for a tag)", p.fileExistsRefs, want)
+	}
+	if want := "git proxy: push rejected by branch policy\n"; rec.Body.String() != want {
+		t.Errorf("denial body = %q, want the branch-policy message %q", rec.Body.String(), want)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
+	}
+
+	// Without repo:write the capability layer denies before the marker read, so
+	// FileExists runs zero times and the answer is the generic denial.
+	pNo := newFetchProvider(u.serverURL)
+	sNo := newTestServer(t, pNo, []policy.Capability{policy.CapRepoRead}, []string{"ai/**"})
+	rec = doRequest(t, sNo, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("no-write status = %d, want 403", rec.Code)
+	}
+	if len(pNo.fileExistsRefs) != 0 {
+		t.Errorf("no-write marker refs = %v, want none (denied before the marker check)", pNo.fileExistsRefs)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("no-write body = %q, want the generic denial %q", rec.Body.String(), want)
 	}
 }
 

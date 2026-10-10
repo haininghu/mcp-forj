@@ -241,7 +241,10 @@ type route struct {
 
 // serveGit is the single entry point of the handler: authenticate first (an
 // unauthenticated client learns nothing about routes), then parse the route,
-// authorize the capability, apply the push policy, and forward.
+// authorize the capability, apply the push policy, and forward. Fetch and push
+// discovery are repository-level authorizations; a push is authorized per target
+// branch, which needs the ref list, so its command section is parsed first
+// (see preparePush). Every denial maps to one safe response via writeDenied.
 func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 	if !s.authenticate(r) {
 		setAuthChallenge(w)
@@ -264,28 +267,118 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request) {
 	// Authorize before any provider call (deny by default). Repository tags are
 	// not fetched here: a grant with a tag constraint sees unknown tags and
 	// therefore fails closed, which is the documented behavior for git traffic.
-	if err := s.guard.Authorize(r.Context(), rt.providerName, rt.repo, rt.capability); err != nil {
-		// Every denial answers identically so a .noai repository stays
-		// indistinguishable from an unknown or policy-denied one.
-		s.logger.Info("git proxy access denied",
-			"provider", rt.providerName, "repo", rt.repo,
-			"capability", string(rt.capability), "reason", err.Error())
-		http.Error(w, "git proxy: repository is not accessible", http.StatusForbidden)
+	// A POST push additionally parses its command section and authorizes every
+	// unique target branch, so the .noai marker is checked on that branch too.
+	var err error
+	if rt.isPush {
+		err = s.preparePush(r, rt, p)
+	} else {
+		err = s.authorizeRequest(r, rt)
+	}
+	if err != nil {
+		s.writeDenied(w, rt, err)
 		return
 	}
-	if rt.isPush {
-		if err := s.applyPushPolicy(r, rt, p); err != nil {
-			s.logger.Info("git proxy push rejected",
-				"provider", rt.providerName, "repo", rt.repo, "reason", err.Error())
-			if errors.Is(err, errMalformedPush) {
-				http.Error(w, "git proxy: malformed push request", http.StatusBadRequest)
-				return
-			}
-			http.Error(w, "git proxy: push rejected by branch policy", http.StatusForbidden)
-			return
+	s.forward(w, r, rt, p)
+}
+
+// authorizeRequest performs the repository-level authorization used by fetch
+// (git-upload-pack) and push discovery (info/refs?service=git-receive-pack):
+// the capability with unknown tags, so any tag- or path-constrained grant fails
+// closed, and the .noai marker on the default branch. The guard error is wrapped
+// with errRepoDenied so a denial is reported as the generic "not accessible" 403
+// (indistinguishable from an unknown repository, invariant 6).
+func (s *Server) authorizeRequest(r *http.Request, rt *route) error {
+	if err := s.guard.Authorize(r.Context(), rt.providerName, rt.repo, rt.capability); err != nil {
+		return fmt.Errorf("%w: %w", errRepoDenied, err)
+	}
+	return nil
+}
+
+// preparePush runs the POST git-receive-pack pipeline. The pkt-line command
+// section is parsed first: it makes no provider call and is bounded to 1 MiB, so
+// it is safe before authorization. The target branches are then authorized for
+// repo:write (authorizePushRefs), which checks the .noai marker on the default
+// branch AND the branch itself and honors a noai: allow grant. Only after
+// authorization does the push branch policy (checkPush) touch provider metadata,
+// so a policy denial never precedes the guard. Finally the body is rewound with
+// io.MultiReader so the ReverseProxy forwards the original bytes unchanged; the
+// Content-Length stays correct because no byte is added or removed. The returned
+// error is already classified for writeDenied (errMalformedPush, errRepoDenied
+// or errPushDenied).
+func (s *Server) preparePush(r *http.Request, rt *route, p provider.Provider) error {
+	br := bufio.NewReader(r.Body)
+	updates, consumed, err := ReadReceivePackCommands(br)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errMalformedPush, err)
+	}
+	// Policy and marker first, provider metadata second (invariant 5).
+	if err := s.authorizePushRefs(r.Context(), rt, updates); err != nil {
+		return fmt.Errorf("%w: %w", errRepoDenied, err)
+	}
+	if err := s.checkPush(r.Context(), p, rt.repo, updates); err != nil {
+		return err
+	}
+	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(consumed), br))
+	return nil
+}
+
+// authorizePushRefs authorizes repo:write for every unique push target. A branch
+// under refs/heads/ is authorized with its own ref, so the guard checks the
+// .noai marker on the default branch and on that branch; a noai: allow grant
+// still exempts the check. Any other ref (a tag or note the branch policy will
+// reject) is authorized at repository level so the capability denial stays the
+// generic "not accessible" 403 before checkPush runs. Duplicate targets are
+// authorized once. Tags stay unknown (fail closed). The first failure is
+// returned and mapped by the caller to the identical 403; no ref or repository
+// detail reaches the client.
+func (s *Server) authorizePushRefs(ctx context.Context, rt *route, updates []RefUpdate) error {
+	seen := make(map[string]struct{}, len(updates))
+	for _, u := range updates {
+		ref := pushMarkerRef(u.Ref)
+		if _, ok := seen[ref]; ok {
+			continue
+		}
+		seen[ref] = struct{}{}
+		if err := s.guard.AuthorizeResourceRef(ctx, rt.providerName, rt.repo,
+			policy.CapRepoWrite, policy.TagSet{}, "", ref); err != nil {
+			return err
 		}
 	}
-	s.forward(w, r, rt, p)
+	return nil
+}
+
+// pushMarkerRef returns the ref whose .noai marker the guard must check for one
+// push target: the branch name for a refs/heads/ ref (the marker is then checked
+// on the default branch and on the branch), or the empty string for any other
+// ref, which limits the marker check to the default branch before checkPush
+// rejects the non-branch ref afterwards.
+func pushMarkerRef(ref string) string {
+	if branch, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+		return branch
+	}
+	return ""
+}
+
+// writeDenied maps an authorization or policy failure to a single safe response
+// and logs it. A malformed command section is a protocol error (400); every
+// repository or capability denial answers the identical "not accessible" 403 so
+// a .noai repository or branch stays indistinguishable from an unknown or
+// policy-denied one (invariant 6). Only the branch-policy denials of an
+// authorized repository name the branch rule, and never leak ref internals.
+// Unknown errors fall through to the fail-closed "not accessible" 403.
+func (s *Server) writeDenied(w http.ResponseWriter, rt *route, err error) {
+	s.logger.Info("git proxy access denied",
+		"provider", rt.providerName, "repo", rt.repo,
+		"capability", string(rt.capability), "reason", err.Error())
+	switch {
+	case errors.Is(err, errMalformedPush):
+		http.Error(w, "git proxy: malformed push request", http.StatusBadRequest)
+	case errors.Is(err, errPushDenied):
+		http.Error(w, "git proxy: push rejected by branch policy", http.StatusForbidden)
+	default:
+		http.Error(w, "git proxy: repository is not accessible", http.StatusForbidden)
+	}
 }
 
 // parseRoute splits "/git/<provider>/<repo...>.git/<service...>". The provider
@@ -339,23 +432,6 @@ func (s *Server) parseRoute(r *http.Request) (*route, bool) {
 		return nil, false
 	}
 	return rt, true
-}
-
-// applyPushPolicy parses the pkt-line command section from the request body,
-// checks every ref update against the push policy, and rewinds the body with
-// io.MultiReader so the ReverseProxy forwards the original bytes unchanged.
-// The Content-Length stays correct because no byte is added or removed.
-func (s *Server) applyPushPolicy(r *http.Request, rt *route, p provider.Provider) error {
-	br := bufio.NewReader(r.Body)
-	updates, consumed, err := ReadReceivePackCommands(br)
-	if err != nil {
-		return fmt.Errorf("%w: %v", errMalformedPush, err)
-	}
-	if err := s.checkPush(r.Context(), p, rt.repo, updates); err != nil {
-		return err
-	}
-	r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(consumed), br))
-	return nil
 }
 
 // inboundCredentialHeaders are client-supplied headers that could carry an

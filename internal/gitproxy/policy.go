@@ -20,6 +20,12 @@ var errPushDenied = errors.New("gitproxy: push denied")
 // parsed (HTTP 400). It is a protocol error, not a policy denial.
 var errMalformedPush = errors.New("gitproxy: malformed push request")
 
+// errRepoDenied marks a repository or capability denial (HTTP 403). A fetch,
+// discovery or push authorization denial wraps it so all three answer the one
+// identical "repository is not accessible" body, keeping a .noai repository or
+// branch indistinguishable from an unknown or policy-denied one (invariant 6).
+var errRepoDenied = errors.New("gitproxy: repository not accessible")
+
 // isZeroOID reports whether s is an all-zero object id (creation when it is
 // the old id, deletion when it is the new one). Callers receive only values
 // validated as hex object ids by ReadReceivePackCommands.
