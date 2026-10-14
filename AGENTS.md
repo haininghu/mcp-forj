@@ -34,6 +34,7 @@ It exposes tools that let an AI agent inspect and (limitedly) act on code hostin
 make build     # build bin/mcp-forj
 make test      # go test ./...
 make test-race # go test -race ./...
+make test-e2e  # go test -tags e2e ./...  (end-to-end tests)
 make cover     # coverage report
 make vet       # go vet ./...
 make fmt       # gofmt -s -w .
@@ -49,8 +50,21 @@ go build ./...
 go vet ./...
 go test ./...
 go test -race ./...
-gofmt -l .          # must print nothing
+go test -tags e2e ./...   # e2e tests (gitproxy ones need the git binary)
+gofmt -l .                # must print nothing
 ```
+
+### End-to-end tests
+
+Tests behind the `e2e` build tag exercise the two entry points end to end and are
+excluded from `go test ./...`:
+
+- `internal/gitproxy/e2e_test.go` runs a **real `git` client** against the proxy with a
+  local bare repository served by `git http-backend`; it covers clone, push branch
+  policy, `.noai` on the default/target branch and push-option gating. It skips when
+  the git binary is missing or under `-short`.
+- `internal/server/gitlab_e2e_test.go` drives the MCP tools through the **real GitLab
+  client** against an `httptest` mock of the GitLab REST API (no external service).
 
 ### Pre-finish checklist
 

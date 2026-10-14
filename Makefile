@@ -3,7 +3,7 @@ BINARY := mcp-forj
 CMD := ./cmd/mcp-forj
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build test test-race cover vet fmt tidy lint run clean
+.PHONY: all build test test-race test-e2e cover vet fmt tidy lint run clean
 
 all: fmt vet test build
 
@@ -15,6 +15,11 @@ test:
 
 test-race:
 	go test -race ./...
+
+# End-to-end tests behind the "e2e" build tag. The gitproxy ones need the git
+# binary; they skip when it is missing or when run with -short.
+test-e2e:
+	go test -tags e2e ./...
 
 cover:
 	go test -coverprofile=coverage.out ./...
