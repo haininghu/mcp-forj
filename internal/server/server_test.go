@@ -460,6 +460,67 @@ func TestListMergeRequestsAllowedOnNoAIRepoWhenExempt(t *testing.T) {
 	}
 }
 
+// TestListMergeRequestsNoAIFallThroughIsNotBypassed is a regression test for the
+// interaction between firewall-style fall-through and the repository-level
+// .noai overlay: when one mr:read grant is noai-exempt but another (reachable
+// through a tag-filter fall-through) is not, the marker must still be checked.
+func TestListMergeRequestsNoAIFallThroughIsNotBypassed(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	setLabels(fake, true, "other")
+	rules := []policy.RuleSpec{
+		{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{
+				{Name: "mr:read", Filter: policy.CapabilityFilter{NoAIExempt: true, Require: []string{"ai-ok"}}},
+			},
+		},
+		{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: grants("mr:read"), // not exempt; reachable via fall-through
+		},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "list_merge_requests", mrArgs())
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("list_merge_requests = %q (isError=%v), want an indistinguishable unknown-repository denial",
+			resultText(t, res), res.IsError)
+	}
+}
+
+// TestGetMergeRequestNoAIFallThroughIsNotBypassed covers the single-item path:
+// a per-item tag fall-through to a non-exempt grant must still run the .noai
+// marker check.
+func TestGetMergeRequestNoAIFallThroughIsNotBypassed(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	setLabels(fake, true, "other")
+	rules := []policy.RuleSpec{
+		{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{
+				{Name: "mr:read", Filter: policy.CapabilityFilter{NoAIExempt: true, Require: []string{"ai-ok"}}},
+			},
+		},
+		{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: grants("mr:read"), // not exempt; reachable via fall-through
+		},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "get_merge_request", map[string]any{"provider": "fake", "repo": "team/app", "number": 1})
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("get_merge_request = %q (isError=%v), want an indistinguishable unknown-repository denial",
+			resultText(t, res), res.IsError)
+	}
+}
+
 func TestMarkerCheckErrorDeniesReadFile(t *testing.T) {
 	fake := newFake()
 	fake.markerErr = errors.New("network down")
@@ -1474,6 +1535,34 @@ func TestReadFileNoRepoFilterNoTopicCall(t *testing.T) {
 	}
 	if fake.topicsCalls != 0 {
 		t.Errorf("GetRepositoryTopics called %d times, want 0 when no filter is active", fake.topicsCalls)
+	}
+}
+
+// TestReadFileTagAndPathFilterFallThrough pins that a reachable rule with a tag
+// constraint triggers a topic fetch even when it also has a path filter (the tag
+// dimension is evaluated first), and that a known tag miss then falls through to
+// a later unfiltered grant.
+func TestReadFileTagAndPathFilterFallThrough(t *testing.T) {
+	fake := newFake()
+	fake.files["src/x.go"] = []byte("package x")
+	fake.topics = map[string][]string{"team/app": {"other"}}
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []policy.CapabilityGrant{
+			{Name: "repo:read", Filter: policy.CapabilityFilter{
+				Require: []string{"ai-ok"},
+				Paths:   policy.PathFilter{Include: []string{"docs/**"}},
+			}},
+		}},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants("repo:read")},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "read_file", map[string]any{"provider": "fake", "repo": "team/app", "path": "src/x.go"})
+	if res.IsError {
+		t.Fatalf("read_file denied although a later grant applies: %s", resultText(t, res))
+	}
+	if fake.topicsCalls != 1 {
+		t.Errorf("GetRepositoryTopics called %d times, want 1 (the tag rule is reachable)", fake.topicsCalls)
 	}
 }
 

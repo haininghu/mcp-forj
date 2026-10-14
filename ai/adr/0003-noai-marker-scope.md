@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Supersedes the previous revision of this ADR.
+Accepted. Supersedes the previous revision of this ADR. The `noai`-on-`deny`-rule note is
+superseded by ADR 0012.
 
 ## Context
 

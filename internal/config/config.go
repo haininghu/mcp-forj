@@ -109,12 +109,16 @@ type RuleConfig struct {
 	Repositories []string `yaml:"repositories"`
 	// Effect is "allow" or "deny".
 	Effect string `yaml:"effect"`
-	// Capabilities are granted by an "allow" rule, optionally with tag filters.
+	// Capabilities are the rule's capability entries, granted by an "allow" rule
+	// and denied by a "deny" rule, each optionally with filters. A "deny" rule
+	// without capabilities denies every capability in its scope.
 	Capabilities []CapabilityGrant `yaml:"capabilities"`
 }
 
-// CapabilityGrant is a configured capability. It is either a scalar capability
-// name or a single-key mapping from capability name to an optional filter:
+// CapabilityGrant is a configured capability entry. It is either a scalar
+// capability name or a single-key mapping from capability name to an optional
+// filter. Both "allow" and "deny" rules accept filters; a "deny" rule without
+// capabilities denies every capability in its scope:
 //
 //	capabilities:
 //	  - mr:read
@@ -422,9 +426,6 @@ func (c *Config) Validate() error {
 			if rule.Effect != string(policy.EffectAllow) && rule.Effect != string(policy.EffectDeny) {
 				return fmt.Errorf("config: provider %q rule %d: effect must be %q or %q", p.Name, j, policy.EffectAllow, policy.EffectDeny)
 			}
-			if rule.Effect == string(policy.EffectDeny) && len(rule.Capabilities) > 0 {
-				return fmt.Errorf("config: provider %q rule %d: capabilities are not allowed on deny rules", p.Name, j)
-			}
 			if len(rule.Repositories) == 0 {
 				return fmt.Errorf("config: provider %q rule %d: repositories must not be empty", p.Name, j)
 			}
@@ -446,6 +447,12 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("config: provider %q rule %d: duplicate capability %q", p.Name, j, grant.Name)
 				}
 				seenCaps[grant.Name] = true
+				// A deny rule refuses regardless of the .noai marker, so a noai
+				// exemption on it is meaningless; reject it to avoid a false
+				// expectation.
+				if rule.Effect == string(policy.EffectDeny) && grant.NoAIExempt {
+					return fmt.Errorf("config: provider %q rule %d: noai is not allowed on a deny rule", p.Name, j)
+				}
 
 				require, err := normalizeTags(p.Name, j, grant.Name, "require", grant.Require)
 				if err != nil {

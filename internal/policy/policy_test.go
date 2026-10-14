@@ -73,31 +73,29 @@ func TestEvaluateWithTags(t *testing.T) {
 	})
 
 	tests := []struct {
-		name                  string
-		repo                  string
-		capability            Capability
-		tags                  TagSet
-		wantAllowed           bool
-		wantCapabilityGranted bool
-		wantMatched           bool
-		wantReason            string
+		name        string
+		repo        string
+		capability  Capability
+		tags        TagSet
+		wantAllowed bool
+		wantMatched bool
+		wantReason  string
 	}{
-		{"zero filter unaffected by unknown tags", "team/app", CapMRRead, TagSet{}, true, true, true, "capability granted"},
-		{"active filter fails closed on unknown tags", "team/app", CapMRComment, TagSet{}, false, true, true, "tag information unavailable"},
-		{"require all present", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "other"}}, true, true, true, "capability granted"},
-		{"require missing", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"other"}}, false, true, true, "tag requirement not met"},
-		{"exclude present", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "do-not-touch"}}, false, true, true, "excluded tag present"},
-		{"capability not granted by allow rule", "team/app", CapMRWrite, TagSet{Known: true}, false, false, true, "capability mr:write not granted"},
-		{"deny rule", "team/secret", CapMRRead, TagSet{Known: true, Values: []string{"ai-reviewed"}}, false, false, true, "denied by rule"},
-		{"unknown repository", "other/x", CapMRRead, TagSet{Known: true}, false, false, false, "no matching rule"},
+		{"zero filter unaffected by unknown tags", "team/app", CapMRRead, TagSet{}, true, true, "capability granted"},
+		{"active filter fails closed on unknown tags", "team/app", CapMRComment, TagSet{}, false, true, "tag information unavailable"},
+		{"require all present", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "other"}}, true, true, "capability granted"},
+		{"require missing falls through", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"other"}}, false, true, "tag requirement not met"},
+		{"exclude present falls through", "team/app", CapMRComment, TagSet{Known: true, Values: []string{"ai-reviewed", "do-not-touch"}}, false, true, "excluded tag present"},
+		{"capability not granted by allow rule", "team/app", CapMRWrite, TagSet{Known: true}, false, true, "capability mr:write not granted"},
+		{"deny rule", "team/secret", CapMRRead, TagSet{Known: true, Values: []string{"ai-reviewed"}}, false, true, "denied by rule"},
+		{"unknown repository", "other/x", CapMRRead, TagSet{Known: true}, false, false, "no matching rule"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := p.EvaluateWithTags(tt.repo, tt.capability, tt.tags)
-			if got.Allowed != tt.wantAllowed || got.CapabilityGranted != tt.wantCapabilityGranted ||
-				got.Matched != tt.wantMatched || got.Reason != tt.wantReason {
-				t.Errorf("EvaluateWithTags = %+v, want {Allowed:%v CapabilityGranted:%v Matched:%v Reason:%q}",
-					got, tt.wantAllowed, tt.wantCapabilityGranted, tt.wantMatched, tt.wantReason)
+			if got.Allowed != tt.wantAllowed || got.Matched != tt.wantMatched || got.Reason != tt.wantReason {
+				t.Errorf("EvaluateWithTags = %+v, want {Allowed:%v Matched:%v Reason:%q}",
+					got, tt.wantAllowed, tt.wantMatched, tt.wantReason)
 			}
 		})
 	}
@@ -118,10 +116,11 @@ func TestEvaluateNoAIExempt(t *testing.T) {
 	if got := p.Evaluate("team/app", CapRepoList); !got.Allowed || got.NoAIExempt {
 		t.Errorf("repo:list = %+v, want allowed without exemption", got)
 	}
-	// The exemption is carried even when a tag constraint fails.
+	// A tag miss makes the rule fall through; no rule then applies, so the
+	// decision denies and carries no exemption.
 	got := p.EvaluateWithTags("team/app", CapMRRead, TagSet{Known: true, Values: []string{"other"}})
-	if got.Allowed || !got.CapabilityGranted || !got.NoAIExempt {
-		t.Errorf("mr:read tag failure = %+v, want not allowed but NoAIExempt retained", got)
+	if got.Allowed || got.NoAIExempt {
+		t.Errorf("mr:read tag fall-through = %+v, want denied without exemption", got)
 	}
 	// Deny/no-match decisions never carry the exemption.
 	if got := p.Evaluate("team/secret", CapRepoRead); got.NoAIExempt {
@@ -189,7 +188,9 @@ func TestBuildValidation(t *testing.T) {
 		{"empty branch exclude pattern", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
 			{Name: CapRepoWrite, Filter: CapabilityFilter{Branches: PathFilter{Exclude: []string{""}}}},
 		}}}},
-		{"capabilities on deny rule", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "deny", Capabilities: grants("repo:read")}}},
+		{"noai exemption on deny rule", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "deny", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{NoAIExempt: true}},
+		}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -221,19 +222,106 @@ func TestKnownCapabilities(t *testing.T) {
 	}
 }
 
-func TestClassify(t *testing.T) {
+func TestListable(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
-	if matched, effect := p.Classify("team/secret"); !matched || effect != EffectDeny {
-		t.Errorf("Classify(team/secret) = (%v, %q), want (true, deny)", matched, effect)
+	if p.listable("team/secret") {
+		t.Error("listable(team/secret) = true, want false (scope-only deny hides)")
 	}
-	if matched, effect := p.Classify("team/app"); !matched || effect != EffectAllow {
-		t.Errorf("Classify(team/app) = (%v, %q), want (true, allow)", matched, effect)
+	if !p.listable("team/app") {
+		t.Error("listable(team/app) = false, want true (allow exposes)")
 	}
-	if matched, _ := p.Classify("other/x"); matched {
-		t.Error("Classify(other/x) matched, want no match")
+	if p.listable("other/x") {
+		t.Error("listable(other/x) = true, want false (no match)")
+	}
+	// A deny rule that does not list repo:list does not hide the repository; a
+	// deny rule that does list repo:list does.
+	q := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapMRRead)},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoList)},
+	})
+	if !q.listable("team/app") {
+		t.Error("listable(team/app) with a non-repo:list deny = false, want true")
+	}
+	r := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapRepoList)},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoList)},
+	})
+	if r.listable("team/app") {
+		t.Error("listable(team/app) with a repo:list deny = true, want false")
+	}
+	// First-match-wins: an allow exposes the listing before a later deny that
+	// lists repo:list (the allow does not need repo:list itself).
+	s := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapRepoList)},
+	})
+	if !s.listable("team/app") {
+		t.Error("allow before a repo:list deny: listable = false, want true (first match wins)")
+	}
+	// A repo named only by a deny rule that lists other capabilities has no
+	// exposing allow, so it is not listed.
+	d := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapMRRead)},
+	})
+	if d.listable("team/app") {
+		t.Error("deny-only-other-capability: listable = true, want false (no allow)")
+	}
+}
+
+func TestHasTagConstraint(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/paths"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}},
+		}},
+		{Repositories: []string{"team/paths"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}}},
+		}},
+		{Repositories: []string{"team/plain"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/both"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}, Paths: PathFilter{Include: []string{"docs/**"}}}},
+		}},
+		{Repositories: []string{"team/both"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+	})
+	// A rule with both a tag and a path filter needs tags even when the path
+	// matches: the tag dimension is evaluated first.
+	if !p.HasTagConstraint("team/both", CapRepoRead, "docs/a.md") {
+		t.Error("tag+path rule: HasTagConstraint = false, want true (tags are evaluated first)")
+	}
+	if !p.HasTagConstraint("team/both", CapRepoRead, "src/a.go") {
+		t.Error("tag+path rule (path miss): HasTagConstraint = false, want true")
+	}
+	// A matching path rule without tags decides without tags, even though a later
+	// rule has a tag constraint.
+	if p.HasTagConstraint("team/paths", CapRepoRead, "docs/a.md") {
+		t.Error("matching path rule: HasTagConstraint = true, want false")
+	}
+	// A path miss falls through to the tag-constrained rule.
+	if !p.HasTagConstraint("team/paths", CapRepoRead, "src/a.go") {
+		t.Error("path miss: HasTagConstraint = false, want true")
+	}
+	// An unfiltered allow decides without tags.
+	if p.HasTagConstraint("team/plain", CapRepoRead, "") {
+		t.Error("plain grant: HasTagConstraint = true, want false")
+	}
+	// A scope-only deny decides without tags.
+	if p.HasTagConstraint("team/secret", CapRepoRead, "") {
+		t.Error("scope-only deny: HasTagConstraint = true, want false")
+	}
+}
+
+func TestHasFilterStopsAtUnfilteredAllow(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapRepoList)},
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: []CapabilityGrant{
+			{Name: CapRepoList, Filter: CapabilityFilter{Require: []string{"x"}}},
+		}},
+	})
+	if p.HasFilter("team/app", CapRepoList) {
+		t.Error("unfiltered allow before a tag deny: HasFilter = true, want false")
 	}
 }
 
@@ -480,5 +568,152 @@ func TestListSearchPrefixes(t *testing.T) {
 	}
 	if prefixes := p.ListSearchPrefixes(CapRepoRead); len(prefixes) != 0 {
 		t.Errorf("ListSearchPrefixes(repo:read) = %v, want none", prefixes)
+	}
+}
+
+// TestFirewallDenyWithCapabilities pins the symmetric model: a deny rule may
+// list capabilities and filters, and applies only to the listed capability when
+// its filter passes.
+func TestFirewallDenyWithCapabilities(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "deny", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: CapabilityFilter{Require: []string{"do-not-touch"}}},
+		}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead, CapMRComment)},
+	})
+
+	if d := p.EvaluateWithTags("team/app", CapMRComment, TagSet{Known: true, Values: []string{"do-not-touch"}}); d.Allowed || d.Reason != "denied by rule" {
+		t.Errorf("deny with matching filter = %+v, want denied by rule", d)
+	}
+	if d := p.EvaluateWithTags("team/app", CapMRComment, TagSet{Known: true, Values: []string{"ok"}}); !d.Allowed {
+		t.Errorf("deny filter miss should fall through to the allow rule: %+v", d)
+	}
+	if d := p.EvaluateWithTags("team/app", CapMRRead, TagSet{Known: true, Values: []string{"do-not-touch"}}); !d.Allowed {
+		t.Errorf("a capability the deny does not list is unaffected: %+v", d)
+	}
+
+	// A deny rule without capabilities still denies every capability in scope.
+	q := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "deny"},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+	})
+	if d := q.Evaluate("team/app", CapMRRead); d.Allowed || d.Reason != "denied by rule" {
+		t.Errorf("scope-only deny = %+v, want denied by rule", d)
+	}
+}
+
+// TestFirewallFilterFallThrough pins that an evaluated filter miss makes the
+// rule fall through to a later rule, while an unevaluable filter fails closed.
+func TestFirewallFilterFallThrough(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}},
+		}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+	})
+	if d := p.EvaluateResource("team/app", CapRepoRead, TagSet{}, "docs/a.md"); !d.Allowed {
+		t.Errorf("included path denied: %+v", d)
+	}
+	if d := p.EvaluateResource("team/app", CapRepoRead, TagSet{}, "src/a.go"); !d.Allowed {
+		t.Errorf("path miss should fall through to the broad allow: %+v", d)
+	}
+
+	// Without a later rule the miss denies by default, reporting the miss.
+	q := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}},
+		}},
+	})
+	if d := q.EvaluateResource("team/app", CapRepoRead, TagSet{}, "src/a.go"); d.Allowed || d.Reason != "path not allowed" {
+		t.Errorf("path miss without fallback = %+v, want denied (path not allowed)", d)
+	}
+
+	// Unknown tag information is not a filter miss: it fails closed and never
+	// falls through to a broader rule.
+	r := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}}},
+		}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+	})
+	if d := r.EvaluateWithTags("team/app", CapRepoRead, TagSet{}); d.Allowed || d.Reason != "tag information unavailable" {
+		t.Errorf("unknown tags = %+v, want fail-closed (tag information unavailable)", d)
+	}
+}
+
+// TestFirewallShadowing documents the security-critical rule order: a broad
+// allow above a specific deny hides the deny (first-match-wins).
+func TestFirewallShadowing(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRComment)},
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+	})
+	if d := p.Evaluate("team/secret", CapMRComment); !d.Allowed {
+		t.Errorf("broad allow before deny should shadow the deny: %+v", d)
+	}
+
+	q := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRComment)},
+	})
+	if d := q.Evaluate("team/secret", CapMRComment); d.Allowed || d.Reason != "denied by rule" {
+		t.Errorf("deny first = %+v, want denied by rule", d)
+	}
+}
+
+func TestEvaluatePreCheck(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: CapabilityFilter{Require: []string{"ai-reviewed"}}},
+		}},
+		{Repositories: []string{"team/denied"}, Effect: "deny"},
+		{Repositories: []string{"team/capped"}, Effect: "deny", Capabilities: grants(CapMRComment)},
+		{Repositories: []string{"team/filtered-deny"}, Effect: "deny", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: CapabilityFilter{Require: []string{"x"}}},
+		}},
+		{Repositories: []string{"team/filtered-deny"}, Effect: "allow", Capabilities: grants(CapMRComment)},
+	})
+	tests := []struct {
+		repo        string
+		c           Capability
+		wantGranted bool
+		wantMatched bool
+	}{
+		{"team/app", CapMRComment, true, true},
+		{"team/app", CapMRRead, false, true},
+		{"team/denied", CapMRComment, false, true},
+		{"team/capped", CapMRComment, false, true},
+		{"team/filtered-deny", CapMRComment, true, true},
+		{"other/repo", CapMRComment, false, false},
+	}
+	for _, tt := range tests {
+		granted, matched := p.EvaluatePreCheck(tt.repo, tt.c)
+		if granted != tt.wantGranted || matched != tt.wantMatched {
+			t.Errorf("EvaluatePreCheck(%q, %q) = (%v, %v), want (%v, %v)",
+				tt.repo, tt.c, granted, matched, tt.wantGranted, tt.wantMatched)
+		}
+	}
+}
+
+func TestNoAIExemptAll(t *testing.T) {
+	all := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRRead, Filter: CapabilityFilter{NoAIExempt: true}},
+		}},
+	})
+	if !all.NoAIExemptAll("team/app", CapMRRead) {
+		t.Error("single exempt grant: NoAIExemptAll = false, want true")
+	}
+	mixed := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRRead, Filter: CapabilityFilter{NoAIExempt: true, Require: []string{"a"}}},
+		}},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+	})
+	if mixed.NoAIExemptAll("team/app", CapMRRead) {
+		t.Error("mixed exemption: NoAIExemptAll = true, want false (conservative)")
+	}
+	if all.NoAIExemptAll("other/repo", CapMRRead) {
+		t.Error("no matching grant: NoAIExemptAll = true, want false")
 	}
 }

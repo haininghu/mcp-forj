@@ -109,6 +109,17 @@ providers:
                 include: ["ai/**"]
                 exclude: ["ai/wip/**"]
 
+      # A deny rule may list capabilities and filters (ADR 0012). This excludes
+      # commenting on MRs labelled `do-not-touch` across the group. It must come
+      # BEFORE the broad allow below: a broader allow above a specific deny would
+      # hide the denial (first applicable rule wins).
+      - repositories:
+          - "team/*"
+        effect: deny
+        capabilities:
+          - mr:comment:
+              require: [do-not-touch]
+
       # Read-only access to all other repositories in this group.
       - repositories:
           - "team/*"
@@ -143,8 +154,9 @@ providers:
           - mr:diff:
               require: [ai-reviewed]
 
-      # Explicit denial (overrides anything broader that might follow). Deny
-      # rules must not list capabilities.
+      # Explicit denial of a whole scope. A deny rule without capabilities
+      # denies every capability in its scope; it must be placed before any
+      # broader allow that would otherwise hide it (first applicable rule wins).
       - repositories:
           - "legacy/**"
         effect: deny

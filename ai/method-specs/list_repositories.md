@@ -28,8 +28,10 @@ Fine-grained permission: **Project: Read** (group/project must be in token scope
 
 ## Authorization
 
-- Literal repositories: returned subject to the first matching rule being `allow`
-  (a `deny` rule hides them). No capability, provider call or `.noai` check; an
+- Literal repositories: returned unless the first scope-matching rule denies the
+  listing — a `deny` rule without capabilities, or a `deny` rule that lists `repo:list`
+  (ADR 0012). A `deny` rule that lists other capabilities does not hide the repository.
+  No capability, provider call or `.noai` check; an
   explicitly configured repository is always listed even if it is `.noai`.
   Exception: an active `repo:list` topic filter also applies to literal entries;
   their topics are fetched and a failure/non-match omits them and increments

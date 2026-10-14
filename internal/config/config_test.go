@@ -666,38 +666,6 @@ providers:
 `,
 			wantErr: "duplicate capability",
 		},
-		{
-			name: "plain capability on deny rule",
-			yaml: `
-providers:
-  - name: p
-    type: gitlab
-    base_url: https://example.com
-    token: T
-    rules:
-      - repositories: ["a/b"]
-        effect: deny
-        capabilities: [mr:read]
-`,
-			wantErr: "capabilities are not allowed on deny rules",
-		},
-		{
-			name: "filtered capability on deny rule",
-			yaml: `
-providers:
-  - name: p
-    type: gitlab
-    base_url: https://example.com
-    token: T
-    rules:
-      - repositories: ["a/b"]
-        effect: deny
-        capabilities:
-          - mr:comment:
-              require: [x]
-`,
-			wantErr: "capabilities are not allowed on deny rules",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -992,10 +960,39 @@ providers:
 `
 	_, err := Parse([]byte(yaml))
 	if err == nil {
-		t.Fatal("Parse accepted capabilities on a deny rule")
+		t.Fatal("Parse accepted a noai exemption on a deny rule")
 	}
-	if !strings.Contains(err.Error(), "deny") {
-		t.Errorf("error = %q, want mention of deny", err)
+	if !strings.Contains(err.Error(), "noai is not allowed on a deny rule") {
+		t.Errorf("error = %q, want the noai-on-deny message", err)
+	}
+}
+
+// TestCapabilityGrantDenyAccepted pins the symmetric model at config level: a
+// deny rule may list capabilities and filters.
+func TestCapabilityGrantDenyAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: deny
+        capabilities:
+          - mr:comment:
+              require: [do-not-touch]
+          - repo:read:
+              paths:
+                include: ["secrets/**"]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected a deny rule with capabilities and filters: %v", err)
+	}
+	got := cfg.Providers[0].Rules[0].Capabilities
+	if len(got) != 2 || got[0].Name != "mr:comment" || got[1].Name != "repo:read" {
+		t.Fatalf("capabilities = %+v, want [mr:comment repo:read]", got)
 	}
 }
 
@@ -1694,6 +1691,59 @@ providers:
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestDenyRuleFilterRestrictions pins that the capability-based filter rules
+// (branches only on repo:write, paths only on repo:read/repo:write) apply to
+// deny rules too.
+func TestDenyRuleFilterRestrictions(t *testing.T) {
+	base := func(body string) string {
+		return `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: deny
+        capabilities:
+` + body
+	}
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "branches on deny mr:read",
+			body:    "          - mr:read:\n              branches:\n                include: [\"ai/**\"]\n",
+			wantErr: "branch filters are only supported",
+		},
+		{
+			name:    "paths on deny mr:read",
+			body:    "          - mr:read:\n              paths:\n                include: [\"docs/**\"]\n",
+			wantErr: "path filters are not supported",
+		},
+		{
+			name: "branches on deny repo:write accepted",
+			body: "          - repo:write:\n              branches:\n                include: [\"ai/**\"]\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(base(tt.body)))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Parse rejected a valid deny filter: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
 	}

@@ -52,41 +52,63 @@ N/A — this is the evaluator used by all tools.
    - `Guard.AuthorizeWithTags` — tags only (no path). Used by MR tools.
    - `Guard.AuthorizeResource` — tags + path. Used by `read_file`.
    - `Guard.AuthorizeBranch` — tags + branch (no path). Used by the git proxy per
-     push target branch; a grant without a `branches` filter denies the push.
+     push target branch; a grant without a `branches` filter is a hard fail-closed
+     deny for a named branch.
    Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
+
+The evaluation is **firewall-style and symmetric** (ADR 0012): a rule **applies** when its
+`repositories` scope matches AND (a) it is a `deny` rule without capabilities, or (b) one of its
+capability entries matches the requested capability and all of that entry's filters pass. The first
+applicable rule wins; `allow` grants and `deny` denies. An **evaluated** filter miss (tag
+requirement not met, excluded tag present, path/branch not matched) means the rule does not apply and
+evaluation continues (fall-through); a filter whose input is **unavailable** fails closed. `deny`
+rules may list capabilities and filters; `noai: allow` on a `deny` rule is rejected at config load.
 6. On allow, perform the provider call; map errors with `mapProviderError`.
 
-Tools that evaluate tags per item or per candidate (repository discovery,
-`list_merge_requests`) use the policy-only `Evaluate`/`EvaluateWithTags` and then
-`Guard.CheckNoAI(ctx, provider, repo, decision.NoAIExempt)`.
+Tools that evaluate tags per item or per candidate use the policy-only
+`Evaluate`/`EvaluateWithTags` and then `Guard.CheckNoAI(ctx, provider, repo, exempt)`.
+Repository discovery takes `exempt` from the same per-candidate decision (`decision.NoAIExempt`),
+while `list_merge_requests` evaluates the repository-level overlay once and therefore uses the
+conservative `Guard.NoAIExemptAll` (the marker is skipped only when every `mr:read` grant is exempt).
 
 Decision reasons (all fail closed unless allowed):
 
-- `no matching rule` — no rule matched the repository (unknown repository).
-- `denied by rule` — a `deny` rule matched.
-- `capability <c> not granted` — the matched allow rule lacks the capability.
-- `tag information unavailable` — active tag filter, tags unknown.
-- `tag requirement not met` / `excluded tag present` — exact, case-sensitive.
-- `path required` — active path filter, empty path.
-- `path not allowed` / `path excluded` — doublestar; exclude wins over include.
-- `branch filter required` — named branch, grant has no branches filter (no push).
-- `branch required` — branch filter active but no branch supplied to a branch-context
-  evaluation (`EvaluateResourceBranch`/`AuthorizeBranch`). Branch-less entry points
-  (`Evaluate`/`Authorize`/`AuthorizeResource`) never apply the branch dimension.
-- `branch not allowed` / `branch excluded` — doublestar; exclude wins over include.
-- `.noai` — marker present or marker check failed, for any capability whose
-  matched grant is not `noai`-exempt.
+- `no matching rule` — no rule's scope matched the repository (unknown repository).
+- `no applicable rule` — a rule's scope matched but no rule applied (capability unlisted and/or an
+  evaluated filter miss) and no more specific miss reason below outranks it. Maps to access denied.
+- `denied by rule` — an applicable `deny` rule won.
+- `capability <c> not granted` — a rule did not list the requested capability (fall-through).
+- Evaluated filter misses, reported as the most specific reason when no rule applies:
+  `tag requirement not met` / `excluded tag present` (exact, case-sensitive),
+  `path not allowed` / `path excluded` (doublestar; exclude wins over include),
+  `branch not allowed` / `branch excluded` (doublestar; exclude wins over include).
+- Fail-closed (hard deny, never a fall-through):
+  - `tag information unavailable` — active tag filter, tags unknown.
+  - `path required` — active path filter, empty path.
+  - `branch filter required` — named branch, grant has no `branches` filter (no push).
+  - `branch required` — branch filter active but no branch supplied to a branch-context evaluation
+    (`EvaluateResourceBranch`/`AuthorizeBranch`). Branch-less entry points
+    (`Evaluate`/`Authorize`/`AuthorizeResource`) never apply the branch dimension.
+- `.noai` — marker present or marker check failed, for any capability whose matched grant is not
+  `noai`-exempt.
 
 ## Behavior / limits
 
-- Rules are ordered; the first matching rule wins.
-- Deny-by-default: no match denies.
+- Rules are ordered; the first applicable rule wins (scope + capability + filters).
+- A `deny` rule may list capabilities and filters; without capabilities it denies every capability
+  in its scope. An evaluated filter miss falls through to a later rule; unavailable filter
+  information fails closed.
+- Deny-by-default: no applicable rule denies.
 - Tags/paths are never cached or returned.
 - `.noai` is a capability-level default-deny overlay: every capability is denied on
   a `.noai` repository unless the matched grant is exempted with `noai: allow`.
   Literal (explicitly configured) repositories are still listed; discovered `.noai`
   repositories are omitted unless the `repo:list` grant is exempt. The marker is
   checked on the default branch and is fail-closed.
+- `list_merge_requests` evaluates the repository-level `.noai` overlay once, before per-item tag
+  evaluation, so it skips the marker only when **every** `mr:read` grant is `noai`-exempt
+  (`Guard.NoAIExemptAll`); otherwise a per-item tag fall-through to a non-exempt grant could not
+  bypass the marker.
 
 ## Errors
 

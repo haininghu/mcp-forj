@@ -11,10 +11,10 @@ authorization core. Neither entry point re-implements policy.
 ## One policy core
 
 Both entry points call **the same `policy.Guard`** with the tuple
-`(provider, repository, capability, tags, path/ref/branch)`: deny by default, ordered
-first-match-wins rules, tag/path/branch filters, and the `.noai` default-deny overlay (skipped only
-by a grant with `noai: allow`). Entry-point-specific checks are **additive on top of** that same
-decision:
+`(provider, repository, capability, tags, path/ref/branch)`: deny by default, ordered symmetric
+firewall-style rules (first applicable rule wins; ADR 0012), tag/path/branch filters, and the
+`.noai` default-deny overlay (skipped only by a grant with `noai: allow`). Entry-point-specific
+checks are **additive on top of** that same decision:
 
 - **MCP tools**: argument and path validation, size caps, tool-specific provider calls.
 - **Git proxy**: route/segment validation, HTTP Basic, pkt-line parsing, per-branch

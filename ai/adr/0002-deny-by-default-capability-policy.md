@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted.
+Accepted. The rule-matching parts are superseded by ADR 0012.
 
 ## Context
 

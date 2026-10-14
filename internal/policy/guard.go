@@ -152,10 +152,11 @@ func (g *Guard) CheckNoAI(ctx context.Context, providerName, repo string, exempt
 	return g.checkMarker(ctx, providerName, repo)
 }
 
-// HasFilter reports whether the first matching rule grants capability c for repo
-// with an active filter (tags and/or paths). It is policy-only (no marker check)
-// and is used to decide whether tag information must be fetched before
-// authorizing. It returns ErrUnknownProvider when the provider has no policy.
+// HasFilter reports whether a reachable rule carries an active filter (tags,
+// paths and/or branches) for capability c. It is policy-only (no marker check)
+// and is used to decide whether metadata must be fetched before authorizing; it
+// stops at a rule that decides without a filter. It returns ErrUnknownProvider
+// when the provider has no policy.
 func (g *Guard) HasFilter(providerName, repo string, c Capability) (bool, error) {
 	p, ok := g.policies[providerName]
 	if !ok {
@@ -164,36 +165,55 @@ func (g *Guard) HasFilter(providerName, repo string, c Capability) (bool, error)
 	return p.HasFilter(repo, c), nil
 }
 
-// HasTagConstraint reports whether the first matching rule grants capability c
-// for repo with an active tag constraint (path-only filters do not count). It is
-// policy-only and returns ErrUnknownProvider when the provider has no policy.
-func (g *Guard) HasTagConstraint(providerName, repo string, c Capability) (bool, error) {
+// HasTagConstraint reports whether tag information is required to evaluate
+// capability c for repo at path. It is policy-only and returns ErrUnknownProvider
+// when the provider has no policy. It stops as soon as a reachable rule decides
+// without tags, so a path-filtered grant that matches does not trigger a fetch.
+func (g *Guard) HasTagConstraint(providerName, repo string, c Capability, path string) (bool, error) {
 	p, ok := g.policies[providerName]
 	if !ok {
 		return false, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
 	}
-	return p.HasTagConstraint(repo, c), nil
+	return p.HasTagConstraint(repo, c, path), nil
 }
 
-// AuthorizeRepoCapability is a policy-only pre-check that ignores tag filters
-// and the .noai marker. It succeeds when the first matching rule allows the
-// capability (regardless of any active tag filter) and is used before a
-// privileged metadata fetch whose result is needed to evaluate the tags.
+// NoAIExemptAll reports whether every allow grant of capability c for repo
+// exempts it from the .noai overlay (and at least one exists). It is used by
+// tools that must decide the repository-level overlay once, before per-item
+// evaluation, and is conservative so a fall-through to a non-exempt grant never
+// skips the marker check. It returns ErrUnknownProvider when the provider has no
+// policy.
+func (g *Guard) NoAIExemptAll(providerName, repo string, c Capability) (bool, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.NoAIExemptAll(repo, c), nil
+}
+
+// AuthorizeRepoCapability is a policy-only pre-check that ignores every
+// capability filter (tags, paths, branches) and the .noai marker. It succeeds
+// when some allow rule could grant the capability, and is used before a
+// privileged metadata fetch whose result is needed to evaluate a tag filter. It
+// denies early only when a rule refuses the capability unconditionally.
 func (g *Guard) AuthorizeRepoCapability(providerName, repo string, c Capability) error {
 	p, ok := g.policies[providerName]
 	if !ok {
 		g.logDecision(providerName, repo, c, "deny", "unknown provider")
 		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
 	}
-	decision := p.Evaluate(repo, c)
-	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
-	if !decision.Matched {
+	granted, matched := p.EvaluatePreCheck(repo, c)
+	switch {
+	case !matched:
+		g.logDecision(providerName, repo, c, "deny", "no matching rule")
 		return fmt.Errorf("%w: %s", ErrUnknownRepository, repo)
+	case !granted:
+		g.logDecision(providerName, repo, c, "deny", "capability not granted")
+		return fmt.Errorf("%w: capability %s not granted", ErrDenied, c)
+	default:
+		g.logDecision(providerName, repo, c, "allow", "capability could be granted")
+		return nil
 	}
-	if !decision.CapabilityGranted {
-		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
-	}
-	return nil
 }
 
 func (g *Guard) checkMarker(ctx context.Context, providerName, repo string) error {
@@ -267,8 +287,9 @@ func (g *Guard) AuthorizeList(providerName string) error {
 }
 
 // StaticRepositories returns the concrete repository paths configured for
-// providerName whose first matching rule allows them. It performs no marker
-// check and requires no capability.
+// providerName that are visible to list_repositories (the first scope-matching
+// rule exposes or denies the listing). It performs no marker check and requires
+// no capability.
 func (g *Guard) StaticRepositories(providerName string) ([]string, error) {
 	p, ok := g.policies[providerName]
 	if !ok {

@@ -34,7 +34,10 @@ labels/topics or tokens.
 - Output shape per rule:
   `{provider, repositories, effect, configured_capabilities}` where each capability
   is `{name, require?, exclude?, paths?, noai_exempt?}` (`paths` = `{include?, exclude?}`).
-- "Configured" means exactly what the config grants; the `.noai` default-deny overlay
+- `configured_capabilities` may also be present on a `deny` rule: a `deny` rule may list the
+  capabilities and filters it refuses (ADR 0012); a `deny` rule without capabilities denies every
+  capability in its scope and has an empty list.
+- "Configured" means exactly what the config states; the `.noai` default-deny overlay
   (unless `noai_exempt`) and tag/path filters may further restrict actual access at
   operation time.
 

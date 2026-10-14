@@ -163,10 +163,19 @@ and [`ai/architecture.md`](ai/architecture.md)):
 
 ## Configuration
 
-Rules are evaluated in order and the **first match wins**; put specific rules before broad ones. A rule
-with `effect: allow` grants only the capabilities it lists (everything else is denied); a rule with
-`effect: deny` denies the matched repositories entirely and must not list `capabilities`. If no rule
-matches, access is denied.
+Rules are evaluated in order and the **first applicable rule wins**; put specific rules before broad
+ones. A rule **applies** when its `repositories` scope matches AND either it is a `deny` rule without
+`capabilities` (which denies every capability in its scope), or one of its capability entries matches
+the requested capability and all of that entry's filters pass. A rule with `effect: allow` grants the
+capabilities it lists; `deny` rules may list `capabilities` and filters. An **evaluated** filter miss
+makes the rule fall through (it is not a hard deny), while unavailable filter information (unknown
+tags/topics, empty path, missing branch) fails closed. `noai: allow` on a `deny` rule is rejected. If
+no rule applies, access is denied.
+
+> **Breaking change ([ADR 0012](ai/adr/0012-firewall-rule-matching.md)).** The allow semantics
+> changed: an unlisted capability and a failed filter are now **fall-through**, and a broad `allow`
+> above a specific `deny` **hides** the denial (first-match-wins). To exclude reliably, put a `deny`
+> rule **before** the broad `allow`. There is no config-load shadowing warning.
 
 ```yaml
 providers:
@@ -176,6 +185,13 @@ providers:
     token: "${GITLAB_WORK_TOKEN}"   # literal or ${NAME} env reference
     project_scope: accessible       # accessible (default) | membership
     rules:
+      # Exclude one capability on matching MRs: the deny rule comes FIRST, so the
+      # broad allow below cannot defeat it.
+      - repositories: ["devops/**"]
+        effect: deny
+        capabilities:
+          - mr:comment:
+              require: [do-not-touch]
       - repositories: ["devops/components/*", "devops/tooling/*"]
         effect: allow
         capabilities:
@@ -218,11 +234,18 @@ over `paths.include`; an active path filter with an empty path fails closed. Tag
 must pass). Whenever required information cannot be determined, the decision fails closed. A capability
 may also carry `noai: allow` to exempt it from the `.noai` default-deny overlay.
 
+Filters are accepted on `deny` rules too (a `deny` rule with no `capabilities` still denies every
+capability in its scope). A filter on an `allow` rule is a **preference**: an evaluated miss makes the
+rule fall through to a later rule, so a reliable exclusion belongs in a `deny` rule placed **before**
+the broad `allow`.
+
 ### Repository listing
 
 `list_repositories` returns concrete repositories listed **literally** in the configuration without any
-capability or provider call, unless a `deny` rule hides them. The `repo:list` capability additionally
-enables discovery of repositories matching glob patterns through the provider API.
+capability or provider call, unless a `deny` rule denies the listing: a `deny` rule without
+capabilities, or a `deny` rule that lists `repo:list` (a `deny` rule listing other capabilities does
+not hide the repository). The `repo:list` capability additionally enables discovery of repositories
+matching glob patterns through the provider API.
 
 - Discovery derives search prefixes from the `repo:list` patterns (for example `devops/platform/**` →
   `devops/platform`). Each prefix is tried **group-first** with
@@ -320,6 +343,10 @@ the **Developer** role (push access to the source branch); merging also needs a 
   `merge_request.target_project`, unknown) is denied; there is no Git LFS support; `.noai` on fetch
   is checked on the default branch only (push: default **and** target branch); no packfile size
   limit. See [ADR 0011](ai/adr/0011-git-smart-http-reverse-proxy.md).
+- Policy is firewall-style ([ADR 0012](ai/adr/0012-firewall-rule-matching.md)): an **evaluated**
+  filter miss and an unlisted capability fall through to later rules, and a broad `allow` above a
+  specific `deny` hides the denial (first-match-wins). Put specific `deny` rules first. Unavailable
+  filter information (unknown tags/topics, empty path, missing branch) still fails closed.
 
 ## Docs
 

@@ -80,7 +80,13 @@ Authorization is the product. These rules are security-critical:
 
 1. **Deny by default.** No rule match means access is denied.
 2. **Rules are ordered and first-match-wins.** Put specific rules before broad ones.
-3. **`deny` rules must not list `capabilities`.** A deny rule only hides repositories.
+3. **Rules are symmetric (firewall-style, ADR 0012).** A rule applies when its `repositories` scope
+   matches AND (a) it is a `deny` rule without `capabilities`, or (b) a capability entry matches the
+   requested capability and all of that entry's filters pass. `deny` rules **may** list
+   `capabilities` and filters; without `capabilities` a `deny` rule denies every capability in its
+   scope. An **evaluated** filter miss makes the rule fall through (no hard deny), so a broad
+   `allow` above a specific `deny` hides the denial; unavailable filter information (unknown
+   tags/topics, empty path, missing branch) fails closed.
 4. **Capabilities are validated at config load.** Unknown capabilities and bad patterns are rejected.
 5. **Authorize before the provider call.** Every capability-gated tool authorizes first and fails
    closed on any error (including unknown tags/topics and metadata-fetch failures).
@@ -105,7 +111,9 @@ Authorization is the product. These rules are security-critical:
     (`repo:read`, `mr:read`, `mr:diff`). Confidentiality is enforced by the capability policy.
 12. **Branch control lives in the `repo:write` rule.** `branches` (doublestar, exclude wins over
     include) is accepted **only** on `repo:write` (config error anywhere else). A `repo:write`
-    grant **without** a `branches` filter allows **no push** (fail-closed); every unique push
+    grant **without** a `branches` filter allows **no push** (fail-closed): a named branch is a hard
+    fail-closed deny for that grant and does **not** fall through to a later grant (an evaluated
+    branch-filter miss does fall through). Every unique push
     target branch is authorized with `Guard.AuthorizeBranch`, which also checks `.noai` on the
     default branch and the target branch. Branch-less evaluations (`Evaluate`, `Authorize`,
     `AuthorizeResource`, push discovery) do not apply the branch dimension. The proxy additionally
@@ -125,9 +133,9 @@ Every capability-gated tool follows the same pipeline:
 1. Resolve the provider from the registry by name (`provider` is required).
 2. Validate arguments (bounds, path traversal, etc.).
 3. Optional **policy-only pre-check**: `Guard.AuthorizeRepoCapability` (ignores tags, no marker).
-4. **Fetch metadata needed for tags** when the matched grant has a tag constraint:
-   MR metadata (`tags = labels`) for `mr:*`; project topics for `repo:*`.
-   A fetch failure denies the operation (fail-closed).
+4. **Fetch metadata needed for tags** when a rule that could apply carries a tag constraint
+   (`Guard.HasTagConstraint`, conservative): MR metadata (`tags = labels`) for `mr:*`; project
+   topics for `repo:*`. A fetch failure denies the operation (fail-closed).
 5. **Authorize with tags**: `Guard.AuthorizeWithTags` (tags) or `Guard.AuthorizeResource`
    (tags + path). Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
 6. Perform the provider operation and map the result. Map errors with `mapProviderError`.
@@ -141,7 +149,8 @@ proxy token. The proxy token is **optional**: without it the proxy binds loopbac
 no authentication (`git_remote` then reports `auth.type: "none"`); with it clients use HTTP Basic.
 Fetch and push discovery use `Guard.Authorize` (branch-less context); each unique push target
 branch is authorized with `Guard.AuthorizeBranch` against the `repo:write` `branches` filter —
-a grant without one denies every push and a path-filtered grant gets no git access at all. Push
+a grant without one is a hard fail-closed deny for every push, and a path-filtered grant gets no git
+access at all. Push
 options are parsed and gated last, before forwarding: `merge_request.*` needs `mr:write`, auto-merge
 additionally `mr:merge`, everything else denies (see invariant 13).
 

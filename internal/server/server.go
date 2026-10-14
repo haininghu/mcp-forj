@@ -545,12 +545,15 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	// The list endpoint carries labels, so tags are evaluated per merge request
-	// below; the .noai overlay is repository-level and is checked once here.
-	markerDecision, err := s.guard.Evaluate(in.Provider, in.Repo, policy.CapMRRead)
+	// below; the .noai overlay is repository-level and is checked once here. The
+	// exemption is conservative: unless every allow grant of mr:read is
+	// noai-exempt, the marker is checked, because a per-item tag filter can fall
+	// through to a non-exempt grant (ADR 0012).
+	exempt, err := s.guard.NoAIExemptAll(in.Provider, in.Repo, policy.CapMRRead)
 	if err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
-	if err := s.guard.CheckNoAI(ctx, in.Provider, in.Repo, markerDecision.NoAIExempt); err != nil {
+	if err := s.guard.CheckNoAI(ctx, in.Provider, in.Repo, exempt); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	}
 	mrs, err := p.ListMergeRequests(ctx, in.Repo, provider.ListOptions{State: in.State, Limit: limit + 1})
@@ -928,7 +931,7 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 	// Topics are needed only when the matched grant has an active tag
 	// constraint; a path-only filter does not require a provider call.
 	tags := policy.TagSet{}
-	if hasTags, err := s.guard.HasTagConstraint(in.Provider, in.Repo, policy.CapRepoRead); err != nil {
+	if hasTags, err := s.guard.HasTagConstraint(in.Provider, in.Repo, policy.CapRepoRead, cleaned); err != nil {
 		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
 	} else if hasTags {
 		tags, err = fetchTopics(ctx, p, in.Repo)

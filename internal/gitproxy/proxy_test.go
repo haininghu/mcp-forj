@@ -276,6 +276,32 @@ func newTestServerGrantsToken(t *testing.T, p *fakeProvider, grants []policy.Cap
 	return s
 }
 
+// newTestServerRules builds a Server from explicit rules so a test can pin the
+// multi-rule (firewall-style) evaluation order of ADR 0012.
+func newTestServerRules(t *testing.T, p *fakeProvider, rules []policy.RuleSpec) *Server {
+	t.Helper()
+	pol, err := policy.Build(rules)
+	if err != nil {
+		t.Fatalf("policy.Build: %v", err)
+	}
+	registry := provider.NewRegistry()
+	registry.Register(p)
+	guard := policy.NewGuard(
+		map[string]*policy.Policy{p.name: pol},
+		map[string]policy.FileChecker{p.name: p},
+		".noai", nil,
+	)
+	s, err := New(Config{
+		Listen:    "127.0.0.1:0",
+		PublicURL: "https://gitproxy.example.com/",
+		Token:     proxyToken,
+	}, registry, guard, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return s
+}
+
 // branchFilter builds a repo:write grant whose branches filter carries the
 // given include and exclude globs: pushable branches are policy configuration
 // now, not a proxy setting.
@@ -1263,6 +1289,81 @@ func TestPushBranchExcludeAndNonMatchDenied(t *testing.T) {
 		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("allowed branch through exclude filter = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+}
+
+// TestPushBranchFilterFallThroughToLaterGrant pins the firewall-style
+// evaluation for pushes: a branch filter that is evaluated and does not match
+// makes the rule fall through to a later grant, so an explicit second grant can
+// authorize a branch the first one excludes.
+func TestPushBranchFilterFallThroughToLaterGrant(t *testing.T) {
+	u := newUpstream(t, []byte("000cunpack ok\n0009"))
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []policy.CapabilityGrant{
+			{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{Branches: policy.PathFilter{Include: []string{"ai/**"}}}},
+		}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []policy.CapabilityGrant{
+			{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{Branches: policy.PathFilter{Include: []string{"bot/**"}}}},
+		}},
+	}
+
+	// A branch only the second grant allows is forwarded.
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerRules(t, p, rules)
+	body := pushBody(sha1Zero, sha1New, "refs/heads/bot/x")
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack", body, "git", proxyToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fall-through branch = %d, want 200, body %q", rec.Code, rec.Body)
+	}
+	if !bytes.Equal(u.last().body, body) {
+		t.Error("upstream body differs from the original request body")
+	}
+
+	// A branch no grant allows is denied.
+	pDenied := newFetchProvider(u.serverURL)
+	sDenied := newTestServerRules(t, pDenied, rules)
+	rec = doRequest(t, sDenied, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/other"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unauthorized branch = %d, want 403", rec.Code)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+}
+
+// TestPushBranchUnfilteredGrantFailsClosedBeforeLaterGrant pins invariant 12
+// under the firewall model: a repo:write grant without a branches filter is a
+// hard fail-closed deny for a named branch, so it never falls through to a
+// later, filtered grant.
+func TestPushBranchUnfilteredGrantFailsClosedBeforeLaterGrant(t *testing.T) {
+	u := newUpstream(t, []byte("nope"))
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []policy.CapabilityGrant{
+			{Name: policy.CapRepoWrite}, // no branches filter
+		}},
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []policy.CapabilityGrant{
+			{Name: policy.CapRepoWrite, Filter: policy.CapabilityFilter{Branches: policy.PathFilter{Include: []string{"ai/**"}}}},
+		}},
+	}
+	p := newFetchProvider(u.serverURL)
+	s := newTestServerRules(t, p, rules)
+	rec := doRequest(t, s, http.MethodPost,
+		"/git/"+providerName+"/"+repo+".git/git-receive-pack",
+		pushBody(sha1Zero, sha1New, "refs/heads/ai/fix"), "git", proxyToken)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unfiltered grant before a filtered one = %d, want 403", rec.Code)
+	}
+	if want := "git proxy: repository is not accessible\n"; rec.Body.String() != want {
+		t.Errorf("body = %q, want the generic denial %q", rec.Body.String(), want)
+	}
+	if len(p.fileExistsRefs) != 0 {
+		t.Errorf("marker refs = %v, want none (fail-closed before the marker check)", p.fileExistsRefs)
+	}
+	if u.count() != 0 {
+		t.Errorf("upstream calls = %d, want 0", u.count())
 	}
 }
 

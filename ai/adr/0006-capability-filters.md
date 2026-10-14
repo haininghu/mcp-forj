@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Path-filter key names were later nested under `paths`.
+Accepted. Path-filter key names were later nested under `paths`. The "filters on `deny` rules are
+rejected" restriction is superseded by ADR 0012 (filters are now accepted on `deny` rules).
 
 ## Context
 
