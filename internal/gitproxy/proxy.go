@@ -325,7 +325,7 @@ func (s *Server) preparePush(r *http.Request, rt *route, p provider.Provider) er
 	br := bufio.NewReader(r.Body)
 	rp, err := ReadReceivePack(br)
 	if err != nil {
-		return fmt.Errorf("%w: %v", errMalformedPush, err)
+		return fmt.Errorf("%w: %w", errMalformedPush, err)
 	}
 	// Policy and marker first, provider metadata second (invariant 5).
 	if err := s.authorizePushRefs(r.Context(), rt, rp.Updates); err != nil {

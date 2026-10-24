@@ -324,7 +324,7 @@ func (d Duration) String() string {
 
 // Load reads, decodes and validates the configuration at path.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is the operator-supplied -config flag, not untrusted input.
 	if err != nil {
 		return nil, fmt.Errorf("config: read %s: %w", path, err)
 	}

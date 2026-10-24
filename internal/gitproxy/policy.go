@@ -64,7 +64,7 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 	}
 	defaultBranch, err := p.DefaultBranch(ctx, repo)
 	if err != nil {
-		return fmt.Errorf("%w: cannot determine the default branch: %v", errPushDenied, err)
+		return fmt.Errorf("%w: cannot determine the default branch: %w", errPushDenied, err)
 	}
 	if branch == defaultBranch {
 		return fmt.Errorf("%w: branch %q is the default branch", errPushDenied, branch)
@@ -87,7 +87,7 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 	if err != nil {
 		// A missing branch with a non-zero old id is inconsistent; ErrNotFound
 		// and every other error deny alike.
-		return fmt.Errorf("%w: cannot resolve branch %q: %v", errPushDenied, branch, err)
+		return fmt.Errorf("%w: cannot resolve branch %q: %w", errPushDenied, branch, err)
 	}
 	// Object ids are lowercase hex on the wire and from the provider, so an
 	// exact comparison is the fail-closed choice for both checks below.
@@ -97,7 +97,7 @@ func (s *Server) checkRefUpdate(ctx context.Context, p provider.Provider, repo s
 	}
 	mergeBase, err := p.MergeBase(ctx, repo, tip, u.NewSHA)
 	if err != nil {
-		return fmt.Errorf("%w: cannot compute merge base for branch %q: %v", errPushDenied, branch, err)
+		return fmt.Errorf("%w: cannot compute merge base for branch %q: %w", errPushDenied, branch, err)
 	}
 	if mergeBase != tip {
 		return fmt.Errorf("%w: update of branch %q is not a fast-forward", errPushDenied, branch)

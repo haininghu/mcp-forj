@@ -1,0 +1,47 @@
+# Paths AI tooling should not read or feed into a model context.
+# Complements .gitignore; entries apply even when a path is tracked.
+
+# IDE and editor state (per-machine, noisy, no project knowledge)
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# Build artifacts and caches
+/bin/
+/dist/
+/mcp-forj
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+coverage.out
+coverage.html
+coverage.*
+node_modules/
+
+# Local runtime configuration and secrets: tokens must never reach a model context.
+# mcp-forj reads provider tokens from configs/config.yaml (or a *.local.yaml).
+configs/config.yaml
+configs/*.local.yaml
+opencode.json
+opencode.jsonc
+*.local
+*.env
+.env
+.env.*
+*.token
+token.json
+credentials.json
+*.bak
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Repository internals that carry no project knowledge
+.git/

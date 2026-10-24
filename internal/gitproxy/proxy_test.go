@@ -337,7 +337,7 @@ func doRequest(t *testing.T, s *Server, method, target string, body []byte, user
 	if body != nil {
 		rdr = bytes.NewReader(body)
 	}
-	req := httptest.NewRequest(method, target, rdr)
+	req := httptest.NewRequestWithContext(context.Background(), method, target, rdr)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/x-git-receive-pack-request")
 	}
@@ -505,7 +505,7 @@ func TestInboundCredentialHeadersStripped(t *testing.T) {
 	p := newFetchProvider(u.serverURL)
 	s := newTestServer(t, p, []policy.Capability{policy.CapRepoRead})
 
-	req := httptest.NewRequest(http.MethodGet,
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet,
 		"/git/"+providerName+"/"+repo+".git/info/refs?service=git-upload-pack", nil)
 	req.SetBasicAuth("git", proxyToken) // becomes the Authorization header
 	req.Header.Set("Private-Token", "attacker-token")
@@ -1922,7 +1922,7 @@ func TestCheckRefUpdateBranchNameValidation(t *testing.T) {
 // freePort reserves an ephemeral loopback port and releases it for reuse.
 func freePort(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("net.Listen: %v", err)
 	}
@@ -1948,7 +1948,7 @@ func TestListenAndServeGracefulShutdown(t *testing.T) {
 	var resp *http.Response
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		req, err := http.NewRequest(http.MethodGet, target, nil)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, target, nil)
 		if err != nil {
 			t.Fatalf("build request: %v", err)
 		}
@@ -1963,7 +1963,7 @@ func TestListenAndServeGracefulShutdown(t *testing.T) {
 		cancel()
 		t.Fatal("proxy never answered on the listen address")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("served status = %d, want 200", resp.StatusCode)
 	}

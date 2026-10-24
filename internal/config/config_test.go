@@ -399,7 +399,7 @@ func TestTokenRedaction(t *testing.T) {
 		t.Errorf("Token.GoString() = %q, want [REDACTED]", cfg.Providers[0].Token.GoString())
 	}
 
-	jsonBytes, err := json.Marshal(cfg)
+	jsonBytes, err := json.Marshal(cfg) //nolint:musttag // Config uses yaml tags; this redaction test round-trips it on purpose.
 	if err != nil {
 		t.Fatalf("json.Marshal: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestTokenRedaction(t *testing.T) {
 		t.Errorf("json.Marshal leaked secret: %s", jsonBytes)
 	}
 
-	yamlBytes, err := yaml.Marshal(cfg)
+	yamlBytes, err := yaml.Marshal(cfg) //nolint:musttag // Config uses yaml tags; this redaction test round-trips it on purpose.
 	if err != nil {
 		t.Fatalf("yaml.Marshal: %v", err)
 	}

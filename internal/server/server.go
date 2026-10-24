@@ -1222,7 +1222,7 @@ func (s *Server) searchCommitCandidates(ctx context.Context, p provider.Provider
 	// Dynamic discovery through the provider API requires repo:list, exactly as
 	// in list_repositories: without it only the literal candidates are searched.
 	if s.guard.AuthorizeList(providerName) != nil {
-		return out, false, nil
+		return out, false, nil //nolint:nilerr // AuthorizeList's error means repo:list is not granted, not a failure.
 	}
 	prefixes, err := s.guard.ListSearchPrefixes(providerName, policy.CapRepoList)
 	if err != nil {
