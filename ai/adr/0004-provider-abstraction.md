@@ -6,9 +6,9 @@ Accepted.
 
 ## Context
 
-GitLab is the first backend, but GitHub and an internal "Forgejo" system are
-planned. Policy and server code must not depend on GitLab specifics, and adding a
-backend should not require touching authorization logic.
+GitLab is the first backend, but [GitHub](https://github.com) and
+[Forgejo](https://forgejo.org) are planned. Policy and server code must not depend on
+GitLab specifics, and adding a backend should not require touching authorization logic.
 
 ## Decision
 

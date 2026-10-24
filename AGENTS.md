@@ -8,7 +8,8 @@ A policy-governed [Model Context Protocol](https://modelcontextprotocol.io) serv
 It exposes tools that let an AI agent inspect and (limitedly) act on code hosting providers.
 
 - Transport: MCP over **stdio** only. All logging goes to **stderr**.
-- Providers: **GitLab first**; GitHub and the internal "Forgejo" system are planned. The provider
+- Providers: **GitLab first**; [GitHub](https://github.com) and [Forgejo](https://forgejo.org) are
+  planned. The provider
   abstraction (`internal/provider`) exists so new backends do not touch policy or server code.
 - Authorization: **deny-by-default**, driven by a human-readable YAML config.
 - `.noai`: a repository marker that blocks repository-content operations.
