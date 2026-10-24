@@ -7,8 +7,8 @@ package policy
 type Capability string
 
 // Known capabilities. CapRepoList, CapRepoRead, CapMRRead, CapMRDiff,
-// CapMRComment, CapRebase, CapMRMerge and CapPolicyRead are used by the tools,
-// CapRepoWrite and CapMRWrite by the git smart-HTTP proxy.
+// CapCommitRead, CapMRComment, CapRebase, CapMRMerge and CapPolicyRead are used
+// by the tools, CapRepoWrite and CapMRWrite by the git smart-HTTP proxy.
 const (
 	// CapRepoList permits discovering repositories matching the configured
 	// patterns.
@@ -16,6 +16,13 @@ const (
 	// CapRepoRead permits reading repository files and serving git
 	// fetch/clone through the git smart-HTTP proxy.
 	CapRepoRead Capability = "repo:read"
+	// CapCommitRead permits reading commit metadata and messages of a
+	// repository's default branch (search_commits). Commit metadata is
+	// repository content, so a repo:read grant also grants commit:read (an
+	// explicit commit:read entry wins, and a repo:read deny denies it too). An
+	// active grant is .noai-protected unless it is exempted with `noai: allow`.
+	// Tag filters match project topics; paths and branches are not supported.
+	CapCommitRead Capability = "commit:read"
 	// CapMRRead permits listing and viewing merge request metadata and notes.
 	CapMRRead Capability = "mr:read"
 	// CapMRDiff permits reading merge request diff content.
@@ -43,6 +50,7 @@ const (
 var knownCapabilities = []Capability{
 	CapRepoList,
 	CapRepoRead,
+	CapCommitRead,
 	CapMRRead,
 	CapMRDiff,
 	CapMRComment,

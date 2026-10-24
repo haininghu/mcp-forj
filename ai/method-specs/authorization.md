@@ -18,6 +18,8 @@ capability.
 | path       | string              | Repository-relative path for `repo:read`/`write`.  |
 | ref        | string              | Git ref for the marker check (`read_file` only).   |
 
+The `tags` dimension uses MR labels for `mr:*` and project topics for `repo:*` and `commit:*`.
+
 The repository path is structurally validated by `validateRepo` (provider-neutral) and
 then normalized to the provider's canonical authorization key by
 `Provider.CanonicalRepository`; that canonical value is used for both policy matching
@@ -47,7 +49,7 @@ N/A — this is the evaluator used by all tools.
 3. Optional policy-only pre-check: `Guard.AuthorizeRepoCapability` (ignores tags and
    marker) before a privileged metadata fetch.
 4. If the matched grant has a tag constraint, fetch metadata:
-   MR labels for `mr:*`; project topics for `repo:*`. A fetch failure denies.
+   MR labels for `mr:*`; project topics for `repo:*` and `commit:*`. A fetch failure denies.
 5. Final decision:
    - `Guard.AuthorizeWithTags` — tags only (no path). Used by MR tools.
    - `Guard.AuthorizeResource` — tags + path. Used by `read_file`.
@@ -63,6 +65,14 @@ applicable rule wins; `allow` grants and `deny` denies. An **evaluated** filter 
 requirement not met, excluded tag present, path/branch not matched) means the rule does not apply and
 evaluation continues (fall-through); a filter whose input is **unavailable** fails closed. `deny`
 rules may list capabilities and filters; `noai: allow` on a `deny` rule is rejected at config load.
+
+**Capability implication.** Granting `repo:read` also authorizes `commit:read`: commit metadata is
+repository content and a fetch/clone over `repo:read` already exposes the history. The implication
+is symmetric — a `repo:read` `deny` denies `commit:read` too. An explicit entry for the requested
+capability wins over an implied one, the implying entry's filters (topics, `noai: allow`) carry
+over, and an active `paths` filter on `repo:read` fails `commit:read` closed (a commit search has no
+path). `commit:read` remains grantable on its own.
+
 6. On allow, perform the provider call; map errors with `mapProviderError`.
 
 Tools that evaluate tags per item or per candidate use the policy-only
@@ -70,6 +80,15 @@ Tools that evaluate tags per item or per candidate use the policy-only
 Repository discovery takes `exempt` from the same per-candidate decision (`decision.NoAIExempt`),
 while `list_merge_requests` evaluates the repository-level overlay once and therefore uses the
 conservative `Guard.NoAIExemptAll` (the marker is skipped only when every `mr:read` grant is exempt).
+`search_commits` is a per-candidate content user whose enumeration mirrors `list_repositories`:
+literal `commit:read` repositories come from `Guard.StaticRepositoriesFor` (which applies the listing
+deny; the active `repo:list` filter is applied separately), and provider-side discovery runs only behind
+`Guard.AuthorizeList`, evaluating each discovered repository with
+`Guard.EvaluateWithTags(repo:list)` and the `repo:list` `.noai` overlay. It then authorizes the
+`commit:read` content axis per candidate (`Guard.AuthorizeRepoCapability`, `Guard.HasTagConstraint`,
+`Guard.EvaluateWithTags`, `Guard.CheckNoAI`), reusing topics already known from enumeration. It
+therefore never searches a repository a listing deny hides from `list_repositories` and never exposes
+one discovery did not yield.
 
 Decision reasons (all fail closed unless allowed):
 
@@ -105,6 +124,9 @@ Decision reasons (all fail closed unless allowed):
   Literal (explicitly configured) repositories are still listed; discovered `.noai`
   repositories are omitted unless the `repo:list` grant is exempt. The marker is
   checked on the default branch and is fail-closed.
+- `commit:read` is capability-level `.noai`-protected like any other and is checked on
+  the repository's default branch only; `search_commits` searches that branch alone, so
+  a broader ref range would make the marker check non-fail-closed and is not offered.
 - `list_merge_requests` evaluates the repository-level `.noai` overlay once, before per-item tag
   evaluation, so it skips the marker only when **every** `mr:read` grant is `noai`-exempt
   (`Guard.NoAIExemptAll`); otherwise a per-item tag fall-through to a non-exempt grant could not

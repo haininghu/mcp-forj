@@ -14,6 +14,7 @@ these tools; `git_remote` is its clone-URL discovery tool.
 | `list_configured_rules.md`    | Config-only rule introspection.                            |
 | `list_repositories.md`        | Configured + discovered repositories.                      |
 | `list_merge_requests.md`      | List MR metadata with client-side label filtering.         |
+| `search_commits.md`           | Cross-repo commit search by author (`commit:read`).         |
 | `get_merge_request.md`        | Fetch one MR (incl. rebase/merge status).                  |
 | `list_merge_request_notes.md` | List MR notes.                                             |
 | `get_merge_request_diff.md`   | Fetch MR file diffs.                                       |

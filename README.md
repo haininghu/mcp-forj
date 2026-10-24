@@ -74,10 +74,14 @@ opencode loads its configuration once at startup, so restart it after editing.
 | `rebase_merge_request`     | `mr:rebase`   | Trigger an asynchronous merge request rebase.   |
 | `merge_merge_request`      | `mr:merge`    | Merge a merge request (returns the merged MR).  |
 | `read_file`                | `repo:read`   | Read a repository file at an optional ref.      |
+| `search_commits`           | `commit:read`² | Search one author's commits across repositories. |
 | `git_remote`               | `repo:read`   | Return the git proxy clone URL (token never returned). |
 
 ¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
 [GitLab token permissions](#gitlab-token-permissions).
+
+² `search_commits` enumerates candidate repositories like `list_repositories`: literal `commit:read`
+repositories need no `repo:list`, but provider-side discovery requires `repo:list`.
 
 `git_remote` is registered only while `server.git_proxy` is enabled — see [Git proxy](#git-proxy).
 
@@ -149,8 +153,13 @@ and [`ai/architecture.md`](ai/architecture.md)):
 ## Capabilities
 
 - `policy:read` – expose the configured rules for a provider (`list_configured_rules`).
-- `repo:list` – discover repositories through the provider API.
+- `repo:list` – discover repositories through the provider API; also governs `search_commits`
+  discovery.
 - `repo:read` – read repository files; also gates **git fetch/clone** through the git proxy.
+- `commit:read` – read commit metadata/messages of the **default branch** (`search_commits`). Also
+  granted by `repo:read` (same filter; an active `paths` filter fails closed); tag filters match
+  project topics. `search_commits` enumerates candidates like `list_repositories`, so provider-side
+  discovery additionally needs `repo:list`.
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:diff` – read merge request file diffs (`get_merge_request_diff`).
 - `mr:comment` – comment on merge requests.
@@ -211,8 +220,9 @@ providers:
 ### Capability filters
 
 Any capability may carry a filter, written as a single-key mapping in the `capabilities` list. For merge
-request capabilities the tags are GitLab MR **labels**; for repository capabilities they are project
-**topics**. `repo:read` and `repo:write` may additionally restrict **file paths** with doublestar globs:
+request capabilities the tags are GitLab MR **labels**; for repository and commit capabilities
+(`repo:*`, `commit:*`) they are project **topics**. `repo:read` and `repo:write` may additionally
+restrict **file paths** with doublestar globs:
 
 ```yaml
 capabilities:
@@ -301,6 +311,8 @@ Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **g
 |--------------------------------------|-------------------------------------------------------------------------------|
 | `list_repositories` (`repo:list`)    | **Project: Read**                                                             |
 | `read_file` (`repo:read`, `.noai`)   | **Repository: Read**                                                          |
+| `search_commits` (`commit:read`)     | **Repository: Read** (+ `read_user` for the email)                            |
+| `search_commits` discovery           | **Project: Read** (when `repo:list` is granted)                               |
 | `mr:read` (list/get)                 | **Merge Request: Read**                                                       |
 | `get_merge_request_diff` (`mr:diff`) | **Merge Request: Read**                                                       |
 | `rebase_merge_request` (`mr:rebase`) | **Merge Request: Update** (+ Merge Request: Read; push to source)             |
@@ -337,6 +349,14 @@ the **Developer** role (push access to the source branch); merging also needs a 
 - No caching: labels, topics and markers are fetched on every operation.
 - `mr:diff` is denied on a `.noai` repository unless the grant is exempted with `noai: allow`; diffs are
   repository content, but the marker is an integrity control, not a confidentiality control.
+- `search_commits` searches only each repository's **default branch**, defaults the author to the
+  authenticated user (fail-closed if the identity is unknown), and is bounded (100 results, at most 50
+  discovered candidate repos, 200 commits inspected per repo). Candidate enumeration mirrors
+  `list_repositories`: literal `commit:read` repositories are searched without `repo:list` and are not
+  capped by the 50-repo discovery limit, while provider-side discovery requires `repo:list`. It
+  requires `commit:read`, which `repo:read` also grants (with the same filter; an active `paths`
+  filter fails it closed). Repositories hidden by a listing deny are omitted, and emails/topics are
+  never returned.
 - `mr:write` and `repo:write` have no MCP tool — they gate git push and its push options through the
   proxy.
 - Git proxy (fail-closed): an active `paths` filter or a tag filter on `repo:read`/`repo:write`

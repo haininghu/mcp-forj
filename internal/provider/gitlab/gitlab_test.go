@@ -5,10 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -984,5 +986,249 @@ func TestCanonicalRepository(t *testing.T) {
 		if _, err := c.CanonicalRepository(in); err == nil {
 			t.Errorf("CanonicalRepository(%q) accepted an invalid repository", in)
 		}
+	}
+}
+
+func TestListCommitsHTTP(t *testing.T) {
+	var values url.Values
+	var pages []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/repository/commits") {
+			http.NotFound(w, r)
+			return
+		}
+		values = r.URL.Query()
+		page := values.Get("page")
+		pages = append(pages, page)
+		w.Header().Set("Content-Type", "application/json")
+		if page == "1" {
+			w.Header().Set("X-Next-Page", "2")
+			items := make([]map[string]any, 100)
+			for i := range items {
+				items[i] = map[string]any{
+					"id": fmt.Sprintf("%040d", i), "short_id": "abc", "title": "t",
+					"message": "m", "author_name": "Alice", "author_email": "alice@example.com",
+				}
+			}
+			_ = json.NewEncoder(w).Encode(items)
+			return
+		}
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"id": "last", "short_id": "zzz", "title": "t", "message": "m"},
+		})
+	}))
+
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	commits, truncated, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{
+		Since: since, Until: until, Limit: 101,
+	})
+	if err != nil {
+		t.Fatalf("ListCommits: %v", err)
+	}
+	if len(commits) != 101 {
+		t.Fatalf("len(commits) = %d, want 101 (pagination must exceed one page)", len(commits))
+	}
+	if truncated {
+		t.Errorf("truncated = true, want false when the provider is exhausted exactly at the limit")
+	}
+	if len(pages) != 2 || pages[0] != "1" || pages[1] != "2" {
+		t.Errorf("pages = %v, want [1 2]", pages)
+	}
+	if got := values.Get("ref_name"); got != "" {
+		t.Errorf("ref_name = %q, want unset so the default branch is searched", got)
+	}
+	if values.Get("since") == "" || values.Get("until") == "" {
+		t.Errorf("since/until not forwarded: %v", values)
+	}
+}
+
+func TestListCommitsExactAuthorFilter(t *testing.T) {
+	t.Run("email is an exact case-insensitive client filter", func(t *testing.T) {
+		var authorParam string
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authorParam = r.URL.Query().Get("author")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": "a", "short_id": "a", "title": "t", "message": "m", "author_name": "Alice", "author_email": "alice@example.com"},
+				{"id": "b", "short_id": "b", "title": "t", "message": "m", "author_name": "Alicia", "author_email": "malice@example.com"},
+				{"id": "c", "short_id": "c", "title": "t", "message": "m", "author_name": "ALICE", "author_email": "ALICE@EXAMPLE.COM"},
+			})
+		}))
+		commits, _, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{
+			Author: provider.CommitAuthor{Email: "alice@example.com"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("ListCommits: %v", err)
+		}
+		if authorParam != "alice@example.com" {
+			t.Errorf("author query = %q, want the email prefilter", authorParam)
+		}
+		if len(commits) != 2 || commits[0].SHA != "a" || commits[1].SHA != "c" {
+			t.Fatalf("commits = %+v, want the exact (case-insensitive) matches only", commits)
+		}
+		if !commits[0].AuthoredAt.IsZero() || !commits[0].CommittedAt.IsZero() {
+			t.Errorf("nil time pointers not handled: %+v", commits[0])
+		}
+	})
+
+	t.Run("name is an exact case-insensitive client filter", func(t *testing.T) {
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": "a", "short_id": "a", "title": "t", "message": "m", "author_name": "Alice"},
+				{"id": "b", "short_id": "b", "title": "t", "message": "m", "author_name": "Bob"},
+			})
+		}))
+		commits, _, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{
+			Author: provider.CommitAuthor{Name: "alice"}, Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("ListCommits: %v", err)
+		}
+		if len(commits) != 1 || commits[0].SHA != "a" {
+			t.Fatalf("commits = %+v, want only the exact name match", commits)
+		}
+	})
+
+	t.Run("author query is a provider-side passthrough", func(t *testing.T) {
+		var authorParam string
+		c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			authorParam = r.URL.Query().Get("author")
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"id": "a", "short_id": "a", "title": "t", "message": "m", "author_name": "Alice"},
+				{"id": "b", "short_id": "b", "title": "t", "message": "m", "author_name": "Alicia"},
+			})
+		}))
+		commits, _, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{
+			AuthorQuery: "alice", Limit: 10,
+		})
+		if err != nil {
+			t.Fatalf("ListCommits: %v", err)
+		}
+		if authorParam != "alice" {
+			t.Errorf("author query = %q, want alice", authorParam)
+		}
+		if len(commits) != 2 {
+			t.Fatalf("commits = %+v, want both fuzzy matches (no client filter)", commits)
+		}
+	})
+}
+
+// TestListCommitsScanLimitBoundsPaging verifies that a server-side author
+// prefilter which over-matches (every page carries a non-matching author) cannot
+// page without bound: ScanLimit stops the enumeration and reports truncation.
+func TestListCommitsScanLimitBoundsPaging(t *testing.T) {
+	var pages []string
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		page := q.Get("page")
+		pages = append(pages, page)
+		perPage, err := strconv.Atoi(q.Get("per_page"))
+		if err != nil || perPage <= 0 {
+			perPage = 100
+		}
+		next, _ := strconv.Atoi(page)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Next-Page", strconv.Itoa(next+1))
+		items := make([]map[string]any, perPage)
+		for i := range items {
+			items[i] = map[string]any{
+				"id": fmt.Sprintf("%040d", i), "short_id": "x", "title": "t",
+				"message": "m", "author_name": "Mallory", "author_email": "mallory@example.com",
+			}
+		}
+		_ = json.NewEncoder(w).Encode(items)
+	}))
+
+	commits, truncated, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{
+		Author: provider.CommitAuthor{Email: "alice@example.com"}, Limit: 200, ScanLimit: 250,
+	})
+	if err != nil {
+		t.Fatalf("ListCommits: %v", err)
+	}
+	if len(commits) != 0 {
+		t.Fatalf("len(commits) = %d, want 0 (all prefilter matches belong to another author)", len(commits))
+	}
+	if !truncated {
+		t.Error("truncated = false, want true when the scan budget is reached")
+	}
+	// 250 scanned commits across pages of 100, 100 and 50: three requests, so
+	// paging stays bounded by the scan budget.
+	if len(pages) != 3 || pages[0] != "1" || pages[1] != "2" || pages[2] != "3" {
+		t.Errorf("pages = %v, want [1 2 3] (bounded by the scan budget)", pages)
+	}
+}
+
+func TestListCommitsMapsFields(t *testing.T) {
+	authored := time.Date(2024, 3, 1, 10, 0, 0, 0, time.UTC)
+	committed := time.Date(2024, 3, 2, 11, 30, 0, 0, time.UTC)
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]map[string]any{{
+			"id": "abcdef0123456789", "short_id": "abcdef0", "title": "Fix bug",
+			"message": "Fix bug\n\nbody", "author_name": "Alice",
+			"authored_date": authored.Format(time.RFC3339), "committed_date": committed.Format(time.RFC3339),
+			"web_url": "https://x/commit/abcdef0123456789",
+		}})
+	}))
+	commits, _, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListCommits: %v", err)
+	}
+	want := provider.Commit{
+		SHA: "abcdef0123456789", ShortSHA: "abcdef0", Title: "Fix bug",
+		Message: "Fix bug\n\nbody", AuthorName: "Alice",
+		AuthoredAt: authored, CommittedAt: committed,
+		WebURL: "https://x/commit/abcdef0123456789",
+	}
+	if !reflect.DeepEqual(commits[0], want) {
+		t.Errorf("commit = %+v, want %+v", commits[0], want)
+	}
+}
+
+func TestListCommitsError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	_, _, err := c.ListCommits(context.Background(), "team/app", provider.CommitListOptions{Limit: 10})
+	if !errors.Is(err, provider.ErrForbidden) {
+		t.Fatalf("error = %v, want provider.ErrForbidden", err)
+	}
+	if got := provider.HTTPStatus(err); got != http.StatusForbidden {
+		t.Errorf("HTTPStatus = %d, want 403", got)
+	}
+}
+
+func TestCurrentUserHTTP(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v4/user" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"username": "alice", "name": "Alice Example", "email": "alice@example.com",
+		})
+	}))
+
+	u, err := c.CurrentUser(context.Background())
+	if err != nil {
+		t.Fatalf("CurrentUser: %v", err)
+	}
+	want := provider.User{Username: "alice", Name: "Alice Example", Email: "alice@example.com"}
+	if u != want {
+		t.Errorf("CurrentUser = %+v, want %+v", u, want)
+	}
+}
+
+func TestCurrentUserError(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	_, err := c.CurrentUser(context.Background())
+	if !errors.Is(err, provider.ErrForbidden) {
+		t.Fatalf("error = %v, want provider.ErrForbidden", err)
 	}
 }

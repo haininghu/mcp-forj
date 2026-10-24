@@ -11,6 +11,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -31,6 +32,11 @@ const (
 	maxDiffTotalBytes = 512 << 10
 	maxRefBytes       = 255 // git ref length bound
 	truncatedMarker   = "\n[truncated]"
+
+	maxSearchResults  = 100 // commits returned by search_commits
+	maxSearchRepos    = 50  // discovered candidate repositories per search_commits (literals uncapped)
+	maxCommitsPerRepo = 200 // commit match limit and scan budget per repository
+	maxAuthorBytes    = 255 // author filter length bound
 )
 
 // GitRemoteResolver resolves the git proxy clone URL for a repository and
@@ -113,6 +119,11 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	}, s.mergeMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "search_commits",
+		Description: "Search commits by one author across repositories (cross-repo, e.g. \"where and when did I commit?\"). Candidate repositories are enumerated exactly like list_repositories: literal commit:read repositories are always searched and provider-side discovery requires the repo:list capability. Defaults to the authenticated user; an explicit author is a provider-side name/email search. Requires the commit:read capability (implied by repo:read) and is .noai-protected unless the grant is exempted. Only each repository's default branch is searched, and repositories hidden by a listing deny are omitted.",
+	}, s.searchCommits)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "read_file",
 		Description: "Read a repository file at an optional ref. Requires the repo:read capability; .noai-protected unless the grant is exempted.",
 	}, s.readFile)
@@ -191,6 +202,15 @@ type readFileInput struct {
 type gitRemoteInput struct {
 	Provider string `json:"provider" jsonschema:"logical provider name"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
+}
+
+type searchCommitsInput struct {
+	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Author   string `json:"author,omitempty" jsonschema:"optional author filter (provider-side name/email search); defaults to the authenticated user"`
+	Since    string `json:"since,omitempty" jsonschema:"optional inclusive lower bound on the committer date, RFC3339 or YYYY-MM-DD"`
+	Until    string `json:"until,omitempty" jsonschema:"optional inclusive upper bound on the committer date, RFC3339 or YYYY-MM-DD"`
+	Query    string `json:"query,omitempty" jsonschema:"optional case-insensitive substring matched against the commit message (e.g. a ticket id)"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of commits (capped at 100)"`
 }
 
 type configuredPathFilter struct {
@@ -310,6 +330,33 @@ type gitRemoteOutput struct {
 	Repo      string            `json:"repo"`
 	RemoteURL string            `json:"remote_url"`
 	Auth      gitRemoteAuthJSON `json:"auth"`
+}
+
+// commitJSON is one commit in the search_commits output. It deliberately
+// carries no author email.
+type commitJSON struct {
+	Provider    string `json:"provider"`
+	Repo        string `json:"repo"`
+	SHA         string `json:"sha"`
+	ShortSHA    string `json:"short_sha"`
+	Title       string `json:"title"`
+	Message     string `json:"message"`
+	Author      string `json:"author"`
+	AuthoredAt  string `json:"authored_at"`
+	CommittedAt string `json:"committed_at"`
+	WebURL      string `json:"web_url"`
+}
+
+type searchCommitsOutput struct {
+	Commits   []commitJSON `json:"commits"`
+	Truncated bool         `json:"truncated"`
+}
+
+// searchCommit is a commit paired with the repository it came from, used
+// internally for deduplication and sorting before serialization.
+type searchCommit struct {
+	repo   string
+	commit provider.Commit
 }
 
 // listConfiguredRules exposes the configured policy for providers whose rules
@@ -876,6 +923,365 @@ func (s *Server) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 			"the merge request is not in a mergeable state")
 	}
 	return jsonResult(toMergeRequestJSON(*merged, maxTextBytes))
+}
+
+// searchCommits performs a bounded cross-repository search for one author's
+// commits. Argument validation (an explicit author and the time bounds) happens
+// before any provider call. Candidate enumeration mirrors list_repositories:
+// literal commit:read repositories are always candidates (subject to a listing
+// deny and an active repo:list filter) and provider-side discovery requires
+// repo:list. When enumeration yields no candidate the search returns an empty
+// result immediately, without resolving the current identity, so an empty search
+// never probes the token's account scope. Only then does an omitted author
+// resolve to the authenticated user. The content axis requires the commit:read
+// capability on every candidate (policy-only pre-check, tag evaluation, then the
+// .noai overlay). Only each repository's default branch is searched. See
+// ai/method-specs/search_commits.md.
+func (s *Server) searchCommits(ctx context.Context, _ *mcp.CallToolRequest, in searchCommitsInput) (*mcp.CallToolResult, any, error) {
+	limit := in.Limit
+	if limit <= 0 || limit > maxSearchResults {
+		limit = maxSearchResults
+	}
+	p, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	var opts provider.CommitListOptions
+	if author := strings.TrimSpace(in.Author); author != "" {
+		if len(author) > maxAuthorBytes {
+			return nil, nil, fmt.Errorf("author exceeds the %d byte limit", maxAuthorBytes)
+		}
+		for _, r := range author {
+			if r == 0 || r < 0x20 || r == 0x7f {
+				return nil, nil, errors.New("author contains control characters")
+			}
+		}
+		opts.AuthorQuery = author
+	}
+
+	since, _, err := parseCommitTime(in.Since)
+	if err != nil {
+		return nil, nil, fmt.Errorf("since: %w", err)
+	}
+	until, untilDateOnly, err := parseCommitTime(in.Until)
+	if err != nil {
+		return nil, nil, fmt.Errorf("until: %w", err)
+	}
+	if untilDateOnly && !until.IsZero() {
+		// A date-only upper bound is inclusive of the whole day (UTC).
+		until = until.Add(24*time.Hour - time.Second)
+	}
+	if !since.IsZero() && !until.IsZero() && until.Before(since) {
+		return nil, nil, errors.New("until must not be before since")
+	}
+	opts.Since, opts.Until = since, until
+
+	candidates, truncated, err := s.searchCommitCandidates(ctx, p, in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(candidates) == 0 {
+		// No candidate repository: return without resolving the current
+		// identity. An empty search must not make a provider account call.
+		s.logger.Info("commit search",
+			"provider", in.Provider,
+			"candidates", 0,
+			"returned", 0,
+			"omitted_repos", 0,
+			"truncated", truncated,
+		)
+		return jsonResult(searchCommitsOutput{Commits: []commitJSON{}, Truncated: truncated})
+	}
+
+	if opts.AuthorQuery == "" {
+		// Fail-closed: without an identity the search must not degrade into
+		// returning every author's commits.
+		u, err := p.CurrentUser(ctx)
+		if err != nil {
+			return nil, nil, mapProviderError(err, "reading your account needs the read_user scope")
+		}
+		switch {
+		case u.Email != "":
+			opts.Author = provider.CommitAuthor{Email: u.Email}
+		case u.Name != "":
+			opts.Author = provider.CommitAuthor{Name: u.Name}
+		default:
+			return nil, nil, errors.New("could not determine your commit identity; pass author explicitly")
+		}
+	}
+
+	query := strings.ToLower(in.Query)
+	var (
+		collected []searchCommit
+		seen      = make(map[string]bool)
+		omitted   int
+	)
+	for _, candidate := range candidates {
+		repo, err := validateRepo(candidate.repo)
+		if err != nil {
+			omitted++
+			continue
+		}
+		repo, err = p.CanonicalRepository(repo)
+		if err != nil {
+			omitted++
+			continue
+		}
+		// Listing visibility is already handled during enumeration: literal
+		// candidates passed StaticRepositoriesFor (which applies the listing
+		// deny) and discovered candidates passed the repo:list evaluation, so a
+		// separate Guard.Listable check here would be redundant.
+		if err := s.guard.AuthorizeRepoCapability(in.Provider, repo, policy.CapCommitRead); err != nil {
+			omitted++
+			continue
+		}
+		// Reuse topics already observed during enumeration (a repo:list filter
+		// fetch); only fetch them again when a commit:read tag constraint needs
+		// them and they are still unknown.
+		tags := candidate.tags
+		if hasTags, err := s.guard.HasTagConstraint(in.Provider, repo, policy.CapCommitRead, ""); err != nil {
+			omitted++
+			continue
+		} else if hasTags && !tags.Known {
+			tags, err = fetchTopics(ctx, p, repo)
+			if err != nil {
+				omitted++
+				continue
+			}
+		}
+		decision, err := s.guard.EvaluateWithTags(in.Provider, repo, policy.CapCommitRead, tags)
+		if err != nil || !decision.Allowed {
+			omitted++
+			continue
+		}
+		if err := s.guard.CheckNoAI(ctx, in.Provider, repo, decision.NoAIExempt); err != nil {
+			omitted++
+			continue
+		}
+		// The provider bounds both matched commits and inspected commits, so a
+		// prefilter that over-matches cannot page without bound; it reports
+		// whether it stopped early.
+		repoOpts := opts
+		repoOpts.Limit = maxCommitsPerRepo
+		repoOpts.ScanLimit = maxCommitsPerRepo
+		repoCommits, repoTruncated, err := p.ListCommits(ctx, repo, repoOpts)
+		if err != nil {
+			// One repository failing to enumerate must not abort the whole
+			// search; it is omitted and only counted server-side. The provider
+			// error is not logged verbatim (error hygiene).
+			omitted++
+			s.logger.Warn("search_commits repository skipped", "provider", in.Provider, "repo", repo)
+			continue
+		}
+		truncated = truncated || repoTruncated
+		for _, commit := range repoCommits {
+			if query != "" && !strings.Contains(strings.ToLower(commit.Message), query) {
+				continue
+			}
+			key := repo + "\x00" + commit.SHA
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			collected = append(collected, searchCommit{repo: repo, commit: commit})
+		}
+	}
+
+	// Newest first by committer date, then a stable tie-break on repo and sha.
+	sort.SliceStable(collected, func(i, j int) bool {
+		ti, tj := collected[i].commit.CommittedAt, collected[j].commit.CommittedAt
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		if collected[i].repo != collected[j].repo {
+			return collected[i].repo < collected[j].repo
+		}
+		return collected[i].commit.SHA < collected[j].commit.SHA
+	})
+	if len(collected) > limit {
+		collected = collected[:limit]
+		truncated = true
+	}
+
+	out := make([]commitJSON, 0, len(collected))
+	for _, sc := range collected {
+		out = append(out, toCommitJSON(in.Provider, sc.repo, sc.commit))
+	}
+	// omitted is logged server-side only: returning it would tell the client
+	// that more repositories exist than it can see.
+	s.logger.Info("commit search",
+		"provider", in.Provider,
+		"candidates", len(candidates),
+		"returned", len(out),
+		"omitted_repos", omitted,
+		"truncated", truncated,
+	)
+	return jsonResult(searchCommitsOutput{Commits: out, Truncated: truncated})
+}
+
+// commitCandidate is a candidate repository for search_commits together with
+// the project topics observed while enumerating it. Known topics let the
+// commit:read tag gate reuse them instead of fetching again.
+type commitCandidate struct {
+	repo string
+	tags policy.TagSet
+}
+
+// searchCommitCandidates enumerates the candidate repositories for
+// search_commits. Enumeration is exactly list_repositories: literal
+// repositories whose allow rules grant commit:read (directly or via repo:read)
+// are always candidates (subject to a listing deny and an active repo:list
+// filter), while provider-side discovery requires repo:list and evaluates every
+// discovered repository against repo:list (topics, then the .noai overlay for
+// the repo:list grant). The commit:read content gate runs later per candidate.
+// Only discovery is capped at maxSearchRepos (literal candidates are not, as in
+// list_repositories); exceeding the cap or a fetch window sets truncated. A
+// discovery failure is fatal (fail-closed).
+func (s *Server) searchCommitCandidates(ctx context.Context, p provider.Provider, providerName string) ([]commitCandidate, bool, error) {
+	static, err := s.guard.StaticRepositoriesFor(providerName, policy.CapCommitRead)
+	if err != nil {
+		return nil, false, fmt.Errorf("unknown provider %q", providerName)
+	}
+	seen := make(map[string]bool, len(static))
+	out := make([]commitCandidate, 0, len(static))
+	for _, repoPath := range static {
+		key := providerName + "\x00" + repoPath
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		// A literal repository is a candidate even without repo:list, but an
+		// active repo:list tag filter still applies: its topics are fetched and
+		// evaluated, and a fetch error or non-match omits it (fail-closed),
+		// exactly as in list_repositories.
+		hasFilter, err := s.guard.HasFilter(providerName, repoPath, policy.CapRepoList)
+		if err != nil {
+			return nil, false, fmt.Errorf("unknown provider %q", providerName)
+		}
+		if !hasFilter {
+			// Topics stay unknown; the commit:read gate fetches them only under
+			// a tag constraint.
+			out = append(out, commitCandidate{repo: repoPath})
+			continue
+		}
+		tags, topicErr := fetchTopics(ctx, p, repoPath)
+		if topicErr != nil {
+			continue
+		}
+		decision, err := s.guard.EvaluateWithTags(providerName, repoPath, policy.CapRepoList, tags)
+		if err != nil {
+			return nil, false, fmt.Errorf("unknown provider %q", providerName)
+		}
+		if !decision.Allowed {
+			continue
+		}
+		out = append(out, commitCandidate{repo: repoPath, tags: tags})
+	}
+
+	// Dynamic discovery through the provider API requires repo:list, exactly as
+	// in list_repositories: without it only the literal candidates are searched.
+	if s.guard.AuthorizeList(providerName) != nil {
+		return out, false, nil
+	}
+	prefixes, err := s.guard.ListSearchPrefixes(providerName, policy.CapRepoList)
+	if err != nil {
+		return nil, false, fmt.Errorf("unknown provider %q", providerName)
+	}
+	if len(prefixes) == 0 {
+		prefixes = []string{""}
+	}
+
+	// Only discovery is bounded, mirroring list_repositories: literal
+	// repositories are never capped (ADR 0007, "literal repositories win").
+	truncated := false
+	discovered := 0
+	for _, term := range prefixes {
+		remaining := max(maxSearchRepos-discovered, 0)
+		repos, err := p.ListRepositories(ctx, provider.RepoListOptions{Search: term, Limit: remaining + 1})
+		if err != nil {
+			return nil, false, mapProviderError(err, "repository listing needs the Project: Read permission (and the group/project in the token scope)")
+		}
+		newCandidates := 0
+		for _, repo := range repos {
+			key := providerName + "\x00" + repo.Path
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			newCandidates++
+
+			tags := policy.TagSet{Known: repo.TopicsKnown, Values: repo.Topics}
+			decision, err := s.guard.EvaluateWithTags(providerName, repo.Path, policy.CapRepoList, tags)
+			if err != nil {
+				return nil, false, fmt.Errorf("unknown provider %q", providerName)
+			}
+			if !decision.Allowed {
+				continue
+			}
+			// .noai is a default-deny overlay: a discovered .noai repository is
+			// omitted unless the repo:list grant exempts it. A marker-check
+			// failure omits the candidate (fail-closed).
+			if err := s.guard.CheckNoAI(ctx, providerName, repo.Path, decision.NoAIExempt); err != nil {
+				continue
+			}
+			if discovered >= maxSearchRepos {
+				truncated = true
+				continue
+			}
+			out = append(out, commitCandidate{repo: repo.Path, tags: tags})
+			discovered++
+		}
+		if newCandidates > remaining {
+			truncated = true
+		}
+	}
+	return out, truncated, nil
+}
+
+// parseCommitTime parses a commit time filter: an RFC3339 timestamp (with a
+// zone) or a date-only YYYY-MM-DD value interpreted as UTC midnight. It reports
+// whether the input was date-only so the caller can extend an inclusive upper
+// bound to the end of that day. An empty input yields the zero time.
+func parseCommitTime(s string) (time.Time, bool, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, false, nil
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t, false, nil
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t, true, nil
+	}
+	return time.Time{}, false, fmt.Errorf("must be RFC3339 or YYYY-MM-DD, got %q", s)
+}
+
+// toCommitJSON maps a provider commit to its tool representation, truncating an
+// oversized title and message. A commit message without a line break otherwise
+// makes Title as long as Message.
+func toCommitJSON(providerName, repo string, commit provider.Commit) commitJSON {
+	return commitJSON{
+		Provider:    providerName,
+		Repo:        repo,
+		SHA:         commit.SHA,
+		ShortSHA:    commit.ShortSHA,
+		Title:       truncateText(commit.Title, maxListDescBytes),
+		Message:     truncateText(commit.Message, maxListDescBytes),
+		Author:      commit.AuthorName,
+		AuthoredAt:  formatCommitTime(commit.AuthoredAt),
+		CommittedAt: formatCommitTime(commit.CommittedAt),
+		WebURL:      commit.WebURL,
+	}
+}
+
+// formatCommitTime renders a commit timestamp in UTC, or "" for the zero time.
+func formatCommitTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
 // resolveProvider resolves a provider by name without authorization.

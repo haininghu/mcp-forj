@@ -1076,6 +1076,24 @@ providers:
 			wantErr: "path filters are not supported yet",
 		},
 		{
+			name: "path block on commit:read capability",
+			yaml: `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - commit:read:
+              paths:
+                include: ["docs/**"]
+`,
+			wantErr: "path filters are not supported yet",
+		},
+		{
 			name: "unknown key inside paths",
 			yaml: `
 providers:
@@ -1660,6 +1678,11 @@ providers:
 		{
 			name:    "branches on repo:list",
 			body:    "          - repo:list:\n              branches:\n                exclude: [\"ai/**\"]\n",
+			wantErr: "branch filters are only supported",
+		},
+		{
+			name:    "branches on commit:read",
+			body:    "          - commit:read:\n              branches:\n                include: [\"ai/**\"]\n",
 			wantErr: "branch filters are only supported",
 		},
 		{

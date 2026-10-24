@@ -113,6 +113,67 @@ type Note struct {
 	CreatedAt time.Time
 }
 
+// Commit is a provider-neutral commit.
+type Commit struct {
+	// SHA is the full commit object id.
+	SHA string
+	// ShortSHA is the provider's abbreviated commit id.
+	ShortSHA string
+	// Title is the first line of the commit message.
+	Title string
+	// Message is the full commit message.
+	Message string
+	// AuthorName is the commit author's display name.
+	AuthorName string
+	// AuthoredAt is the time the change was authored.
+	AuthoredAt time.Time
+	// CommittedAt is the time the commit was created (the date used for
+	// filtering and sorting).
+	CommittedAt time.Time
+	// WebURL is the human-facing commit URL.
+	WebURL string
+}
+
+// CommitAuthor identifies a commit author for exact, case-insensitive
+// matching. When Email is set it is the matching key; otherwise Name is.
+type CommitAuthor struct {
+	// Email is the author email, the exact matching key when set.
+	Email string
+	// Name is the author display name, the exact matching key when Email is
+	// empty.
+	Name string
+}
+
+// CommitListOptions bounds and filters commit enumeration.
+type CommitListOptions struct {
+	// Since and Until bound the committer date, inclusive; zero means
+	// unbounded.
+	Since, Until time.Time
+	// Author restricts to one exact author identity. The zero value imposes no
+	// author restriction.
+	Author CommitAuthor
+	// AuthorQuery is a provider-side author filter (substring of name/email)
+	// for an explicit author request; it is mutually exclusive with Author.
+	AuthorQuery string
+	// Limit caps the number of commits; zero means the provider default.
+	Limit int
+	// ScanLimit caps the number of commits inspected across pages, independent
+	// of how many match the exact author filter; it bounds provider calls when
+	// the server-side author prefilter over-matches (0 = provider default).
+	ScanLimit int
+}
+
+// User is the authenticated identity at a provider.
+type User struct {
+	// Username is the provider login name.
+	Username string
+	// Name is the user's display name.
+	Name string
+	// Email is the user's email, empty when the token lacks the read_user
+	// scope.
+	Email string
+}
+
 // DiffFile is one file's diff within a merge request.
 type DiffFile struct {
 	// OldPath is the path before the change.
@@ -162,6 +223,15 @@ type Provider interface {
 	ListRepositories(ctx context.Context, opts RepoListOptions) ([]Repository, error)
 	// GetRepositoryTopics returns the topics (tags) of a repository.
 	GetRepositoryTopics(ctx context.Context, repo string) ([]string, error)
+	// ListCommits lists commits of a repository's default branch, newest first,
+	// bounded by opts. An exact Author match is applied by the provider (the
+	// author email never leaves the provider layer). The bool reports that
+	// enumeration stopped early (the Limit or ScanLimit was reached) and that
+	// more commits may exist; it is false when the provider was naturally
+	// exhausted.
+	ListCommits(ctx context.Context, repo string, opts CommitListOptions) ([]Commit, bool, error)
+	// CurrentUser returns the authenticated user's identity.
+	CurrentUser(ctx context.Context) (User, error)
 	// ListMergeRequests lists merge requests for a repository.
 	ListMergeRequests(ctx context.Context, repo string, opts ListOptions) ([]MergeRequest, error)
 	// GetMergeRequest fetches a single merge request by number.

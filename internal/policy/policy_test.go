@@ -217,8 +217,11 @@ func TestKnownCapabilities(t *testing.T) {
 	if IsKnownCapability("repo:teleport") {
 		t.Error("repo:teleport should not be known")
 	}
-	if len(KnownCapabilities()) != 10 {
-		t.Errorf("KnownCapabilities length = %d, want 10", len(KnownCapabilities()))
+	if !IsKnownCapability("commit:read") {
+		t.Error("commit:read should be known")
+	}
+	if len(KnownCapabilities()) != 11 {
+		t.Errorf("KnownCapabilities length = %d, want 11", len(KnownCapabilities()))
 	}
 }
 
@@ -227,13 +230,13 @@ func TestListable(t *testing.T) {
 		{Repositories: []string{"team/secret"}, Effect: "deny"},
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 	})
-	if p.listable("team/secret") {
+	if p.Listable("team/secret") {
 		t.Error("listable(team/secret) = true, want false (scope-only deny hides)")
 	}
-	if !p.listable("team/app") {
+	if !p.Listable("team/app") {
 		t.Error("listable(team/app) = false, want true (allow exposes)")
 	}
-	if p.listable("other/x") {
+	if p.Listable("other/x") {
 		t.Error("listable(other/x) = true, want false (no match)")
 	}
 	// A deny rule that does not list repo:list does not hide the repository; a
@@ -242,14 +245,14 @@ func TestListable(t *testing.T) {
 		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapMRRead)},
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 	})
-	if !q.listable("team/app") {
+	if !q.Listable("team/app") {
 		t.Error("listable(team/app) with a non-repo:list deny = false, want true")
 	}
 	r := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapRepoList)},
 		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoList)},
 	})
-	if r.listable("team/app") {
+	if r.Listable("team/app") {
 		t.Error("listable(team/app) with a repo:list deny = true, want false")
 	}
 	// First-match-wins: an allow exposes the listing before a later deny that
@@ -258,7 +261,7 @@ func TestListable(t *testing.T) {
 		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapMRRead)},
 		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapRepoList)},
 	})
-	if !s.listable("team/app") {
+	if !s.Listable("team/app") {
 		t.Error("allow before a repo:list deny: listable = false, want true (first match wins)")
 	}
 	// A repo named only by a deny rule that lists other capabilities has no
@@ -266,7 +269,7 @@ func TestListable(t *testing.T) {
 	d := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapMRRead)},
 	})
-	if d.listable("team/app") {
+	if d.Listable("team/app") {
 		t.Error("deny-only-other-capability: listable = true, want false (no allow)")
 	}
 }
@@ -339,6 +342,180 @@ func TestStaticRepositories(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("StaticRepositories = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestCommitReadCapability(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapCommitRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}, NoAIExempt: true}},
+		}},
+	})
+	// The tag dimension for commit:read matches project topics.
+	if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{Known: true, Values: []string{"ai-ok"}}); !d.Allowed || !d.NoAIExempt {
+		t.Errorf("commit:read matching topic = %+v, want allowed + NoAIExempt", d)
+	}
+	if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{Known: true, Values: []string{"other"}}); d.Allowed {
+		t.Errorf("commit:read missing topic = %+v, want denied", d)
+	}
+	if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{}); d.Allowed || d.Reason != "tag information unavailable" {
+		t.Errorf("commit:read unknown topics = %+v, want fail-closed", d)
+	}
+	// The implication is one-directional: commit:read does not grant repo:read.
+	if d := p.Evaluate("team/app", CapRepoRead); d.Allowed {
+		t.Errorf("repo:read unexpectedly granted by a commit:read rule: %+v", d)
+	}
+}
+
+// TestRepoReadImpliesCommitRead pins the implication semantics: a repo:read
+// entry authorizes commit:read with the same filter, an explicit commit:read
+// entry wins, and the implication is symmetric for deny.
+func TestRepoReadImpliesCommitRead(t *testing.T) {
+	t.Run("allow repo:read grants commit:read", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+		})
+		if d := p.Evaluate("team/app", CapCommitRead); !d.Allowed {
+			t.Errorf("commit:read via repo:read = %+v, want allowed", d)
+		}
+		if granted, matched := p.EvaluatePreCheck("team/app", CapCommitRead); !granted || !matched {
+			t.Errorf("EvaluatePreCheck = (%v, %v), want (true, true)", granted, matched)
+		}
+		// The implication is one-directional: commit:read does not grant repo:read.
+		if d := p.Evaluate("team/app", CapRepoRead); !d.Allowed {
+			t.Errorf("repo:read = %+v, want allowed", d)
+		}
+	})
+
+	t.Run("explicit commit:read deny before a broad repo:read allow wins", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/*"}, Effect: "deny", Capabilities: grants(CapCommitRead)},
+			{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+		})
+		if d := p.Evaluate("team/app", CapCommitRead); d.Allowed || d.Reason != "denied by rule" {
+			t.Errorf("commit:read = %+v, want denied by the earlier deny rule", d)
+		}
+		if granted, _ := p.EvaluatePreCheck("team/app", CapCommitRead); granted {
+			t.Error("EvaluatePreCheck granted despite an unconditional commit:read deny")
+		}
+		// repo:read itself is still granted by the broad allow.
+		if d := p.Evaluate("team/app", CapRepoRead); !d.Allowed {
+			t.Errorf("repo:read = %+v, want allowed", d)
+		}
+	})
+
+	t.Run("deny repo:read denies commit:read symmetrically", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/*"}, Effect: "deny", Capabilities: grants(CapRepoRead)},
+			{Repositories: []string{"team/*"}, Effect: "allow", Capabilities: grants(CapRepoRead, CapCommitRead)},
+		})
+		if d := p.Evaluate("team/app", CapCommitRead); d.Allowed || d.Reason != "denied by rule" {
+			t.Errorf("commit:read = %+v, want denied via the implied repo:read deny", d)
+		}
+	})
+
+	t.Run("explicit commit:read entry wins over an implied repo:read entry", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []CapabilityGrant{
+				{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"repo-topic"}}},
+				{Name: CapCommitRead, Filter: CapabilityFilter{Require: []string{"commit-topic"}}},
+			},
+		}})
+		if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{Known: true, Values: []string{"commit-topic"}}); !d.Allowed {
+			t.Errorf("explicit commit:read filter = %+v, want allowed", d)
+		}
+		if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{Known: true, Values: []string{"repo-topic"}}); d.Allowed {
+			t.Errorf("explicit commit:read filter ignored: %+v", d)
+		}
+	})
+
+	t.Run("repo:read paths filter fails commit:read closed", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+				{Name: CapRepoRead, Filter: CapabilityFilter{Paths: PathFilter{Include: []string{"docs/**"}}}},
+			}},
+		})
+		if d := p.Evaluate("team/app", CapCommitRead); d.Allowed || d.Reason != "path required" {
+			t.Errorf("commit:read = %+v, want fail-closed (path required)", d)
+		}
+	})
+
+	t.Run("repo:read topic filter applies to commit:read", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+				{Name: CapRepoRead, Filter: CapabilityFilter{Require: []string{"ai-ok"}}},
+			}},
+		})
+		if !p.HasTagConstraint("team/app", CapCommitRead, "") {
+			t.Error("HasTagConstraint(commit:read) = false, want true via the repo:read tag filter")
+		}
+		if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{Known: true, Values: []string{"ai-ok"}}); !d.Allowed {
+			t.Errorf("commit:read matching topic = %+v, want allowed", d)
+		}
+		if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{Known: true, Values: []string{"other"}}); d.Allowed {
+			t.Errorf("commit:read missing topic = %+v, want denied", d)
+		}
+		if d := p.EvaluateWithTags("team/app", CapCommitRead, TagSet{}); d.Allowed || d.Reason != "tag information unavailable" {
+			t.Errorf("commit:read unknown topics = %+v, want fail-closed", d)
+		}
+	})
+
+	t.Run("repo:read noai exemption carries to commit:read", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+				{Name: CapRepoRead, Filter: CapabilityFilter{NoAIExempt: true}},
+			}},
+		})
+		if d := p.Evaluate("team/app", CapCommitRead); !d.Allowed || !d.NoAIExempt {
+			t.Errorf("commit:read = %+v, want allowed + NoAIExempt", d)
+		}
+		if !p.NoAIExemptAll("team/app", CapCommitRead) {
+			t.Error("NoAIExemptAll(commit:read) = false, want true")
+		}
+	})
+
+	t.Run("discovery seeds include repo:read grants", func(t *testing.T) {
+		p := mustBuild(t, []RuleSpec{
+			{Repositories: []string{"team/app", "team/**"}, Effect: "allow", Capabilities: grants(CapRepoRead)},
+		})
+		if got := p.StaticRepositoriesFor(CapCommitRead); len(got) != 1 || got[0] != "team/app" {
+			t.Errorf("StaticRepositoriesFor(commit:read) = %v, want [team/app]", got)
+		}
+		if got := p.ListSearchPrefixes(CapCommitRead); len(got) != 2 || got[0] != "team" || got[1] != "team/app" {
+			t.Errorf("ListSearchPrefixes(commit:read) = %v, want [team team/app]", got)
+		}
+	})
+}
+
+func TestStaticRepositoriesFor(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/secret"}, Effect: "deny"},
+		{Repositories: []string{"team/app", "archive/**", "team/secret", "legacy/lit"}, Effect: "allow", Capabilities: grants(CapCommitRead)},
+		{Repositories: []string{"team/other"}, Effect: "allow", Capabilities: grants(CapMRRead)},
+	})
+	got := p.StaticRepositoriesFor(CapCommitRead)
+	want := []string{"team/app", "legacy/lit"}
+	if len(got) != len(want) {
+		t.Fatalf("StaticRepositoriesFor = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("StaticRepositoriesFor = %v, want %v", got, want)
+		}
+	}
+	// Only allow rules granting the capability contribute.
+	if got := p.StaticRepositoriesFor(CapRepoRead); len(got) != 0 {
+		t.Errorf("StaticRepositoriesFor(repo:read) = %v, want none", got)
+	}
+	// A listing deny hides a literal repository from the seed set.
+	q := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants(CapRepoList)},
+		{Repositories: []string{"team/app", "team/**"}, Effect: "allow", Capabilities: grants(CapCommitRead)},
+	})
+	if got := q.StaticRepositoriesFor(CapCommitRead); len(got) != 0 {
+		t.Errorf("StaticRepositoriesFor with a listing deny = %v, want none", got)
 	}
 }
 

@@ -106,6 +106,30 @@ type Rule struct {
 	Capabilities map[Capability]CapabilityFilter
 }
 
+// impliedGrants maps a capability to capabilities that also authorize it when
+// granted. Granting repo:read also grants commit:read: commit metadata is
+// repository content, and a fetch/clone over repo:read already exposes the
+// full history. Implication is symmetric: an explicit entry for the requested
+// capability wins, and a deny of the implying capability denies the implied one.
+var impliedGrants = map[Capability][]Capability{
+	CapCommitRead: {CapRepoRead},
+}
+
+// capabilityGrant returns the filter for capability c in rule, falling back to
+// a capability that implies c (repo:read implies commit:read). An explicit
+// entry for c wins over an implied one.
+func capabilityGrant(rule Rule, c Capability) (CapabilityFilter, bool) {
+	if filter, ok := rule.Capabilities[c]; ok {
+		return filter, true
+	}
+	for _, implying := range impliedGrants[c] {
+		if filter, ok := rule.Capabilities[implying]; ok {
+			return filter, true
+		}
+	}
+	return CapabilityFilter{}, false
+}
+
 // Policy is an ordered set of rules. Rules are evaluated first-match-wins.
 type Policy struct {
 	rules []Rule
@@ -248,7 +272,7 @@ func (p *Policy) evaluateResource(repo string, c Capability, tags TagSet, path s
 			return Decision{Matched: true, Reason: "denied by rule"}
 		}
 
-		filter, listed := rule.Capabilities[c]
+		filter, listed := capabilityGrant(rule, c)
 		if !listed {
 			reason = moreRelevantReason(reason, fmt.Sprintf("capability %s not granted", c))
 			continue
@@ -330,12 +354,12 @@ func (p *Policy) EvaluatePreCheck(repo string, c Capability) (granted, matched b
 			if len(rule.Capabilities) == 0 {
 				return false, true
 			}
-			if filter, listed := rule.Capabilities[c]; listed && filter.IsZero() {
+			if filter, listed := capabilityGrant(rule, c); listed && filter.IsZero() {
 				return false, true
 			}
 			continue
 		}
-		if _, listed := rule.Capabilities[c]; listed {
+		if _, listed := capabilityGrant(rule, c); listed {
 			return true, true
 		}
 	}
@@ -427,13 +451,13 @@ func validatePathPatterns(patterns []string) error {
 	return nil
 }
 
-// listable reports whether a literal repository is visible in
+// Listable reports whether a literal repository is visible in
 // list_repositories. A repository is hidden when the first scope-matching rule
 // denies the listing: a deny rule without capabilities, or a deny rule that
 // lists repo:list (fail-closed). A deny rule that does not list repo:list does
 // not hide the repository, and any allow rule exposes it. Explicitly configured
 // repositories are listed even without the repo:list capability.
-func (p *Policy) listable(repo string) bool {
+func (p *Policy) Listable(repo string) bool {
 	for _, rule := range p.rules {
 		if !ruleMatches(rule, repo) {
 			continue
@@ -442,7 +466,7 @@ func (p *Policy) listable(repo string) bool {
 			if len(rule.Capabilities) == 0 {
 				return false
 			}
-			if _, ok := rule.Capabilities[CapRepoList]; ok {
+			if _, ok := capabilityGrant(rule, CapRepoList); ok {
 				return false
 			}
 			continue
@@ -464,7 +488,35 @@ func (p *Policy) StaticRepositories() []string {
 				continue
 			}
 			seen[pattern] = true
-			if p.listable(pattern) {
+			if p.Listable(pattern) {
+				out = append(out, pattern)
+			}
+		}
+	}
+	return out
+}
+
+// StaticRepositoriesFor returns the literal repository paths from allow rules
+// that grant capability c and are visible to repository listing (not hidden by
+// a listing deny). It seeds discovery for capability-scoped tools such as
+// search_commits. Literal patterns are collected in first-appearance order and
+// deduplicated.
+func (p *Policy) StaticRepositoriesFor(c Capability) []string {
+	seen := make(map[string]bool)
+	var out []string
+	for _, rule := range p.rules {
+		if rule.Effect != EffectAllow {
+			continue
+		}
+		if _, ok := capabilityGrant(rule, c); !ok {
+			continue
+		}
+		for _, pattern := range rule.Repositories {
+			if !isLiteralPattern(pattern) || seen[pattern] {
+				continue
+			}
+			seen[pattern] = true
+			if p.Listable(pattern) {
 				out = append(out, pattern)
 			}
 		}
@@ -487,7 +539,7 @@ func (p *Policy) GrantsAnywhere(c Capability) bool {
 		if rule.Effect != EffectAllow {
 			continue
 		}
-		if _, ok := rule.Capabilities[c]; ok {
+		if _, ok := capabilityGrant(rule, c); ok {
 			return true
 		}
 	}
@@ -507,7 +559,7 @@ func (p *Policy) HasFilter(repo string, c Capability) bool {
 		if rule.Effect == EffectDeny && len(rule.Capabilities) == 0 {
 			return false
 		}
-		filter, listed := rule.Capabilities[c]
+		filter, listed := capabilityGrant(rule, c)
 		if !listed {
 			continue
 		}
@@ -537,7 +589,7 @@ func (p *Policy) HasTagConstraint(repo string, c Capability, path string) bool {
 		if rule.Effect == EffectDeny && len(rule.Capabilities) == 0 {
 			return false
 		}
-		filter, listed := rule.Capabilities[c]
+		filter, listed := capabilityGrant(rule, c)
 		if !listed {
 			continue
 		}
@@ -562,7 +614,7 @@ func (p *Policy) NoAIExemptAll(repo string, c Capability) bool {
 		if rule.Effect != EffectAllow || !ruleMatches(rule, repo) {
 			continue
 		}
-		filter, listed := rule.Capabilities[c]
+		filter, listed := capabilityGrant(rule, c)
 		if !listed {
 			continue
 		}
@@ -586,7 +638,7 @@ func (p *Policy) ListSearchPrefixes(c Capability) []string {
 		if rule.Effect != EffectAllow {
 			continue
 		}
-		if _, ok := rule.Capabilities[c]; !ok {
+		if _, ok := capabilityGrant(rule, c); !ok {
 			continue
 		}
 		for _, pattern := range rule.Repositories {

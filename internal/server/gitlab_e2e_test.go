@@ -41,6 +41,8 @@ type mockGitLab struct {
 	branches  map[string]string
 	base      string
 	forbidden bool
+	user      map[string]any
+	commits   []map[string]any
 
 	mu       sync.Mutex
 	requests []string
@@ -68,6 +70,8 @@ func (m *mockGitLab) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "projects":
 		m.writeJSON(w, http.StatusOK, m.projects)
+	case p == "user":
+		m.writeJSON(w, http.StatusOK, m.user)
 	case strings.HasPrefix(p, "groups/") && strings.HasSuffix(p, "/projects"):
 		group := strings.TrimSuffix(strings.TrimPrefix(p, "groups/"), "/projects")
 		m.writeJSON(w, http.StatusOK, m.group[group])
@@ -93,6 +97,8 @@ func (m *mockGitLab) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"encoding":  "base64",
 			"content":   base64.StdEncoding.EncodeToString(data),
 		})
+	case p == base+"/repository/commits":
+		m.writeJSON(w, http.StatusOK, m.commits)
 	case strings.HasPrefix(p, base+"/repository/branches/"):
 		branch := strings.TrimPrefix(p, base+"/repository/branches/")
 		sha, ok := m.branches[branch]
@@ -342,5 +348,38 @@ func TestE2EGitLabAddNote(t *testing.T) {
 	}
 	if !strings.Contains(resultText(t, res), "looks good") {
 		t.Errorf("result = %q, want the created note body", resultText(t, res))
+	}
+}
+
+func TestE2EGitLabSearchCommits(t *testing.T) {
+	committed := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	mock := &mockGitLab{
+		repo:    "team/app",
+		project: baseProject(),
+		user:    map[string]any{"username": "alice", "name": "Alice Example", "email": "alice@example.com"},
+		commits: []map[string]any{
+			{
+				"id": "aaa", "short_id": "aaa", "title": "Fix", "message": "Fix BUG-9",
+				"author_name": "Alice", "author_email": "alice@example.com",
+				"committed_date": committed.Format(time.RFC3339),
+			},
+		},
+	}
+	env, _ := newGitLabEnv(t, []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{Name: policy.CapCommitRead}},
+	}}, mock)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "gl"})
+	if res.IsError {
+		t.Fatalf("search_commits denied: %s", resultText(t, res))
+	}
+	text := resultText(t, res)
+	if !strings.Contains(text, "Fix BUG-9") {
+		t.Errorf("result = %q, want the commit message", text)
+	}
+	if strings.Contains(text, "alice@example.com") {
+		t.Errorf("result = %q, must not contain the author email", text)
 	}
 }

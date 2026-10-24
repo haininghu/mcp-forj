@@ -171,6 +171,135 @@ func mapProject(providerName string, project *gitlab.Project) provider.Repositor
 	}
 }
 
+// Commit enumeration defaults. defaultCommitLimit is the provider default for
+// opts.Limit; defaultCommitScanLimit is the provider default for opts.ScanLimit
+// when the caller leaves it unset.
+const (
+	defaultCommitLimit     = 100
+	defaultCommitScanLimit = 1000
+)
+
+// ListCommits implements provider.Provider. It lists commits of the default
+// branch (RefName is never set), newest first, following pages until the result
+// limit is reached or the provider is exhausted. opts.Since/opts.Until bound the
+// committer date inclusively. opts.AuthorQuery is passed through as the
+// provider's substring author filter; an exact opts.Author is applied
+// client-side on top of the provider prefilter, because GitLab's author
+// parameter is a fuzzy substring match. opts.ScanLimit caps how many raw commits
+// are inspected across pages, so a prefilter that over-matches cannot page
+// without bound. The returned bool reports that enumeration stopped early (the
+// result limit or the scan budget was reached) and that more commits may exist.
+// Author emails are never returned.
+func (c *Client) ListCommits(ctx context.Context, repo string, opts provider.CommitListOptions) ([]provider.Commit, bool, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = defaultCommitLimit
+	}
+	scanLimit := opts.ScanLimit
+	if scanLimit <= 0 {
+		scanLimit = defaultCommitScanLimit
+	}
+	// perPage is capped at 100 and further shrunk to the remaining scan budget
+	// so a page never overshoots it.
+	perPage := min(scanLimit, 100)
+
+	listOpts := &gitlab.ListCommitsOptions{}
+	if !opts.Since.IsZero() {
+		since := opts.Since.UTC()
+		listOpts.Since = &since
+	}
+	if !opts.Until.IsZero() {
+		until := opts.Until.UTC()
+		listOpts.Until = &until
+	}
+	switch {
+	case opts.AuthorQuery != "":
+		query := opts.AuthorQuery
+		listOpts.Author = &query
+	case opts.Author.Email != "":
+		email := opts.Author.Email
+		listOpts.Author = &email
+	case opts.Author.Name != "":
+		name := opts.Author.Name
+		listOpts.Author = &name
+	}
+	// The provider author parameter is a fuzzy substring filter, so an exact
+	// identity request is additionally enforced client-side. Email is the
+	// matching key when set; otherwise the name is.
+	exactEmail := opts.Author.Email
+	exactName := ""
+	if exactEmail == "" {
+		exactName = opts.Author.Name
+	}
+
+	out := make([]provider.Commit, 0, min(limit, perPage))
+	scanned := 0
+	for page := int64(1); ; page++ {
+		remainingScan := scanLimit - scanned
+		if remainingScan <= 0 {
+			// The scan budget was consumed with pages still available.
+			return out, true, nil
+		}
+		listOpts.PerPage = int64(min(perPage, remainingScan))
+		listOpts.Page = page
+		commits, resp, err := c.api.Commits.ListCommits(repo, listOpts, gitlab.WithContext(ctx))
+		if err != nil {
+			return nil, false, mapError(err)
+		}
+		for i, commit := range commits {
+			scanned++
+			if exactEmail != "" && !strings.EqualFold(commit.AuthorEmail, exactEmail) {
+				continue
+			}
+			if exactName != "" && !strings.EqualFold(commit.AuthorName, exactName) {
+				continue
+			}
+			out = append(out, mapCommit(commit))
+			if len(out) >= limit {
+				moreInPage := i+1 < len(commits)
+				morePages := resp != nil && resp.NextPage != 0
+				return out, moreInPage || morePages, nil
+			}
+		}
+		if len(commits) == 0 || resp == nil || resp.NextPage == 0 {
+			return out, false, nil
+		}
+		if scanned >= scanLimit {
+			return out, true, nil
+		}
+	}
+}
+
+// CurrentUser implements provider.Provider. It returns the authenticated user's
+// identity. The email is empty unless the token carries the read_user scope.
+func (c *Client) CurrentUser(ctx context.Context) (provider.User, error) {
+	user, _, err := c.api.Users.CurrentUser(gitlab.WithContext(ctx))
+	if err != nil {
+		return provider.User{}, mapError(err)
+	}
+	return provider.User{Username: user.Username, Name: user.Name, Email: user.Email}, nil
+}
+
+// mapCommit maps a GitLab commit to the provider type, treating nil time
+// pointers as the zero time.
+func mapCommit(commit *gitlab.Commit) provider.Commit {
+	out := provider.Commit{
+		SHA:        commit.ID,
+		ShortSHA:   commit.ShortID,
+		Title:      commit.Title,
+		Message:    commit.Message,
+		AuthorName: commit.AuthorName,
+		WebURL:     commit.WebURL,
+	}
+	if commit.AuthoredDate != nil {
+		out.AuthoredAt = commit.AuthoredDate.UTC()
+	}
+	if commit.CommittedDate != nil {
+		out.CommittedAt = commit.CommittedDate.UTC()
+	}
+	return out
+}
+
 // GetRepositoryTopics implements provider.Provider. It returns the project's
 // topics, which the policy engine matches against repository tag filters.
 func (c *Client) GetRepositoryTopics(ctx context.Context, repo string) ([]string, error) {

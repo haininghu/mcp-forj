@@ -78,6 +78,12 @@ func (f *fakeProvider) ListRepositories(context.Context, provider.RepoListOption
 func (f *fakeProvider) GetRepositoryTopics(context.Context, string) ([]string, error) {
 	return nil, nil
 }
+func (f *fakeProvider) ListCommits(context.Context, string, provider.CommitListOptions) ([]provider.Commit, bool, error) {
+	return nil, false, nil
+}
+func (f *fakeProvider) CurrentUser(context.Context) (provider.User, error) {
+	return provider.User{}, nil
+}
 func (f *fakeProvider) ListMergeRequests(context.Context, string, provider.ListOptions) ([]provider.MergeRequest, error) {
 	return nil, nil
 }

@@ -118,6 +118,12 @@ func (p *gitProvider) ListRepositories(context.Context, provider.RepoListOptions
 	return nil, nil
 }
 func (p *gitProvider) GetRepositoryTopics(context.Context, string) ([]string, error) { return nil, nil }
+func (p *gitProvider) ListCommits(context.Context, string, provider.CommitListOptions) ([]provider.Commit, bool, error) {
+	return nil, false, nil
+}
+func (p *gitProvider) CurrentUser(context.Context) (provider.User, error) {
+	return provider.User{}, nil
+}
 func (p *gitProvider) ListMergeRequests(context.Context, string, provider.ListOptions) ([]provider.MergeRequest, error) {
 	return nil, nil
 }

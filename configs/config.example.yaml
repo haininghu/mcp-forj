@@ -71,6 +71,17 @@ providers:
           # policy:read exposes this provider's configured rules through
           # list_configured_rules; without it the policy is not disclosed.
           - policy:read
+          # commit:read permits search_commits (cross-repo "where did I
+          # commit?"). repo:read ALSO grants commit:read (same filter: topics
+          # and `noai: allow` carry over, an explicit commit:read entry wins),
+          # and only each repository's DEFAULT branch is searched. Candidate
+          # repositories are enumerated like list_repositories: these literal
+          # repositories are always searched (unless hidden by a listing deny),
+          # while provider-side discovery needs repo:list. Tag filters match
+          # project topics; paths and branches are not supported on commit:read,
+          # and an active paths filter on a repo:read grant fails commit:read
+          # closed.
+          - commit:read
           # A capability may carry a tag filter. For MR capabilities the tags
           # are GitLab labels; for repo capabilities they are project topics.
           # The subject must have ALL `require` tags and NONE of the `exclude`
@@ -130,13 +141,22 @@ providers:
       # Discover and read archived repositories whose project has the `ai-ok`
       # topic. The repo:list filter also applies to literal repositories listed
       # in this rule; without an active filter they are returned without any
-      # provider call. Topics are matched exactly (no caching).
+      # provider call. Topics are matched exactly (no caching). repo:list also
+      # governs search_commits discovery: without it, search_commits only sees
+      # literal commit:read repositories.
       - repositories:
           - "team/ai-service"
           - "archive/**"
         effect: allow
         capabilities:
           - repo:list:
+              require: [ai-ok]
+          # commit:read (search_commits) also accepts a topic filter and
+          # `noai: allow`; paths/branches are rejected by config validation.
+          # The explicit entry also keeps commit:read usable here: the repo:read
+          # grant below has an active paths filter, which would otherwise fail
+          # the implied commit:read closed.
+          - commit:read:
               require: [ai-ok]
           # repo:read may also restrict which files are readable. Path globs
           # (doublestar) match the repository-relative path; exclude wins over

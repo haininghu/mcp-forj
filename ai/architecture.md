@@ -4,7 +4,8 @@
 authorization core. Neither entry point re-implements policy.
 
 1. **MCP tools over stdio** — structured access for an agent: list/view merge requests, comment,
-   rebase, merge, read files and (while the proxy runs) the `git_remote` discovery tool.
+   rebase, merge, read files, search commits across repositories (`search_commits`) and (while the
+   proxy runs) the `git_remote` discovery tool.
 2. **Git smart-HTTP reverse proxy over HTTP** (optional, `server.git_proxy`) — real
    `git clone`/`fetch`/`push` against the same policy.
 
@@ -134,6 +135,8 @@ accessible"), keeping a `.noai` repository or branch indistinguishable from an u
 ## Related documents
 
 - `adr/0011-git-smart-http-reverse-proxy.md` — decisions, forwarding hardening, full MVP limits.
+- `adr/0013-commit-search.md` — the `commit:read` capability and cross-repo `search_commits`.
 - `method-specs/git_remote.md` — contract of the clone-URL discovery tool.
+- `method-specs/search_commits.md` — contract of the cross-repo commit search tool.
 - `method-specs/authorization.md` — the shared authorization pipeline.
 - `../AGENTS.md` — invariants; `../README.md` — user-facing Git proxy section.

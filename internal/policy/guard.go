@@ -298,6 +298,30 @@ func (g *Guard) StaticRepositories(providerName string) ([]string, error) {
 	return p.StaticRepositories(), nil
 }
 
+// StaticRepositoriesFor returns the concrete repository paths from allow rules
+// that grant capability c and are visible to repository listing. It seeds
+// discovery for capability-scoped tools such as search_commits. It performs no
+// marker check. It returns ErrUnknownProvider when the provider has no policy.
+func (g *Guard) StaticRepositoriesFor(providerName string, c Capability) ([]string, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.StaticRepositoriesFor(c), nil
+}
+
+// Listable reports whether repo is visible to repository listing for
+// providerName: it is not hidden by a listing deny (deny rule without
+// capabilities or a deny rule listing repo:list). Policy-only, no marker check.
+// It returns ErrUnknownProvider when the provider has no policy.
+func (g *Guard) Listable(providerName, repo string) (bool, error) {
+	p, ok := g.policies[providerName]
+	if !ok {
+		return false, fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+	return p.Listable(repo), nil
+}
+
 // Evaluate performs a policy-only evaluation for providerName, repo and
 // capability. It performs no .noai marker check. It returns ErrUnknownProvider
 // when the provider has no policy. Every decision is logged.

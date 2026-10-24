@@ -11,7 +11,9 @@ It exposes tools that let an AI agent inspect and (limitedly) act on code hostin
 - Providers: **GitLab first**; [GitHub](https://github.com) and [Forgejo](https://forgejo.org) are
   planned. The provider
   abstraction (`internal/provider`) exists so new backends do not touch policy or server code.
-- Authorization: **deny-by-default**, driven by a human-readable YAML config.
+- Authorization: **deny-by-default**, driven by a human-readable YAML config. Capabilities span
+  repository content (`repo:*`), merge requests (`mr:*`) and commits (`commit:*`; `commit:read`
+  backs the cross-repo `search_commits` tool and is also granted by `repo:read`).
 - `.noai`: a repository marker that blocks repository-content operations.
 
 ## Repository map
@@ -101,7 +103,11 @@ Authorization is the product. These rules are security-critical:
    `capabilities` and filters; without `capabilities` a `deny` rule denies every capability in its
    scope. An **evaluated** filter miss makes the rule fall through (no hard deny), so a broad
    `allow` above a specific `deny` hides the denial; unavailable filter information (unknown
-   tags/topics, empty path, missing branch) fails closed.
+   tags/topics, empty path, missing branch) fails closed. **Capabilities imply capabilities:**
+   `repo:read` also authorizes `commit:read` (with the same filter); an explicit entry for the
+   requested capability wins over an implied one, and the implication is symmetric — a `repo:read`
+   `deny` denies `commit:read`. An active `paths` filter on a `repo:read` grant fails `commit:read`
+   closed.
 4. **Capabilities are validated at config load.** Unknown capabilities and bad patterns are rejected.
 5. **Authorize before the provider call.** Every capability-gated tool authorizes first and fails
    closed on any error (including unknown tags/topics and metadata-fetch failures).
@@ -113,12 +119,14 @@ Authorization is the product. These rules are security-critical:
    config repositories stay listed; discovered `.noai` repos are omitted unless `repo:list` is exempt.
    A `.noai` denial is reported to the client indistinguishably from an unknown repository.
 7. **Tag filters** match exact, case-sensitive values: GitLab MR **labels** for `mr:*`, project
-   **topics** for `repo:*`. When the information is unknown, the decision fails closed.
+   **topics** for `repo:*` and `commit:*`. When the information is unknown, the decision fails
+   closed.
 8. **Path filters** (doublestar) apply only to `repo:read`/`repo:write`; `paths.exclude` wins over
    `paths.include`, and an active filter with an empty path fails closed. Git traffic cannot
    enforce path filters, so an active `paths` filter means **no git access** (fetch/clone/push) for
    that capability (fail-closed).
-9. **Data hygiene.** Labels, topics and tokens are never returned in tool output or logs.
+9. **Data hygiene.** Labels, topics, commit author emails and tokens are never returned in tool
+   output or logs.
 10. **Error hygiene.** Provider errors are mapped to safe messages with the numeric HTTP status;
     forbidden errors name the resource permission the operation needs.
 11. **`.noai` is an integrity control, not a confidentiality control.** It blocks non-exempt
@@ -150,7 +158,7 @@ Every capability-gated tool follows the same pipeline:
 3. Optional **policy-only pre-check**: `Guard.AuthorizeRepoCapability` (ignores tags, no marker).
 4. **Fetch metadata needed for tags** when a rule that could apply carries a tag constraint
    (`Guard.HasTagConstraint`, conservative): MR metadata (`tags = labels`) for `mr:*`; project
-   topics for `repo:*`. A fetch failure denies the operation (fail-closed).
+   topics for `repo:*` and `commit:*`. A fetch failure denies the operation (fail-closed).
 5. **Authorize with tags**: `Guard.AuthorizeWithTags` (tags) or `Guard.AuthorizeResource`
    (tags + path). Unless the matched grant is `noai`-exempt, this also runs the `.noai` check.
 6. Perform the provider operation and map the result. Map errors with `mapProviderError`.
@@ -168,6 +176,20 @@ a grant without one is a hard fail-closed deny for every push, and a path-filter
 access at all. Push
 options are parsed and gated last, before forwarding: `merge_request.*` needs `mr:write`, auto-merge
 additionally `mr:merge`, everything else denies (see invariant 13).
+
+`search_commits` separates enumeration from content. It enumerates candidates exactly like
+`list_repositories`: literal `commit:read` repositories via `Guard.StaticRepositoriesFor` (which
+applies the listing deny; the active `repo:list` filter is applied separately), and provider-side
+discovery only behind
+`Guard.AuthorizeList`, evaluating each discovered repository with
+`Guard.EvaluateWithTags(repo:list, topics)` and the `repo:list` `.noai` overlay. It then authorizes
+the `commit:read` content axis per candidate itself: the `commit:read` pre-check, topics when
+`Guard.HasTagConstraint` applies (reusing topics already known from enumeration),
+`Guard.EvaluateWithTags` and `Guard.CheckNoAI`; only the default branch is searched and a default
+author resolves via `CurrentUser` (fail-closed). `commit:read` is authorized by a `commit:read` grant
+or by a `repo:read` grant (same filter; an active `paths` filter fails closed). Enumeration is seeded
+from literal grants (direct `commit:read` or implied by `repo:read`) plus `repo:list` provider search
+prefixes, bounded by fixed budgets; the omitted/limit counters are logged server-side only.
 
 ## Where to look
 

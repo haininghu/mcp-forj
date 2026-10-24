@@ -15,6 +15,12 @@ func (s stubProvider) ListRepositories(context.Context, RepoListOptions) ([]Repo
 func (s stubProvider) GetRepositoryTopics(context.Context, string) ([]string, error) {
 	return nil, nil
 }
+func (s stubProvider) ListCommits(context.Context, string, CommitListOptions) ([]Commit, bool, error) {
+	return nil, false, nil
+}
+func (s stubProvider) CurrentUser(context.Context) (User, error) {
+	return User{}, nil
+}
 func (s stubProvider) ListMergeRequests(context.Context, string, ListOptions) ([]MergeRequest, error) {
 	return nil, nil
 }
