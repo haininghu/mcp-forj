@@ -383,7 +383,7 @@ the **Developer** role (push access to the source branch); merging also needs a 
   (no `repo:list` and no discovery, capped at 50 repositories after deduplication), so a repository
   hidden by a listing deny is still searchable by name.
   It requires `commit:read`, which `repo:read` also grants (with the same filter; an active `paths`
-  filter fails it closed). Otherwise repositories hidden by a listing deny are omitted, and
+  filter fails it closed). Otherwise, repositories hidden by a listing deny are omitted, and
   emails/topics are never returned.
 - `mr:write` and `repo:write` have no MCP tool — they gate git push and its push options through the
   proxy.
@@ -455,4 +455,4 @@ Use the imperative mood, lowercase after the colon, and no trailing period. Mark
 
 ## License
 
-[LICENSE](LICENSE) (MIT).
+MIT License, Copyright © 2026 Henning Voß. See [LICENSE](LICENSE).
