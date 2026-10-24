@@ -11,12 +11,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/hvo/mcp-forj/internal/config"
-	"github.com/hvo/mcp-forj/internal/gitproxy"
-	"github.com/hvo/mcp-forj/internal/policy"
-	"github.com/hvo/mcp-forj/internal/provider"
-	_ "github.com/hvo/mcp-forj/internal/provider/gitlab" // register the gitlab provider factory
-	"github.com/hvo/mcp-forj/internal/server"
+	"github.com/haininghu/mcp-forj/internal/config"
+	"github.com/haininghu/mcp-forj/internal/gitproxy"
+	"github.com/haininghu/mcp-forj/internal/policy"
+	"github.com/haininghu/mcp-forj/internal/provider"
+	_ "github.com/haininghu/mcp-forj/internal/provider/gitlab" // register the gitlab provider factory
+	"github.com/haininghu/mcp-forj/internal/server"
 )
 
 // version is injected at build time via -ldflags.

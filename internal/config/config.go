@@ -16,7 +16,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"gopkg.in/yaml.v3"
 
-	"github.com/hvo/mcp-forj/internal/policy"
+	"github.com/haininghu/mcp-forj/internal/policy"
 )
 
 // envRefPattern matches a whole-string environment reference such as "${NAME}".

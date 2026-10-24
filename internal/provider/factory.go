@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/hvo/mcp-forj/internal/config"
+	"github.com/haininghu/mcp-forj/internal/config"
 )
 
 // Factory constructs a Provider from its configuration.

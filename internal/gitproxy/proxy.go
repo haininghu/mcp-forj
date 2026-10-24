@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hvo/mcp-forj/internal/policy"
-	"github.com/hvo/mcp-forj/internal/provider"
+	"github.com/haininghu/mcp-forj/internal/policy"
+	"github.com/haininghu/mcp-forj/internal/provider"
 )
 
 // gitRoutePrefix roots every proxied git smart-HTTP endpoint.

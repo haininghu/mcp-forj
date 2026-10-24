@@ -1,4 +1,4 @@
-module github.com/hvo/mcp-forj
+module github.com/haininghu/mcp-forj
 
 go 1.27.1
 

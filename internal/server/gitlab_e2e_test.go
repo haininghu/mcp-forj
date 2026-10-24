@@ -21,10 +21,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/hvo/mcp-forj/internal/config"
-	"github.com/hvo/mcp-forj/internal/policy"
-	"github.com/hvo/mcp-forj/internal/provider"
-	_ "github.com/hvo/mcp-forj/internal/provider/gitlab" // register the factory
+	"github.com/haininghu/mcp-forj/internal/config"
+	"github.com/haininghu/mcp-forj/internal/policy"
+	"github.com/haininghu/mcp-forj/internal/provider"
+	_ "github.com/haininghu/mcp-forj/internal/provider/gitlab" // register the factory
 )
 
 // mockGitLab emulates the subset of the GitLab REST API v4 the provider uses.

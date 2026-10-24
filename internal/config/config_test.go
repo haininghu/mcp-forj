@@ -9,7 +9,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/hvo/mcp-forj/internal/policy"
+	"github.com/haininghu/mcp-forj/internal/policy"
 )
 
 func tokenYAML(token string) string {

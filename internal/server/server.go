@@ -16,8 +16,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/hvo/mcp-forj/internal/policy"
-	"github.com/hvo/mcp-forj/internal/provider"
+	"github.com/haininghu/mcp-forj/internal/policy"
+	"github.com/haininghu/mcp-forj/internal/provider"
 )
 
 // Output limits. Oversized values are truncated and marked.

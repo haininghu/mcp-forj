@@ -17,8 +17,8 @@ import (
 
 	gitlab "gitlab.com/gitlab-org/api/client-go"
 
-	"github.com/hvo/mcp-forj/internal/config"
-	"github.com/hvo/mcp-forj/internal/provider"
+	"github.com/haininghu/mcp-forj/internal/config"
+	"github.com/haininghu/mcp-forj/internal/provider"
 )
 
 func TestMapBasicMergeRequest(t *testing.T) {
