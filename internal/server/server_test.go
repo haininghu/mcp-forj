@@ -3382,3 +3382,264 @@ func TestSearchCommitsTruncatesLongTitle(t *testing.T) {
 		t.Errorf("title length = %d, want <= %d", len(got), maxListDescBytes+len(truncatedMarker))
 	}
 }
+
+// TestSearchCommitsNamedRepoWithoutRepoList verifies that naming a repository
+// restricts the search to that repository with content-only authorization: no
+// repo:list is needed and the provider discovery path is never touched.
+func TestSearchCommitsNamedRepoWithoutRepoList(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "named", time.Now())}
+	env := newTestEnv(t, allowRules("commit:read"), fake)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{"team/app"}})
+	out := searchJSON(t, res)
+	if len(out.Commits) != 1 || out.Commits[0].Repo != "team/app" {
+		t.Fatalf("commits = %+v, want the named team/app commit", out.Commits)
+	}
+	if fake.listReposCalls != 0 {
+		t.Errorf("ListRepositories called %d times, want 0 for a named repository", fake.listReposCalls)
+	}
+	if fake.lastCommitRepo != "team/app" {
+		t.Errorf("ListCommits repo = %q, want team/app", fake.lastCommitRepo)
+	}
+	if out.Truncated {
+		t.Error("truncated = true, want false for a single named repository")
+	}
+}
+
+// TestSearchCommitsNamedRepoHiddenByListingDenyStillSearchable verifies that a
+// repository hidden from listing by a deny repo:list rule is still searchable
+// when named explicitly, because naming it uses content-only authorization.
+func TestSearchCommitsNamedRepoHiddenByListingDenyStillSearchable(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "by name", time.Now())}
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "deny", Capabilities: grants("repo:list")},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: grants("commit:read")},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	// Cross-repo (unnamed) stays hidden by the listing deny.
+	res := env.call(t, "search_commits", searchArgs())
+	out := searchJSON(t, res)
+	if len(out.Commits) != 0 {
+		t.Fatalf("cross-repo commits = %+v, want none when a listing deny hides the repository", out.Commits)
+	}
+
+	// Naming the repository bypasses the enumeration axis.
+	res = env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{"team/app"}})
+	out = searchJSON(t, res)
+	if len(out.Commits) != 1 || out.Commits[0].Repo != "team/app" {
+		t.Fatalf("named-repo commits = %+v, want the hidden team/app commit", out.Commits)
+	}
+	if fake.listReposCalls != 0 {
+		t.Errorf("ListRepositories called %d times, want 0 for a named repository", fake.listReposCalls)
+	}
+}
+
+// TestSearchCommitsNamedRepoWithoutGrantReturnsEmpty verifies that a named
+// repository without a commit:read grant yields an empty result, not a tool
+// error (the denial stays indistinguishable from an unknown repository).
+func TestSearchCommitsNamedRepoWithoutGrantReturnsEmpty(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "should not surface", time.Now())}
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{"team/app"}})
+	out := searchJSON(t, res)
+	if len(out.Commits) != 0 {
+		t.Fatalf("commits = %+v, want none without commit:read", out.Commits)
+	}
+	if fake.listCommitsCalls != 0 {
+		t.Errorf("ListCommits called %d times, want 0 without commit:read", fake.listCommitsCalls)
+	}
+}
+
+// TestSearchCommitsNamedRepoRepoReadPathsFilterFailsClosed verifies that a named
+// repository authorized only through a path-filtered repo:read grant fails
+// commit:read closed (there is no path in a commit search).
+func TestSearchCommitsNamedRepoRepoReadPathsFilterFailsClosed(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "should not surface", time.Now())}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapRepoRead,
+			Filter: policy.CapabilityFilter{Paths: policy.PathFilter{Include: []string{"docs/**"}}},
+		}},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{"team/app"}})
+	out := searchJSON(t, res)
+	if len(out.Commits) != 0 {
+		t.Fatalf("commits = %+v, want none (path-filtered repo:read fails closed)", out.Commits)
+	}
+	if fake.listCommitsCalls != 0 {
+		t.Errorf("ListCommits called %d times, want 0 for a path-filtered repo:read grant", fake.listCommitsCalls)
+	}
+}
+
+// TestSearchCommitsNamedRepoNoAIRepoOmitted verifies that a named .noai
+// repository without a noai exemption yields an empty result without leaking the
+// marker state.
+func TestSearchCommitsNamedRepoNoAIRepoOmitted(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "secret", time.Now())}
+	env := newTestEnv(t, allowRules("commit:read"), fake)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{"team/app"}})
+	out := searchJSON(t, res)
+	if len(out.Commits) != 0 {
+		t.Fatalf("commits = %+v, want none on a named .noai repository", out.Commits)
+	}
+	if fake.listCommitsCalls != 0 {
+		t.Errorf("ListCommits called %d times, want 0 on a .noai repository", fake.listCommitsCalls)
+	}
+	text := strings.ToLower(resultText(t, res))
+	if strings.Contains(text, "noai") || strings.Contains(text, "marker") {
+		t.Errorf("output leaked .noai state: %s", text)
+	}
+}
+
+// TestSearchCommitsNamedRepoInvalidPath verifies that a structurally invalid
+// repository path is reported as a tool error, not silently ignored.
+func TestSearchCommitsNamedRepoInvalidPath(t *testing.T) {
+	env := newTestEnv(t, allowRules("commit:read"), newFake())
+
+	for _, repo := range []string{"/abs", "a//b"} {
+		t.Run(repo, func(t *testing.T) {
+			res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{repo}})
+			if !res.IsError {
+				t.Fatalf("search_commits accepted invalid repo %q: %s", repo, resultText(t, res))
+			}
+		})
+	}
+}
+
+// TestSearchCommitsNamedRepoMixedValidInvalidErrors verifies that one invalid
+// entry in a repos list makes the whole call a tool error, even when other
+// entries are valid.
+func TestSearchCommitsNamedRepoMixedValidInvalidErrors(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "valid", time.Now())}
+	env := newTestEnv(t, allowRules("commit:read"), fake)
+
+	res := env.call(t, "search_commits", map[string]any{
+		"provider": "fake",
+		"repos":    []string{"team/app", "/abs"},
+	})
+	if !res.IsError {
+		t.Fatalf("search_commits accepted a mixed valid/invalid repos list: %s", resultText(t, res))
+	}
+}
+
+// TestSearchCommitsNamedRepoExplicitAuthorSkipsCurrentUser verifies that a named
+// repository combined with an explicit author never resolves the current
+// identity.
+func TestSearchCommitsNamedRepoExplicitAuthorSkipsCurrentUser(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "named", time.Now())}
+	env := newTestEnv(t, allowRules("commit:read"), fake)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": []string{"team/app"}, "author": "bob"})
+	if res.IsError {
+		t.Fatalf("search_commits: %s", resultText(t, res))
+	}
+	if fake.currentUserCalls != 0 {
+		t.Errorf("CurrentUser called %d times, want 0 for an explicit author", fake.currentUserCalls)
+	}
+	if fake.lastCommitOpts.AuthorQuery != "bob" {
+		t.Errorf("author query = %q, want bob", fake.lastCommitOpts.AuthorQuery)
+	}
+}
+
+// TestSearchCommitsNamedReposMultiRepoSearch verifies that a repos list
+// restricts the search to exactly those repositories with content-only
+// authorization: commits from every named repository are returned and no
+// repo:list discovery call is made.
+func TestSearchCommitsNamedReposMultiRepoSearch(t *testing.T) {
+	fake := newFake()
+	fake.commitsByRepo = map[string][]provider.Commit{
+		"team/a": {testCommit("aaaaaaaaaaaa", "from a", time.Now())},
+		"team/b": {testCommit("bbbbbbbbbbbb", "from b", time.Now())},
+	}
+	rules := []policy.RuleSpec{
+		{Repositories: []string{"team/a"}, Effect: "allow", Capabilities: grants("commit:read")},
+		{Repositories: []string{"team/b"}, Effect: "allow", Capabilities: grants("commit:read")},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "search_commits", map[string]any{
+		"provider": "fake",
+		"repos":    []string{"team/a", "team/b"},
+	})
+	out := searchJSON(t, res)
+	got := make(map[string]bool, len(out.Commits))
+	for _, commit := range out.Commits {
+		got[commit.Repo] = true
+	}
+	if !got["team/a"] || !got["team/b"] || len(out.Commits) != 2 {
+		t.Fatalf("commits = %+v, want one from each named repository", out.Commits)
+	}
+	if fake.listReposCalls != 0 {
+		t.Errorf("ListRepositories called %d times, want 0 for named repositories", fake.listReposCalls)
+	}
+	if out.Truncated {
+		t.Error("truncated = true, want false for two named repositories")
+	}
+}
+
+// TestSearchCommitsNamedReposDeduplicated verifies that repositories are
+// deduplicated on their canonical path, so differently written entries for the
+// same repository are searched only once and cannot produce duplicate commits.
+func TestSearchCommitsNamedReposDeduplicated(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "once", time.Now())}
+	env := newTestEnv(t, allowRules("commit:read"), fake)
+
+	res := env.call(t, "search_commits", map[string]any{
+		"provider": "fake",
+		"repos":    []string{"team/app", "Team/App"},
+	})
+	out := searchJSON(t, res)
+	if len(out.Commits) != 1 {
+		t.Fatalf("commits = %+v, want one after deduplication", out.Commits)
+	}
+	if fake.listCommitsCalls != 1 {
+		t.Errorf("ListCommits called %d times, want 1 after deduplication", fake.listCommitsCalls)
+	}
+}
+
+// TestSearchCommitsNamedReposCapped verifies that a repos list is capped at
+// maxSearchRepos like the discovery budget: only the first maxSearchRepos
+// entries (after deduplication) are searched and the result is marked
+// truncated.
+func TestSearchCommitsNamedReposCapped(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "c", time.Now())}
+	repos := make([]string, 0, maxSearchRepos+5)
+	for i := range maxSearchRepos + 5 {
+		repos = append(repos, fmt.Sprintf("team/r%02d", i))
+	}
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/**"},
+		Effect:       "allow",
+		Capabilities: grants("commit:read"),
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "search_commits", map[string]any{"provider": "fake", "repos": repos})
+	out := searchJSON(t, res)
+	if !out.Truncated {
+		t.Error("truncated = false, want true when repos exceeds maxSearchRepos")
+	}
+	if fake.listCommitsCalls != maxSearchRepos {
+		t.Errorf("ListCommits called %d times, want %d", fake.listCommitsCalls, maxSearchRepos)
+	}
+	if len(out.Commits) != maxSearchRepos {
+		t.Errorf("len(commits) = %d, want %d", len(out.Commits), maxSearchRepos)
+	}
+}

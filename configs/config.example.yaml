@@ -77,8 +77,11 @@ providers:
           # and only each repository's DEFAULT branch is searched. Candidate
           # repositories are enumerated like list_repositories: these literal
           # repositories are always searched (unless hidden by a listing deny),
-          # while provider-side discovery needs repo:list. Tag filters match
-          # project topics; paths and branches are not supported on commit:read,
+          # while provider-side discovery needs repo:list. An explicit `repos`
+          # list restricts the search to those repositories with content-only
+          # authorization: no repo:list is needed, so a repository hidden from
+          # listing is still searchable by name. Tag filters match project
+          # topics; paths and branches are not supported on commit:read,
           # and an active paths filter on a repo:read grant fails commit:read
           # closed.
           - commit:read

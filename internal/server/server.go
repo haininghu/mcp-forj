@@ -34,7 +34,7 @@ const (
 	truncatedMarker   = "\n[truncated]"
 
 	maxSearchResults  = 100 // commits returned by search_commits
-	maxSearchRepos    = 50  // discovered candidate repositories per search_commits (literals uncapped)
+	maxSearchRepos    = 50  // discovered candidates and named-repos cap per search_commits (literals uncapped)
 	maxCommitsPerRepo = 200 // commit match limit and scan budget per repository
 	maxAuthorBytes    = 255 // author filter length bound
 )
@@ -80,7 +80,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_repositories",
-		Description: "List repositories explicitly configured (always) plus repositories discovered through the provider API when the repo:list capability is granted. Discovered .noai repositories are omitted unless the repo:list grant is exempted. The provider argument is required.",
+		Description: "List repositories explicitly configured plus repositories discovered through the provider API when the repo:list capability is granted. Literal repositories are returned unless a listing deny (a deny rule without capabilities, or one listing repo:list) hides them or an active repo:list tag filter excludes them; discovered .noai repositories are omitted unless the repo:list grant is exempted.",
 	}, s.listRepositories)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -120,7 +120,7 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "search_commits",
-		Description: "Search commits by one author across repositories (cross-repo, e.g. \"where and when did I commit?\"). Candidate repositories are enumerated exactly like list_repositories: literal commit:read repositories are always searched and provider-side discovery requires the repo:list capability. Defaults to the authenticated user; an explicit author is a provider-side name/email search. Requires the commit:read capability (implied by repo:read) and is .noai-protected unless the grant is exempted. Only each repository's default branch is searched, and repositories hidden by a listing deny are omitted.",
+		Description: "Search the commit history of repositories for one author (default: the authenticated user), newest first, default branch only. IMPORTANT: if the request names one or more repositories, pass them in `repos` (namespace/project paths) to restrict the search to exactly those repositories; that path is content-only and needs the commit:read capability (implied by repo:read), with no repo:list required. If `repos` is omitted, the search covers the literal commit:read repositories and, when repo:list is granted, additionally discovers repositories. Optional filters: `since`/`until` (inclusive committer-date range) and `query` (case-insensitive substring of the commit message). Repositories you cannot access contribute no commits. .noai-protected unless the grant is exempted.",
 	}, s.searchCommits)
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -205,12 +205,13 @@ type gitRemoteInput struct {
 }
 
 type searchCommitsInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
-	Author   string `json:"author,omitempty" jsonschema:"optional author filter (provider-side name/email search); defaults to the authenticated user"`
-	Since    string `json:"since,omitempty" jsonschema:"optional inclusive lower bound on the committer date, RFC3339 or YYYY-MM-DD"`
-	Until    string `json:"until,omitempty" jsonschema:"optional inclusive upper bound on the committer date, RFC3339 or YYYY-MM-DD"`
-	Query    string `json:"query,omitempty" jsonschema:"optional case-insensitive substring matched against the commit message (e.g. a ticket id)"`
-	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of commits (capped at 100)"`
+	Provider string   `json:"provider" jsonschema:"logical provider name"`
+	Repos    []string `json:"repos,omitempty" jsonschema:"optional list of repository paths (namespace/project) to search, e.g. [\"team/service-a\"]; set this whenever the request names repositories. When omitted, the literal commit:read repositories are searched and, if repo:list is granted, discovered ones too. At most 50 are searched."`
+	Author   string   `json:"author,omitempty" jsonschema:"optional author filter (provider-side name/email search); defaults to the authenticated user"`
+	Since    string   `json:"since,omitempty" jsonschema:"optional inclusive lower bound on the committer date, RFC3339 or YYYY-MM-DD"`
+	Until    string   `json:"until,omitempty" jsonschema:"optional inclusive upper bound on the committer date, RFC3339 or YYYY-MM-DD; a date-only value covers the whole day (UTC)"`
+	Query    string   `json:"query,omitempty" jsonschema:"optional case-insensitive substring matched client-side against the commit message (e.g. a ticket id)"`
+	Limit    int      `json:"limit,omitempty" jsonschema:"optional maximum number of commits (capped at 100)"`
 }
 
 type configuredPathFilter struct {
@@ -977,9 +978,47 @@ func (s *Server) searchCommits(ctx context.Context, _ *mcp.CallToolRequest, in s
 	}
 	opts.Since, opts.Until = since, until
 
-	candidates, truncated, err := s.searchCommitCandidates(ctx, p, in.Provider)
-	if err != nil {
-		return nil, nil, err
+	var (
+		candidates []commitCandidate
+		truncated  bool
+	)
+	if len(in.Repos) > 0 {
+		// Explicitly named repositories restrict the search to exactly that
+		// set. This is pure content authorization, exactly like read_file: no
+		// repo:list and no discovery, so a repository hidden from listing by a
+		// deny repo:list rule is still searchable by name. Validation and
+		// canonicalization failures are tool errors; content denials are
+		// handled per candidate below and stay indistinguishable from an
+		// unknown repository. The list is deduplicated on the canonical path
+		// and capped at maxSearchRepos, consistently with the discovery budget.
+		seen := make(map[string]bool, len(in.Repos))
+		for _, raw := range in.Repos {
+			repo, err := validateRepo(raw)
+			if err != nil {
+				return nil, nil, err
+			}
+			repo, err = p.CanonicalRepository(repo)
+			if err != nil {
+				return nil, nil, err
+			}
+			if seen[repo] {
+				continue
+			}
+			if len(candidates) >= maxSearchRepos {
+				truncated = true
+				continue
+			}
+			seen[repo] = true
+			// Topics stay unknown; the per-candidate loop below fetches them
+			// only under a commit:read tag constraint (it validates and
+			// canonicalizes again, which is idempotent).
+			candidates = append(candidates, commitCandidate{repo: repo})
+		}
+	} else {
+		candidates, truncated, err = s.searchCommitCandidates(ctx, p, in.Provider)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	if len(candidates) == 0 {
 		// No candidate repository: return without resolving the current

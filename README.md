@@ -74,14 +74,16 @@ opencode loads its configuration once at startup, so restart it after editing.
 | `rebase_merge_request`     | `mr:rebase`   | Trigger an asynchronous merge request rebase.   |
 | `merge_merge_request`      | `mr:merge`    | Merge a merge request (returns the merged MR).  |
 | `read_file`                | `repo:read`   | Read a repository file at an optional ref.      |
-| `search_commits`           | `commit:read`² | Search one author's commits across repositories. |
+| `search_commits`           | `commit:read`² | Search one author's commits (across or in named repositories). |
 | `git_remote`               | `repo:read`   | Return the git proxy clone URL (token never returned). |
 
 ¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
 [GitLab token permissions](#gitlab-token-permissions).
 
 ² `search_commits` enumerates candidate repositories like `list_repositories`: literal `commit:read`
-repositories need no `repo:list`, but provider-side discovery requires `repo:list`.
+repositories need no `repo:list`, but provider-side discovery requires `repo:list`. An explicit `repos`
+list restricts the search to those repositories with content-only authorization (no `repo:list` and no
+discovery), so a repository hidden by a listing deny is still searchable by name.
 
 `git_remote` is registered only while `server.git_proxy` is enabled — see [Git proxy](#git-proxy).
 
@@ -158,8 +160,10 @@ and [`ai/architecture.md`](ai/architecture.md)):
 - `repo:read` – read repository files; also gates **git fetch/clone** through the git proxy.
 - `commit:read` – read commit metadata/messages of the **default branch** (`search_commits`). Also
   granted by `repo:read` (same filter; an active `paths` filter fails closed); tag filters match
-  project topics. `search_commits` enumerates candidates like `list_repositories`, so provider-side
-  discovery additionally needs `repo:list`.
+  project topics. Without an explicit `repos` list, `search_commits` enumerates candidates like
+  `list_repositories`, so provider-side discovery additionally needs `repo:list`; an explicit `repos`
+  list restricts the search to those repositories and needs no `repo:list` (content-only, like
+  `read_file`), capped at 50 repositories.
 - `mr:read` – view merge request metadata and notes (no diffs).
 - `mr:diff` – read merge request file diffs (`get_merge_request_diff`).
 - `mr:comment` – comment on merge requests.
@@ -353,10 +357,13 @@ the **Developer** role (push access to the source branch); merging also needs a 
   authenticated user (fail-closed if the identity is unknown), and is bounded (100 results, at most 50
   discovered candidate repos, 200 commits inspected per repo). Candidate enumeration mirrors
   `list_repositories`: literal `commit:read` repositories are searched without `repo:list` and are not
-  capped by the 50-repo discovery limit, while provider-side discovery requires `repo:list`. It
-  requires `commit:read`, which `repo:read` also grants (with the same filter; an active `paths`
-  filter fails it closed). Repositories hidden by a listing deny are omitted, and emails/topics are
-  never returned.
+  capped by the 50-repo discovery limit, while provider-side discovery requires `repo:list`. An
+  explicit `repos` list restricts the search to those repositories with content-only authorization
+  (no `repo:list` and no discovery, capped at 50 repositories after deduplication), so a repository
+  hidden by a listing deny is still searchable by name.
+  It requires `commit:read`, which `repo:read` also grants (with the same filter; an active `paths`
+  filter fails it closed). Otherwise repositories hidden by a listing deny are omitted, and
+  emails/topics are never returned.
 - `mr:write` and `repo:write` have no MCP tool — they gate git push and its push options through the
   proxy.
 - Git proxy (fail-closed): an active `paths` filter or a tag filter on `repo:read`/`repo:write`

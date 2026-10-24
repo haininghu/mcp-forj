@@ -177,7 +177,11 @@ access at all. Push
 options are parsed and gated last, before forwarding: `merge_request.*` needs `mr:write`, auto-merge
 additionally `mr:merge`, everything else denies (see invariant 13).
 
-`search_commits` separates enumeration from content. It enumerates candidates exactly like
+`search_commits` separates enumeration from content. An optional `repos` list restricts the search to
+those exact repositories with content-only authorization (no `repo:list` and no discovery, exactly
+like `read_file`, so a repository hidden by a listing deny is still searchable by name); each entry
+is validated and canonicalized, the list is deduplicated and capped at `maxSearchRepos`. With `repos`
+omitted it enumerates candidates exactly like
 `list_repositories`: literal `commit:read` repositories via `Guard.StaticRepositoriesFor` (which
 applies the listing deny; the active `repo:list` filter is applied separately), and provider-side
 discovery only behind

@@ -36,6 +36,11 @@ authorization and a discovery rule that cannot expose repositories the agent may
 - **Time range.** `since`/`until` bound the committer date inclusively (RFC3339 or `YYYY-MM-DD`).
 - **Text.** An optional `query` substring is matched case-insensitively against the commit
   message, client-side.
+- **Scope.** An optional `repos` list restricts the search to exactly those repositories. Naming them
+  bypasses the enumeration axis (no `repo:list`), because no repository name has to be discovered;
+  only the `commit:read` content axis applies, exactly as `read_file` authorizes one repository. The
+  list is validated and canonicalized per entry, deduplicated on the canonical path and capped at
+  `maxSearchRepos`.
 
 ### Visibility gate
 
@@ -51,6 +56,12 @@ separate, second step (axis separation):
   `list_repositories` hides.
 - **Content (`commit:read`).** Each candidate is then authorized for `commit:read` (policy
   pre-check, tag evaluation against project topics, `.noai` overlay) before its commits are fetched.
+- **Explicitly named repositories.** An optional `repos` list bypasses the enumeration axis
+  entirely: no `repo:list` is required (and no discovery runs), because the caller already supplies
+  the names and nothing has to be found. Only the `commit:read` content axis applies, exactly like
+  `read_file`'s single-repository content authorization. A repository hidden from listing by a
+  `deny repo:list` rule is therefore still searchable when named explicitly; the denial still applies
+  to the unnamed, discovery-based search.
 
 The two axes are independent: `repo:read` implies `commit:read` for the content axis, but it does not
 enable discovery. A glob-only `commit:read`/`repo:read` grant searches only its literal repositories
@@ -80,7 +91,8 @@ and additionally shows `authored_at`.
 ### Budgets
 
 At most 100 results, 50 discovered candidate repositories (literal candidates are not capped, as in
-`list_repositories`) and 200 commits inspected per repository. The per-repository budget is passed as
+`list_repositories`; an explicit `repos` list is capped at the same number after deduplication) and
+200 commits inspected per repository. The per-repository budget is passed as
 both a match limit and a scan limit (`CommitListOptions.ScanLimit`): the match limit caps matched
 commits, while the scan limit caps how many raw commits are inspected across pages, so a fuzzy
 server-side author prefilter that over-matches cannot page without bound. `truncated` is set only

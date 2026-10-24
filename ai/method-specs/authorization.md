@@ -86,9 +86,10 @@ deny; the active `repo:list` filter is applied separately), and provider-side di
 `Guard.AuthorizeList`, evaluating each discovered repository with
 `Guard.EvaluateWithTags(repo:list)` and the `repo:list` `.noai` overlay. It then authorizes the
 `commit:read` content axis per candidate (`Guard.AuthorizeRepoCapability`, `Guard.HasTagConstraint`,
-`Guard.EvaluateWithTags`, `Guard.CheckNoAI`), reusing topics already known from enumeration. It
-therefore never searches a repository a listing deny hides from `list_repositories` and never exposes
-one discovery did not yield.
+`Guard.EvaluateWithTags`, `Guard.CheckNoAI`), reusing topics already known from enumeration. With
+`repos` omitted it therefore never searches a repository a listing deny hides from `list_repositories`
+and never exposes one discovery did not yield; an explicit `repos` list bypasses the enumeration axis
+by design (content-only, like `read_file`).
 
 Decision reasons (all fail closed unless allowed):
 
