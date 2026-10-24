@@ -13,6 +13,24 @@ See [`AGENTS.md`](AGENTS.md) for contributor/agent instructions and
 [`configs/config.example.yaml`](configs/config.example.yaml) for a documented configuration.
 Architecture decisions, bug analyses and per-tool specs live under [`ai/`](ai/README.md).
 
+## Quick start
+
+```bash
+# 1. install the latest release (or build from a checkout, see Build)
+go install github.com/haininghu/mcp-forj/cmd/mcp-forj@latest
+
+# 2. create a config from configs/config.example.yaml (in the repository) and set a provider token
+export GITLAB_WORK_TOKEN="<your-token>"
+
+# 3. register the binary in opencode.json (see below) and restart opencode
+```
+
+`go install` places `mcp-forj` in `$(go env GOPATH)/bin`; use that path as `command` in the host
+configuration. The server speaks MCP over **stdio**; all logging goes to stderr. Access is
+**deny-by-default**: a tool call is denied until the matching capability is granted to the repository
+in your configuration. See [Requirements](#requirements), [Build](#build), [Run](#run) and
+[Use with opencode](#use-with-opencode) for the details.
+
 ## Status
 
 Early first draft. The API and configuration format may still change.
@@ -29,6 +47,9 @@ make build        # -> bin/mcp-forj
 make test         # run the test suite
 make cover        # coverage report
 ```
+
+From a local checkout, `go install ./cmd/mcp-forj` installs the binary into `$(go env GOPATH)/bin`
+instead.
 
 ## Run
 
@@ -375,6 +396,52 @@ the **Developer** role (push access to the source branch); merging also needs a 
   filter miss and an unlisted capability fall through to later rules, and a broad `allow` above a
   specific `deny` hides the denial (first-match-wins). Put specific `deny` rules first. Unavailable
   filter information (unknown tags/topics, empty path, missing branch) still fails closed.
+
+## Releases
+
+Pushing a tag such as `v0.1.0` runs the release workflow, which tests the code and publishes binaries
+for Linux and macOS (amd64/arm64) and Windows (amd64) via [GoReleaser](https://goreleaser.com/) (see
+`.goreleaser.yaml`):
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Every push and pull request runs [golangci-lint](https://golangci-lint.run/) for bugs and security
+issues (see `.github/workflows/golangci-lint.yaml` and `.golangci.yml`).
+
+## Commit conventions
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<optional scope>): <description>
+
+[optional body]
+
+[optional footer(s)]
+```
+
+| Type       | Purpose                                                 |
+|------------|---------------------------------------------------------|
+| `feat`     | New feature                                             |
+| `fix`      | Bug fix                                                 |
+| `docs`     | Documentation only                                      |
+| `refactor` | Code change that neither fixes a bug nor adds a feature |
+| `test`     | Adding or correcting tests                              |
+| `chore`    | Build, tooling, dependencies, ignore files              |
+
+Examples:
+
+```
+feat(policy): deny commit:read on archived repositories
+fix(server): fail closed when the current user has no email
+docs: document the commit message format
+```
+
+Use the imperative mood, lowercase after the colon, and no trailing period. Mark breaking changes with
+`!` (`feat(config)!: ...`) and a `BREAKING CHANGE:` footer.
 
 ## Docs
 

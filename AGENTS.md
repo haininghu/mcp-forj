@@ -85,7 +85,10 @@ Run these before declaring work done (all must pass):
 - Markdown lines are at most **120 characters**.
 - No secrets in the repo. `configs/config.yaml` and `opencode.json` are git-ignored. Tokens are read
   from config (literal or `${NAME}` env reference) and never logged or returned.
-- Small, focused commits with a `type:` prefix: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
+- Use [Conventional Commits](https://www.conventionalcommits.org/):
+  `<type>(<optional scope>): <description>`, types `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
+  Imperative mood, lowercase after the colon, no trailing period; mark breaking changes with `!` and a
+  `BREAKING CHANGE:` footer. Keep commits small and focused.
 - Prefer Go **1.27 stdlib** helpers: `slices`, `maps`, `min`/`max`, `errors.AsType`, `strings.Cut`.
 - Do not add dependencies without a clear need; the pinned deps are the MCP SDK, the GitLab client,
   `doublestar/v4` and `yaml.v3`.
