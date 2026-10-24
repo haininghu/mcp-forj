@@ -46,6 +46,7 @@ Early first draft. The API and configuration format may still change.
 make build        # -> bin/mcp-forj
 make test         # run the test suite
 make cover        # coverage report
+make check        # fmt-check + vet + test (writes nothing)
 ```
 
 From a local checkout, `go install ./cmd/mcp-forj` installs the binary into `$(go env GOPATH)/bin`

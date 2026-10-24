@@ -3,7 +3,7 @@ BINARY := mcp-forj
 CMD := ./cmd/mcp-forj
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: all build test test-race test-e2e cover vet fmt tidy lint run clean
+.PHONY: all build test test-race test-e2e cover vet fmt fmt-check tidy lint check run clean
 
 all: fmt vet test build
 
@@ -31,11 +31,18 @@ vet:
 fmt:
 	gofmt -s -w .
 
+# Fails when gofmt would change any file; reads nothing, writes nothing.
+fmt-check:
+	@out=$$(gofmt -s -l .); if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
 tidy:
 	go mod tidy
 
 lint:
 	golangci-lint run
+
+# check is what a pull request must pass (writes nothing).
+check: fmt-check vet test
 
 # Run the server against a config (defaults to configs/config.yaml).
 run:

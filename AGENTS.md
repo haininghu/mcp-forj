@@ -41,8 +41,10 @@ make test-e2e  # go test -tags e2e ./...  (end-to-end tests)
 make cover     # coverage report
 make vet       # go vet ./...
 make fmt       # gofmt -s -w .
+make fmt-check # fail if gofmt -s would change any file (writes nothing)
 make tidy      # go mod tidy
 make lint      # golangci-lint run
+make check     # fmt-check + vet + test (writes nothing)
 make run       # go run ./cmd/mcp-forj -config ${CONFIG:-configs/config.yaml}
 ```
 
