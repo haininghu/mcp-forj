@@ -45,7 +45,9 @@ block or a provider failure omits the candidate (empty result, counted server-si
 - `GET /projects/:id/repository/commits` (default branch; `ref_name` never set)
 - `GET /user` (only when `author` is omitted, to resolve the current identity)
 
-Fine-grained permission: **Repository: Read** (commits); `read_user` for `/user`.
+Fine-grained permission: **Commit: Read** (project access) for the commits endpoint; `read_user` for
+`/user` (default author). Note: `read_file` needs the separate **Repository: Read** permission, which
+does not cover commit search.
 
 ## Authorization
 

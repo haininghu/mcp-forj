@@ -337,7 +337,7 @@ Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **g
 |--------------------------------------|-------------------------------------------------------------------------------|
 | `list_repositories` (`repo:list`)    | **Project: Read**                                                             |
 | `read_file` (`repo:read`, `.noai`)   | **Repository: Read**                                                          |
-| `search_commits` (`commit:read`)     | **Repository: Read** (+ `read_user` for the email)                            |
+| `search_commits` (`commit:read`)     | **Commit: Read** (+ `read_user` for the `/user` default)                      |
 | `search_commits` discovery           | **Project: Read** (when `repo:list` is granted)                               |
 | `mr:read` (list/get)                 | **Merge Request: Read**                                                       |
 | `get_merge_request_diff` (`mr:diff`) | **Merge Request: Read**                                                       |
@@ -348,6 +348,10 @@ Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **g
 | git fetch/clone via proxy (`repo:read`) | **Repository: Read**                                                       |
 | git push via proxy (`repo:write`)    | **Repository: Write**                                                         |
 | `mr:write` (push options)            | Merge Request: Create/Update/Close                                            |
+
+`search_commits` calls `GET /projects/:id/repository/commits`, which requires **Commit: Read**. The
+**Repository: Read** permission used by `read_file` does **not** cover it: a token can read files and
+still get HTTP 403 on commit search.
 
 Every **non-exempt** operation also reads the `.noai` marker file, so **Repository: Read** (on the
 default branch) is required regardless of the granted capabilities; otherwise those operations fail

@@ -199,6 +199,8 @@ author resolves via `CurrentUser` (fail-closed). `commit:read` is authorized by 
 or by a `repo:read` grant (same filter; an active `paths` filter fails closed). Enumeration is seeded
 from literal grants (direct `commit:read` or implied by `repo:read`) plus `repo:list` provider search
 prefixes, bounded by fixed budgets; the omitted/limit counters are logged server-side only.
+Fine-grained tokens need the **Commit: Read** project permission for the commits endpoint; the
+**Repository: Read** permission used by `read_file` (and the `.noai` marker read) does not cover it.
 
 ## Where to look
 

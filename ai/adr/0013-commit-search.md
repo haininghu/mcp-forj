@@ -117,6 +117,9 @@ Emails, topics and labels are never returned in tool output or logs.
 - A `commit:read` grant without `noai: allow` is denied on `.noai` repositories, and a repository
   hidden from listing is omitted (and counted server-side only), so `.noai` repositories stay
   indistinguishable from unknown ones.
+- Fine-grained tokens need the **Commit: Read** project permission for the commits endpoint. The
+  **Repository: Read** permission used by `read_file` (and the `.noai` marker read) does not cover
+  it, so a token can read files and still get HTTP 403 on commit search.
 - The cross-repo search costs one topic fetch (only under a tag constraint) and one commit
   enumeration per candidate repository; the candidate set is capped and the counts are not
   returned to the client.
