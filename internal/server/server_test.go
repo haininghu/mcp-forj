@@ -739,10 +739,14 @@ func TestListRepositoriesStaticWithoutCapability(t *testing.T) {
 		t.Errorf("provider ListRepositories called %d times, want 0 for static-only listing", fake.listReposCalls)
 	}
 
-	// provider is required: omitting it must fail rather than list anything.
+	// With exactly one registered provider, an omitted provider defaults to it.
 	res = env.call(t, "list_repositories", map[string]any{})
-	if !res.IsError {
-		t.Fatalf("list_repositories with omitted provider succeeded: %s", resultText(t, res))
+	if res.IsError {
+		t.Fatalf("list_repositories with omitted provider: %s", resultText(t, res))
+	}
+	out = repoJSON(t, res)
+	if len(out.Repositories) != 1 || out.Repositories[0].Path != "team/app" {
+		t.Fatalf("omitted-provider repositories = %v, want [team/app]", out.Repositories)
 	}
 }
 
@@ -1051,7 +1055,7 @@ func TestListRepositoriesProviderSelection(t *testing.T) {
 	}
 }
 
-func TestListRepositoriesSchemaRequiresProvider(t *testing.T) {
+func TestListRepositoriesSchemaProviderOptional(t *testing.T) {
 	env := newTestEnv(t, listReposRules("archive/**"), newFake())
 
 	tools, err := env.session.ListTools(context.Background(), nil)
@@ -1076,14 +1080,47 @@ func TestListRepositoriesSchemaRequiresProvider(t *testing.T) {
 		t.Fatalf("unmarshal schema: %v", err)
 	}
 	required, _ := parsed["required"].([]any)
-	found := false
 	for _, field := range required {
 		if field == "provider" {
-			found = true
+			t.Fatalf("provider must be optional in the input schema: %s", data)
 		}
 	}
-	if !found {
-		t.Fatalf("provider is not required in list_repositories input schema: %s", data)
+	properties, _ := parsed["properties"].(map[string]any)
+	if _, ok := properties["provider"]; !ok {
+		t.Fatalf("provider property missing from the input schema: %s", data)
+	}
+}
+
+// TestSingleProviderDefaultsForTools verifies that an omitted `provider` is
+// resolved to the only registered provider for both policy checks and the
+// provider call.
+func TestSingleProviderDefaultsForTools(t *testing.T) {
+	fake := newFake()
+	fake.commits = []provider.Commit{testCommit("aaaaaaaaaaaa", "commit", time.Now())}
+	env := newTestEnv(t, allowRules("repo:read", "commit:read"), fake)
+
+	res := env.call(t, "read_file", map[string]any{"repo": "team/app", "path": "README.md"})
+	if res.IsError {
+		t.Fatalf("read_file without provider: %s", resultText(t, res))
+	}
+	var file readFileOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &file); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if file.Provider != "fake" || file.Content != "hello world" {
+		t.Errorf("read_file = %+v, want provider fake and the file content", file)
+	}
+
+	res = env.call(t, "search_commits", map[string]any{"repos": []string{"team/app"}})
+	if res.IsError {
+		t.Fatalf("search_commits without provider: %s", resultText(t, res))
+	}
+	var out searchCommitsOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(out.Commits) != 1 || out.Commits[0].Provider != "fake" {
+		t.Fatalf("commits = %+v, want one from fake", out.Commits)
 	}
 }
 

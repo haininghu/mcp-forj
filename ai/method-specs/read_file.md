@@ -8,7 +8,7 @@ Read a repository file at an optional ref.
 
 | Field    | Type   | Required | Notes                                              |
 |----------|--------|----------|----------------------------------------------------|
-| provider | string | yes      | Logical provider name.                             |
+| provider | string | no       | Optional with exactly one provider (defaults to it). |
 | repo     | string | yes      | Canonical `namespace/project`.                     |
 | path     | string | yes      | Repository-relative path; traversal is rejected.   |
 | ref      | string | no       | Git ref; empty means the default branch (`HEAD`).  |

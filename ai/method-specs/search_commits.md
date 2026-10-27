@@ -11,7 +11,7 @@ the search to those named repositories (content-only authorization, see below).
 
 | Field    | Type     | Required | Notes                                                        |
 |----------|----------|----------|--------------------------------------------------------------|
-| provider | string   | yes      | Logical provider name; must be registered.                   |
+| provider | string   | no       | Optional with exactly one provider (defaults to it).         |
 | repos    | []string | no       | Restrict to these repositories (namespace/project); empty/omitted = enumerated set. |
 | author   | string   | no       | Provider-side name/email search; defaults to the current user.|
 | since    | string   | no       | Inclusive lower bound on the committer date, RFC3339 or `YYYY-MM-DD`. |

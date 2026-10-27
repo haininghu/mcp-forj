@@ -158,7 +158,8 @@ Authorization is the product. These rules are security-critical:
 
 Every capability-gated tool follows the same pipeline:
 
-1. Resolve the provider from the registry by name (`provider` is required).
+1. Resolve the provider from the registry by name. `provider` is optional when exactly one provider is
+   configured (it defaults to that provider) and required otherwise.
 2. Validate arguments (bounds, path traversal, etc.).
 3. Optional **policy-only pre-check**: `Guard.AuthorizeRepoCapability` (ignores tags, no marker).
 4. **Fetch metadata needed for tags** when a rule that could apply carries a tag constraint

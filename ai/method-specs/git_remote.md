@@ -9,7 +9,7 @@ client authentication mode.
 
 | Field    | Type   | Required | Notes                          |
 |----------|--------|----------|--------------------------------|
-| provider | string | yes      | Logical provider name.         |
+| provider | string | no       | Optional with exactly one provider (defaults to it). |
 | repo     | string | yes      | Canonical `namespace/project`. |
 
 ## Required capability
@@ -25,7 +25,8 @@ None (local URL resolution). The only provider call is the `.noai` marker check 
 ## Authorization
 
 1. Validate and clean the repository path; reject absolute paths, backslashes, control characters.
-2. Resolve the provider from the registry (`provider` is required).
+2. Resolve the provider from the registry: `provider` is optional when exactly one provider is
+   configured (it defaults to that provider) and required otherwise.
 3. `Guard.Authorize(repo:read)` — repository-level and branch-less, tags unknown, `.noai` checked
    on the default branch. The tool sees exactly what the proxy's own fetch gate would allow.
 4. Only after authorization: `gitproxy.Server.RemoteURL(provider, repo)` builds the URL from the

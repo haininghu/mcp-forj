@@ -9,7 +9,7 @@ List merge-request **metadata** (no diffs) for a repository, enforcing an active
 
 | Field    | Type   | Required | Notes                                              |
 |----------|--------|----------|----------------------------------------------------|
-| provider | string | yes      | Logical provider name.                             |
+| provider | string | no       | Optional with exactly one provider (defaults to it). |
 | repo     | string | yes      | Canonical `namespace/project`.                     |
 | state    | string | no       | Provider-side state filter (e.g. `opened`).        |
 | limit    | int    | no       | Max results; default 100, capped 100.              |

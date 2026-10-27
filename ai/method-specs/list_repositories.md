@@ -9,7 +9,7 @@ discovered through the provider API when `repo:list` is granted.
 
 | Field    | Type   | Required | Notes                                              |
 |----------|--------|----------|----------------------------------------------------|
-| provider | string | yes      | Logical provider name; must be registered.         |
+| provider | string | no       | Optional with exactly one provider (defaults to it). |
 | search   | string | no       | Provider-side search term; passed verbatim.        |
 | limit    | int    | no       | Bounds **discovered** repos; default 100, max 1000.|
 

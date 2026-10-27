@@ -99,6 +99,10 @@ opencode loads its configuration once at startup, so restart it after editing.
 | `search_commits`           | `commit:read`² | Search one author's commits (across or in named repositories). |
 | `git_remote`               | `repo:read`   | Return the git proxy clone URL (token never returned). |
 
+Every tool that takes a `provider` argument treats it as optional when exactly one provider is
+configured: it defaults to that provider and the resolved name is returned in the output. With
+multiple providers the argument remains required.
+
 ¹ The GitLab **notes** endpoints are additionally governed by the **Work Item** permission; see
 [GitLab token permissions](#gitlab-token-permissions).
 

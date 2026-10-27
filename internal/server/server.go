@@ -143,69 +143,69 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 type listConfiguredRulesInput struct{}
 
 type listRepositoriesInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Search   string `json:"search,omitempty" jsonschema:"optional provider-side search term; when omitted, search prefixes are derived from the repo:list rules"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of discovered repositories (capped at 1000); configured repositories are always returned"`
 }
 
 type listMergeRequestsInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	State    string `json:"state,omitempty" jsonschema:"optional merge request state filter"`
 	Limit    int    `json:"limit,omitempty" jsonschema:"optional maximum number of results (capped at 100)"`
 }
 
 type getMergeRequestInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
 type getMergeRequestDiffInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
 type listMergeRequestNotesInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
 type addMergeRequestNoteInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 	Body     string `json:"body" jsonschema:"comment text"`
 }
 
 type rebaseMergeRequestInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
 type mergeMergeRequestInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
 type readFileInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 	Path     string `json:"path" jsonschema:"repository-relative file path"`
 	Ref      string `json:"ref,omitempty" jsonschema:"optional git ref; defaults to the default branch"`
 }
 
 type gitRemoteInput struct {
-	Provider string `json:"provider" jsonschema:"logical provider name"`
+	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
 }
 
 type searchCommitsInput struct {
-	Provider string   `json:"provider" jsonschema:"logical provider name"`
+	Provider string   `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repos    []string `json:"repos,omitempty" jsonschema:"optional list of repository paths (namespace/project) to search, e.g. [\"team/service-a\"]; set this whenever the request names repositories. When omitted, the literal commit:read repositories are searched and, if repo:list is granted, discovered ones too. At most 50 are searched."`
 	Author   string   `json:"author,omitempty" jsonschema:"optional author filter (provider-side name/email search); defaults to the authenticated user"`
 	Since    string   `json:"since,omitempty" jsonschema:"optional inclusive lower bound on the committer date, RFC3339 or YYYY-MM-DD"`
@@ -418,13 +418,9 @@ func (s *Server) listRepositories(ctx context.Context, _ *mcp.CallToolRequest, i
 		limit = maxRepoResults
 	}
 
-	name := in.Provider
-	if name == "" {
-		return nil, nil, errors.New("provider is required")
-	}
-	p, ok := s.registry.Get(name)
-	if !ok {
-		return nil, nil, fmt.Errorf("unknown provider %q", name)
+	p, name, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	static, err := s.guard.StaticRepositories(name)
@@ -580,10 +576,11 @@ func (s *Server) listMergeRequests(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -653,10 +650,11 @@ func (s *Server) getMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -687,10 +685,11 @@ func (s *Server) getMergeRequestDiff(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -760,10 +759,11 @@ func (s *Server) listMergeRequestNotes(ctx context.Context, _ *mcp.CallToolReque
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -813,10 +813,11 @@ func (s *Server) addMergeRequestNote(ctx context.Context, _ *mcp.CallToolRequest
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -854,10 +855,11 @@ func (s *Server) rebaseMergeRequest(ctx context.Context, _ *mcp.CallToolRequest,
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -898,10 +900,11 @@ func (s *Server) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -943,10 +946,11 @@ func (s *Server) searchCommits(ctx context.Context, _ *mcp.CallToolRequest, in s
 	if limit <= 0 || limit > maxSearchResults {
 		limit = maxSearchResults
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 
 	var opts provider.CommitListOptions
 	if author := strings.TrimSpace(in.Author); author != "" {
@@ -1323,13 +1327,26 @@ func formatCommitTime(t time.Time) string {
 	return t.UTC().Format("2006-01-02T15:04:05Z")
 }
 
-// resolveProvider resolves a provider by name without authorization.
-func (s *Server) resolveProvider(providerName string) (provider.Provider, error) {
+// resolveProvider resolves a provider by name without authorization. An empty
+// name selects the single registered provider; with no or multiple providers it
+// is an error. It returns the canonical name so callers can reuse it for policy
+// checks and output.
+func (s *Server) resolveProvider(providerName string) (provider.Provider, string, error) {
+	if providerName == "" {
+		switch names := s.registry.Names(); len(names) {
+		case 0:
+			return nil, "", errors.New("no provider is configured")
+		case 1:
+			providerName = names[0]
+		default:
+			return nil, "", errors.New("provider is required when multiple providers are configured")
+		}
+	}
 	p, ok := s.registry.Get(providerName)
 	if !ok {
-		return nil, fmt.Errorf("unknown provider %q", providerName)
+		return nil, "", fmt.Errorf("unknown provider %q", providerName)
 	}
-	return p, nil
+	return p, providerName, nil
 }
 
 // tagSetFromMR converts merge request labels into a policy tag set.
@@ -1361,10 +1378,11 @@ func (s *Server) readFile(ctx context.Context, _ *mcp.CallToolRequest, in readFi
 		return nil, nil, err
 	}
 	in.Ref = ref
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err
@@ -1425,10 +1443,11 @@ func (s *Server) handleGitRemote(ctx context.Context, _ *mcp.CallToolRequest, in
 	if err != nil {
 		return nil, nil, err
 	}
-	p, err := s.resolveProvider(in.Provider)
+	p, providerName, err := s.resolveProvider(in.Provider)
 	if err != nil {
 		return nil, nil, err
 	}
+	in.Provider = providerName
 	repo, err = p.CanonicalRepository(repo)
 	if err != nil {
 		return nil, nil, err

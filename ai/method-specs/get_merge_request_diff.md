@@ -8,7 +8,7 @@ Fetch the file diffs of a merge request.
 
 | Field    | Type  | Required | Notes                       |
 |----------|-------|----------|-----------------------------|
-| provider | string| yes      | Logical provider name.      |
+| provider | string| no       | Optional with exactly one provider (defaults to it). |
 | repo     | string| yes      | Canonical `namespace/project`.|
 | number   | int64 | yes      | Positive MR number (`iid`). |
 
