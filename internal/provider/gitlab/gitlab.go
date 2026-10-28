@@ -453,6 +453,30 @@ func (c *Client) MergeMergeRequest(ctx context.Context, repo string, number int6
 	return &out, nil
 }
 
+// UpdateMergeRequestLabels implements provider.Provider. It adds and/or removes
+// labels with the add_labels/remove_labels options; the full-replace `labels`
+// field is never used. At least one of add or remove must be non-empty.
+func (c *Client) UpdateMergeRequestLabels(ctx context.Context, repo string, number int64, add, remove []string) (*provider.MergeRequest, error) {
+	if len(add) == 0 && len(remove) == 0 {
+		return nil, errors.New("gitlab: at least one label to add or remove is required")
+	}
+	opts := &gitlab.UpdateMergeRequestOptions{}
+	if len(add) > 0 {
+		labels := gitlab.LabelOptions(append([]string(nil), add...))
+		opts.AddLabels = &labels
+	}
+	if len(remove) > 0 {
+		labels := gitlab.LabelOptions(append([]string(nil), remove...))
+		opts.RemoveLabels = &labels
+	}
+	mr, _, err := c.api.MergeRequests.UpdateMergeRequest(repo, number, opts, gitlab.WithContext(ctx))
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := mapBasicMergeRequest(&mr.BasicMergeRequest)
+	return &out, nil
+}
+
 // ReadFile implements provider.Provider. An empty ref means the default branch.
 func (c *Client) ReadFile(ctx context.Context, repo, path, ref string) ([]byte, error) {
 	file, _, err := c.api.RepositoryFiles.GetFile(repo, path, refOptions(ref), gitlab.WithContext(ctx))

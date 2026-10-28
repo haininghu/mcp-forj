@@ -4,8 +4,8 @@
 authorization core. Neither entry point re-implements policy.
 
 1. **MCP tools over stdio** — structured access for an agent: list/view merge requests, comment,
-   rebase, merge, read files, search commits across repositories (`search_commits`) and (while the
-   proxy runs) the `git_remote` discovery tool.
+   rebase, merge, label, read files, search commits across repositories (`search_commits`) and
+   (while the proxy runs) the `git_remote` discovery tool.
 2. **Git smart-HTTP reverse proxy over HTTP** (optional, `server.git_proxy`) — real
    `git clone`/`fetch`/`push` against the same policy.
 

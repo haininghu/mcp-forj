@@ -143,6 +143,9 @@ func (p *gitProvider) RebaseMergeRequest(context.Context, string, int64) error {
 func (p *gitProvider) MergeMergeRequest(context.Context, string, int64) (*provider.MergeRequest, error) {
 	return nil, nil
 }
+func (p *gitProvider) UpdateMergeRequestLabels(context.Context, string, int64, []string, []string) (*provider.MergeRequest, error) {
+	return nil, nil
+}
 
 // e2eEnv is one proxy under test plus its git backend and bare-repo root.
 type e2eEnv struct {

@@ -125,7 +125,10 @@ Authorization is the product. These rules are security-critical:
    A `.noai` denial is reported to the client indistinguishably from an unknown repository.
 7. **Tag filters** match exact, case-sensitive values: GitLab MR **labels** for `mr:*`, project
    **topics** for `repo:*` and `commit:*`. When the information is unknown, the decision fails
-   closed.
+   closed. Labels are **authorization inputs**: `mr:label` mutates them, so its `labels`
+   include/exclude filter restricts which names a request may add or remove and the handler re-checks
+   the post-mutation label set. Operators must scope `mr:label` as narrowly as the tag filters it
+   could satisfy.
 8. **Path filters** (doublestar) apply only to `repo:read`/`repo:write`; `paths.exclude` wins over
    `paths.include`, and an active filter with an empty path fails closed. Git traffic cannot
    enforce path filters, so an active `paths` filter means **no git access** (fetch/clone/push) for

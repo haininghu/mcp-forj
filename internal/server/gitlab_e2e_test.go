@@ -44,9 +44,10 @@ type mockGitLab struct {
 	user      map[string]any
 	commits   []map[string]any
 
-	mu       sync.Mutex
-	requests []string
-	authSeen []string
+	mu                sync.Mutex
+	requests          []string
+	authSeen          []string
+	labelUpdateBodies []map[string]any
 }
 
 func (m *mockGitLab) record(r *http.Request) {
@@ -147,6 +148,16 @@ func (m *mockGitLab) serveMergeRequest(w http.ResponseWriter, r *http.Request, r
 	case strings.HasSuffix(rest, "/merge"):
 		m.writeJSON(w, http.StatusOK, mr)
 	default: // /merge_requests/:iid
+		if r.Method == http.MethodPut {
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "decode body", http.StatusBadRequest)
+				return
+			}
+			m.mu.Lock()
+			m.labelUpdateBodies = append(m.labelUpdateBodies, body)
+			m.mu.Unlock()
+		}
 		m.writeJSON(w, http.StatusOK, mr)
 	}
 }
@@ -383,5 +394,72 @@ func TestE2EGitLabSearchCommits(t *testing.T) {
 	}
 	if strings.Contains(text, "alice@example.com") {
 		t.Errorf("result = %q, must not contain the author email", text)
+	}
+}
+
+func TestE2EGitLabUpdateMergeRequestLabels(t *testing.T) {
+	mock := &mockGitLab{
+		repo:    "team/app",
+		project: baseProject(),
+		mr: map[string]any{
+			"iid": 1, "title": "t", "state": "opened", "labels": []string{"ai-reviewed"},
+		},
+	}
+	env, _ := newGitLabEnv(t, []policy.RuleSpec{{
+		Repositories: []string{"team/*"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{Name: policy.CapMRLabel}},
+	}}, mock)
+
+	res := env.call(t, "update_merge_request_labels", map[string]any{
+		"provider": "gl", "repo": "team/app", "number": 1,
+		"add": []string{"ai-done"}, "remove": []string{"ai-reviewed"},
+	})
+	if res.IsError {
+		t.Fatalf("update_merge_request_labels denied: %s", resultText(t, res))
+	}
+	if !strings.Contains(resultText(t, res), "labels updated") {
+		t.Errorf("result = %q, want the acknowledgement", resultText(t, res))
+	}
+	if strings.Contains(resultText(t, res), "ai-done") || strings.Contains(resultText(t, res), "ai-reviewed") {
+		t.Errorf("result = %q, must not contain label names", resultText(t, res))
+	}
+	if len(mock.labelUpdateBodies) != 1 {
+		t.Fatalf("label update bodies = %d, want 1", len(mock.labelUpdateBodies))
+	}
+	body := mock.labelUpdateBodies[0]
+	if body["add_labels"] != "ai-done" {
+		t.Errorf("add_labels = %v, want ai-done", body["add_labels"])
+	}
+	if body["remove_labels"] != "ai-reviewed" {
+		t.Errorf("remove_labels = %v, want ai-reviewed", body["remove_labels"])
+	}
+	if _, present := body["labels"]; present {
+		t.Errorf("body contains full-replace labels: %v", body)
+	}
+}
+
+func TestE2EGitLabUpdateMergeRequestLabelsRequiresCapability(t *testing.T) {
+	mock := &mockGitLab{
+		repo:    "team/app",
+		project: baseProject(),
+		mr: map[string]any{
+			"iid": 1, "title": "t", "state": "opened", "labels": []string{},
+		},
+	}
+	env, _ := newGitLabEnv(t, []policy.RuleSpec{{
+		Repositories: []string{"team/*"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{Name: policy.CapMRRead}},
+	}}, mock)
+
+	res := env.call(t, "update_merge_request_labels", map[string]any{
+		"provider": "gl", "repo": "team/app", "number": 1, "add": []string{"ai-done"},
+	})
+	if !res.IsError {
+		t.Fatal("update_merge_request_labels succeeded without mr:label")
+	}
+	if len(mock.labelUpdateBodies) != 0 {
+		t.Errorf("provider received %d label updates, want 0", len(mock.labelUpdateBodies))
 	}
 }

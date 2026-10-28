@@ -17,8 +17,11 @@ capability.
 | tags       | `policy.TagSet`     | `Known=false` means tags unavailable.              |
 | path       | string              | Repository-relative path for `repo:read`/`write`.  |
 | ref        | string              | Git ref for the marker check (`read_file` only).   |
+| labels     | []string            | Requested label changes for `mr:label` only.       |
 
 The `tags` dimension uses MR labels for `mr:*` and project topics for `repo:*` and `commit:*`.
+The `labels` dimension is evaluated against every requested label (not the MR's current labels) and
+is accepted only on `mr:label`; exact, case-sensitive names, exclude wins over include.
 
 The repository path is structurally validated by `validateRepo` (provider-neutral) and
 then normalized to the provider's canonical authorization key by
@@ -52,6 +55,8 @@ N/A — this is the evaluator used by all tools.
    MR labels for `mr:*`; project topics for `repo:*` and `commit:*`. A fetch failure denies.
 5. Final decision:
    - `Guard.AuthorizeWithTags` — tags only (no path). Used by MR tools.
+   - `Guard.AuthorizeLabels` — tags + requested labels (no path). Used by
+     `update_merge_request_labels`.
    - `Guard.AuthorizeResource` — tags + path. Used by `read_file`.
    - `Guard.AuthorizeBranch` — tags + branch (no path). Used by the git proxy per
      push target branch; a grant without a `branches` filter is a hard fail-closed
@@ -100,10 +105,12 @@ Decision reasons (all fail closed unless allowed):
 - `capability <c> not granted` — a rule did not list the requested capability (fall-through).
 - Evaluated filter misses, reported as the most specific reason when no rule applies:
   `tag requirement not met` / `excluded tag present` (exact, case-sensitive),
+  `label not allowed` / `label excluded` (exact, case-sensitive; exclude wins over include),
   `path not allowed` / `path excluded` (doublestar; exclude wins over include),
   `branch not allowed` / `branch excluded` (doublestar; exclude wins over include).
 - Fail-closed (hard deny, never a fall-through):
   - `tag information unavailable` — active tag filter, tags unknown.
+  - `labels required` — active labels filter, no requested labels.
   - `path required` — active path filter, empty path.
   - `branch filter required` — named branch, grant has no `branches` filter (no push).
   - `branch required` — branch filter active but no branch supplied to a branch-context evaluation
@@ -119,7 +126,9 @@ Decision reasons (all fail closed unless allowed):
   in its scope. An evaluated filter miss falls through to a later rule; unavailable filter
   information fails closed.
 - Deny-by-default: no applicable rule denies.
-- Tags/paths are never cached or returned.
+- `mr:label` also re-evaluates the post-mutation label set with `AuthorizeWithTags` before the
+  provider call, so the operation cannot create a state the grant would not authorize.
+- Tags/paths/labels are never cached or returned.
 - `.noai` is a capability-level default-deny overlay: every capability is denied on
   a `.noai` repository unless the matched grant is exempted with `noai: allow`.
   Literal (explicitly configured) repositories are still listed; discovered `.noai`

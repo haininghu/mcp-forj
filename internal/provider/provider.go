@@ -248,6 +248,11 @@ type Provider interface {
 	// MergeMergeRequest merges a merge request synchronously and returns the
 	// merged merge request.
 	MergeMergeRequest(ctx context.Context, repo string, number int64) (*MergeRequest, error)
+	// UpdateMergeRequestLabels adds and/or removes labels on a merge request and
+	// returns the updated merge request. At least one of add or remove must be
+	// non-empty. Labels are provider content and must never be returned to
+	// clients.
+	UpdateMergeRequestLabels(ctx context.Context, repo string, number int64, add, remove []string) (*MergeRequest, error)
 
 	// ReadFile reads a repository file. An empty ref means the default branch.
 	ReadFile(ctx context.Context, repo, path, ref string) ([]byte, error)

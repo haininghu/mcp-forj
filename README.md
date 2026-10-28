@@ -95,6 +95,7 @@ opencode loads its configuration once at startup, so restart it after editing.
 | `add_merge_request_note`   | `mr:comment`¹ | Comment on a merge request.                     |
 | `rebase_merge_request`     | `mr:rebase`   | Trigger an asynchronous merge request rebase.   |
 | `merge_merge_request`      | `mr:merge`    | Merge a merge request (returns the merged MR).  |
+| `update_merge_request_labels` | `mr:label` | Add/remove MR labels (ack only, no labels returned). |
 | `read_file`                | `repo:read`   | Read a repository file at an optional ref.      |
 | `search_commits`           | `commit:read`² | Search one author's commits (across or in named repositories). |
 | `git_remote`               | `repo:read`   | Return the git proxy clone URL (token never returned). |
@@ -195,6 +196,10 @@ and [`ai/architecture.md`](ai/architecture.md)):
 - `mr:comment` – comment on merge requests.
 - `mr:rebase` – trigger an asynchronous merge request rebase.
 - `mr:merge` – merge a merge request; also gates push options that arm **auto-merge**.
+- `mr:label` – add and/or remove labels on a merge request (`update_merge_request_labels`). Labels
+  are authorization tags for other `mr:*` capabilities, so the grant may restrict the names it
+  allows with the `labels` include/exclude filter (see below). Separate from `mr:write`; the tool
+  returns only an acknowledgement, never MR metadata or label names.
 - `mr:write` – create/update/close merge requests. No MCP tool uses it yet; it gates **merge-request
   creation through git push options** in the proxy.
 - `repo:write` – gates **git push** through the git proxy. The `branches` filter of the grant
@@ -275,6 +280,25 @@ over `paths.include`; an active path filter with an empty path fails closed. Tag
 must pass). Whenever required information cannot be determined, the decision fails closed. A capability
 may also carry `noai: allow` to exempt it from the `.noai` default-deny overlay.
 
+`mr:label` additionally accepts a `labels` filter that restricts **which label names a request may
+change**. It is distinct from `require`/`exclude` (which match the MR's current labels): `labels` is
+evaluated against every label in the request's `add`/`remove`, using exact, case-sensitive names (no
+globs). `labels.exclude` wins over `labels.include`; an evaluated miss falls through like any other
+filter, and an active `labels` filter with no requested labels fails closed. `labels` is accepted only
+on `mr:label`:
+
+```yaml
+capabilities:
+  - mr:label:
+      labels:
+        include: [ai-reviewed, ai-done]   # every requested label must be in this list
+        exclude: [do-not-touch]           # never change this label (exclude wins)
+```
+
+Because labels authorize other `mr:*` operations, the tool also re-checks the **post-mutation label
+set** against the grant's tag filter before calling the provider; it never creates a state the grant
+would not authorize.
+
 Filters are accepted on `deny` rules too (a `deny` rule with no `capabilities` still denies every
 capability in its scope). A filter on an `allow` rule is a **preference**: an evaluated miss makes the
 rule fall through to a later rule, so a reliable exclusion belongs in a `deny` rule placed **before**
@@ -317,6 +341,7 @@ capabilities:
       noai: allow
   - mr:rebase              # not exempt -> denied on .noai repos
   - mr:merge               # not exempt -> denied on .noai repos
+  - mr:label               # not exempt -> denied on .noai repos
 ```
 
 Literal (explicitly configured) repositories are always listed, even if `.noai`. Discovered `.noai`
@@ -347,11 +372,16 @@ Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **g
 | `get_merge_request_diff` (`mr:diff`) | **Merge Request: Read**                                                       |
 | `rebase_merge_request` (`mr:rebase`) | **Merge Request: Update** (+ Merge Request: Read; push to source)             |
 | `merge_merge_request` (`mr:merge`)   | **Merge Request: Update** (+ Merge Request: Read; merge role, e.g. Developer) |
+| `update_merge_request_labels` (`mr:label`) | **Merge Request: Update** (+ Merge Request: Read for current labels)   |
 | `list_merge_request_notes`           | **Work Item: Read** (+ Merge Request: Read)                                   |
 | `add_merge_request_note`             | **Work Item: Create** (+ Merge Request: Read)                                 |
 | git fetch/clone via proxy (`repo:read`) | **Repository: Read**                                                       |
 | git push via proxy (`repo:write`)    | **Repository: Write**                                                         |
 | `mr:write` (push options)            | Merge Request: Create/Update/Close                                            |
+
+`update_merge_request_labels` needs **Merge Request: Read** to fetch the current labels and
+**Merge Request: Update** to change them. Depending on the token's permissions, adding a label that
+does not yet exist may create it as a project label; grant `mr:label` only to operators who may do so.
 
 `search_commits` calls `GET /projects/:id/repository/commits`, which requires **Commit: Read**. The
 **Repository: Read** permission used by `read_file` does **not** cover it: a token can read files and
@@ -380,6 +410,10 @@ the **Developer** role (push access to the source branch); merging also needs a 
   the state is already `merged`. A missing permission or missing merge role surfaces as "forbidden"; a
   non-mergeable merge request (already merged/closed, draft, pending pipeline, conflicts) surfaces as
   "not in a mergeable state".
+- `update_merge_request_labels` adds/removes labels without replacing the full set. It authorizes
+  against the current labels, re-checks the post-mutation label set, and returns only an
+  acknowledgement (never MR metadata or label names). A `.noai` denial is indistinguishable from an
+  unknown repository.
 - No caching: labels, topics and markers are fetched on every operation.
 - `mr:diff` is denied on a `.noai` repository unless the grant is exempted with `noai: allow`; diffs are
   repository content, but the marker is an integrity control, not a confidentiality control.

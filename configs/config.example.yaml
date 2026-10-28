@@ -100,6 +100,18 @@ providers:
           # unless the grant is exempted with `noai: allow`.
           - mr:merge:
               require: [ai-reviewed]
+          # Add/remove MR labels with `update_merge_request_labels`. Labels are
+          # authorization tags for other mr:* capabilities, so mr:label is a
+          # separate least-privilege grant (not mr:write). The `labels` filter
+          # restricts which label NAMES a request may add or remove; it is
+          # evaluated against every requested label, not against the MR's
+          # current labels. `exclude` wins over `include`, matching is exact
+          # and case-sensitive, and an evaluated miss falls through. The tool
+          # re-checks the post-mutation label set against `require`/`exclude`.
+          - mr:label:
+              labels:
+                include: [ai-reviewed, ai-done]
+                exclude: [do-not-touch]
 
       # Git push via the proxy for one playground repository. `branches` is a
       # doublestar filter on the push TARGET BRANCH and is accepted ONLY on

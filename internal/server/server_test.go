@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,41 +20,45 @@ import (
 )
 
 type fakeProvider struct {
-	name             string
-	marker           bool
-	markerErr        error
-	markerByRepo     map[string]bool
-	markerErrByRepo  map[string]error
-	providerErr      error
-	files            map[string][]byte
-	repos            []provider.Repository
-	mrs              []provider.MergeRequest
-	notes            []provider.Note
-	added            []string
-	rebaseCalls      int
-	rebaseErr        error
-	getCalls         int
-	mergeCalls       int
-	mergeErr         error
-	diffCalls        int
-	diffErr          error
-	diffs            []provider.DiffFile
-	addNoteErr       error
-	listReposCalls   int
-	listRepoSearches []string
-	topics           map[string][]string
-	topicsErr        map[string]error
-	topicsCalls      int
-	commits          []provider.Commit
-	commitsByRepo    map[string][]provider.Commit
-	listCommitsErr   error
-	listCommitsTrunc bool
-	listCommitsCalls int
-	lastCommitOpts   provider.CommitListOptions
-	lastCommitRepo   string
-	currentUser      provider.User
-	currentUserErr   error
-	currentUserCalls int
+	name              string
+	marker            bool
+	markerErr         error
+	markerByRepo      map[string]bool
+	markerErrByRepo   map[string]error
+	providerErr       error
+	files             map[string][]byte
+	repos             []provider.Repository
+	mrs               []provider.MergeRequest
+	notes             []provider.Note
+	added             []string
+	rebaseCalls       int
+	rebaseErr         error
+	getCalls          int
+	mergeCalls        int
+	mergeErr          error
+	updateLabelsCalls int
+	updateLabelsErr   error
+	lastAddLabels     []string
+	lastRemoveLabels  []string
+	diffCalls         int
+	diffErr           error
+	diffs             []provider.DiffFile
+	addNoteErr        error
+	listReposCalls    int
+	listRepoSearches  []string
+	topics            map[string][]string
+	topicsErr         map[string]error
+	topicsCalls       int
+	commits           []provider.Commit
+	commitsByRepo     map[string][]provider.Commit
+	listCommitsErr    error
+	listCommitsTrunc  bool
+	listCommitsCalls  int
+	lastCommitOpts    provider.CommitListOptions
+	lastCommitRepo    string
+	currentUser       provider.User
+	currentUserErr    error
+	currentUserCalls  int
 }
 
 func (f *fakeProvider) Name() string { return f.name }
@@ -184,6 +189,24 @@ func (f *fakeProvider) MergeMergeRequest(_ context.Context, _ string, number int
 			merged := f.mrs[i]
 			merged.State = "merged"
 			return &merged, nil
+		}
+	}
+	return nil, provider.ErrNotFound
+}
+
+func (f *fakeProvider) UpdateMergeRequestLabels(_ context.Context, _ string, number int64, add, remove []string) (*provider.MergeRequest, error) {
+	f.updateLabelsCalls++
+	f.lastAddLabels = append([]string(nil), add...)
+	f.lastRemoveLabels = append([]string(nil), remove...)
+	if f.updateLabelsErr != nil {
+		return nil, f.updateLabelsErr
+	}
+	if f.providerErr != nil {
+		return nil, f.providerErr
+	}
+	for i := range f.mrs {
+		if f.mrs[i].Number == number {
+			return &f.mrs[i], nil
 		}
 	}
 	return nil, provider.ErrNotFound
@@ -3678,5 +3701,451 @@ func TestSearchCommitsNamedReposCapped(t *testing.T) {
 	}
 	if len(out.Commits) != maxSearchRepos {
 		t.Errorf("len(commits) = %d, want %d", len(out.Commits), maxSearchRepos)
+	}
+}
+
+func labelArgs(add, remove []string) map[string]any {
+	args := map[string]any{"provider": "fake", "repo": "team/app", "number": 1}
+	if add != nil {
+		args["add"] = add
+	}
+	if remove != nil {
+		args["remove"] = remove
+	}
+	return args
+}
+
+func TestUpdateMergeRequestLabelsAllowed(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:label"), fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, []string{"ai-reviewed"}))
+	if res.IsError {
+		t.Fatalf("update_merge_request_labels denied: %s", resultText(t, res))
+	}
+	if fake.updateLabelsCalls != 1 {
+		t.Errorf("UpdateMergeRequestLabels called %d times, want 1", fake.updateLabelsCalls)
+	}
+	if got := fake.lastAddLabels; len(got) != 1 || got[0] != "ai-done" {
+		t.Errorf("add = %v, want [ai-done]", got)
+	}
+	if got := fake.lastRemoveLabels; len(got) != 1 || got[0] != "ai-reviewed" {
+		t.Errorf("remove = %v, want [ai-reviewed]", got)
+	}
+	var out updateMergeRequestLabelsOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.Provider != "fake" || out.Repo != "team/app" || out.Number != 1 || out.Status != "labels updated" {
+		t.Errorf("output = %+v, want the acknowledgement", out)
+	}
+	text := resultText(t, res)
+	for _, forbidden := range []string{"ai-done", "ai-reviewed", "First", "description", `"title"`, `"labels"`} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("output leaked %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestUpdateMergeRequestLabelsRequiresCapability(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:read"), fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+	if !res.IsError {
+		t.Fatal("update_merge_request_labels succeeded without mr:label")
+	}
+	if fake.getCalls != 0 {
+		t.Errorf("GetMergeRequest called %d times, want 0", fake.getCalls)
+	}
+	if fake.updateLabelsCalls != 0 {
+		t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+	}
+}
+
+func filteredLabelRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRLabel,
+			Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}, Exclude: []string{"do-not-touch"}},
+		}},
+	}}
+}
+
+func TestUpdateMergeRequestLabelsTagFilter(t *testing.T) {
+	t.Run("matching label allows", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed")
+		env := newTestEnv(t, filteredLabelRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+		if res.IsError {
+			t.Fatalf("matching label denied: %s", resultText(t, res))
+		}
+		if fake.updateLabelsCalls != 1 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 1", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("excluded label denies", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed", "do-not-touch")
+		env := newTestEnv(t, filteredLabelRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+		if !res.IsError {
+			t.Fatal("excluded label allowed the update")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("unknown labels fail closed", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, false, "ai-reviewed")
+		env := newTestEnv(t, filteredLabelRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+		if !res.IsError {
+			t.Fatal("unknown labels allowed an active filter")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+}
+
+func TestUpdateMergeRequestLabelsMetadataErrorDenies(t *testing.T) {
+	fake := newFake()
+	fake.providerErr = errors.New("metadata unavailable")
+	env := newTestEnv(t, allowRules("mr:label"), fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+	if !res.IsError {
+		t.Fatal("metadata fetch error did not deny the update")
+	}
+	if fake.updateLabelsCalls != 0 {
+		t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+	}
+}
+
+func TestUpdateMergeRequestLabelsDeniedOnNoAIRepoByDefault(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	env := newTestEnv(t, allowRules("mr:label"), fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+	if !res.IsError || !strings.Contains(resultText(t, res), "unknown repository") {
+		t.Fatalf("update_merge_request_labels = %q (isError=%v), want an indistinguishable unknown-repository denial", resultText(t, res), res.IsError)
+	}
+	if fake.updateLabelsCalls != 0 {
+		t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+	}
+}
+
+func TestUpdateMergeRequestLabelsAllowedOnNoAIRepoWhenExempt(t *testing.T) {
+	fake := newFake()
+	fake.marker = true
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name:   policy.CapMRLabel,
+			Filter: policy.CapabilityFilter{NoAIExempt: true},
+		}},
+	}}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+	if res.IsError {
+		t.Fatalf("exempt mr:label denied on a .noai repository: %s", resultText(t, res))
+	}
+	if fake.updateLabelsCalls != 1 {
+		t.Errorf("UpdateMergeRequestLabels called %d times, want 1", fake.updateLabelsCalls)
+	}
+}
+
+func TestUpdateMergeRequestLabelsProviderErrors(t *testing.T) {
+	t.Run("forbidden names the permission", func(t *testing.T) {
+		fake := newFake()
+		fake.updateLabelsErr = provider.ErrForbidden
+		env := newTestEnv(t, allowRules("mr:label"), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+		if !res.IsError {
+			t.Fatal("forbidden update did not surface as a tool error")
+		}
+		text := strings.ToLower(resultText(t, res))
+		if !strings.Contains(text, "forbidden") || !strings.Contains(text, "merge request: update") {
+			t.Errorf("error = %q, want an actionable permission message", resultText(t, res))
+		}
+	})
+	t.Run("invalid state hint", func(t *testing.T) {
+		fake := newFake()
+		fake.updateLabelsErr = provider.ErrInvalidState
+		env := newTestEnv(t, allowRules("mr:label"), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-done"}, nil))
+		if !res.IsError {
+			t.Fatal("invalid-state update did not surface as a tool error")
+		}
+		if !strings.Contains(resultText(t, res), "labels could not be updated") {
+			t.Errorf("error = %q, want the invalid-state hint", resultText(t, res))
+		}
+	})
+}
+
+func TestUpdateMergeRequestLabelsValidation(t *testing.T) {
+	tests := []struct {
+		name   string
+		add    []string
+		remove []string
+	}{
+		{"both empty", nil, nil},
+		{"empty label", []string{""}, nil},
+		{"whitespace-only label", []string{"   "}, nil},
+		{"leading whitespace", []string{" ai-done"}, nil},
+		{"trailing whitespace", nil, []string{"ai-done "}},
+		{"control character", []string{"ai\tdone"}, nil},
+		{"comma", []string{"ai,done"}, nil},
+		{"256 runes", []string{strings.Repeat("a", 256)}, nil},
+		{"cross-case overlap", []string{"AI-Reviewed"}, []string{"ai-reviewed"}},
+		{"51 labels", labelRange(51), nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFake()
+			env := newTestEnv(t, allowRules("mr:label"), fake)
+
+			res := env.call(t, "update_merge_request_labels", labelArgs(tt.add, tt.remove))
+			if !res.IsError {
+				t.Fatalf("update succeeded, want a validation error (add=%v remove=%v)", tt.add, tt.remove)
+			}
+			if fake.getCalls != 0 || fake.updateLabelsCalls != 0 {
+				t.Errorf("provider called (get=%d update=%d), want no call for invalid input", fake.getCalls, fake.updateLabelsCalls)
+			}
+		})
+	}
+}
+
+func labelRange(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = "label-" + strconv.Itoa(i)
+	}
+	return out
+}
+
+func TestUpdateMergeRequestLabelsDeduplicatesCaseInsensitively(t *testing.T) {
+	fake := newFake()
+	env := newTestEnv(t, allowRules("mr:label"), fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"AI-Done", "ai-done"}, []string{"Other", "other"}))
+	if res.IsError {
+		t.Fatalf("duplicate labels denied: %s", resultText(t, res))
+	}
+	if got := fake.lastAddLabels; len(got) != 1 || got[0] != "AI-Done" {
+		t.Errorf("add = %v, want [AI-Done] (first spelling)", got)
+	}
+	if got := fake.lastRemoveLabels; len(got) != 1 || got[0] != "Other" {
+		t.Errorf("remove = %v, want [Other] (first spelling)", got)
+	}
+}
+
+func labelFilterRules() []policy.RuleSpec {
+	return []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{{
+			Name: policy.CapMRLabel,
+			Filter: policy.CapabilityFilter{Labels: policy.LabelFilter{
+				Include: []string{"ai-approved", "ai-done"},
+				Exclude: []string{"do-not-touch"},
+			}},
+		}},
+	}}
+}
+
+func TestUpdateMergeRequestLabelsArgumentFilter(t *testing.T) {
+	t.Run("allowed add and remove", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed")
+		env := newTestEnv(t, labelFilterRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"ai-approved"}, []string{"ai-done"}))
+		if res.IsError {
+			t.Fatalf("allowed labels denied: %s", resultText(t, res))
+		}
+		if fake.updateLabelsCalls != 1 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 1", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("add outside include denies", func(t *testing.T) {
+		fake := newFake()
+		env := newTestEnv(t, labelFilterRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"other"}, nil))
+		if !res.IsError {
+			t.Fatal("label outside include allowed an add")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("remove outside include denies", func(t *testing.T) {
+		fake := newFake()
+		env := newTestEnv(t, labelFilterRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs(nil, []string{"other"}))
+		if !res.IsError {
+			t.Fatal("label outside include allowed a remove")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("excluded label denies even when included", func(t *testing.T) {
+		fake := newFake()
+		env := newTestEnv(t, labelFilterRules(), fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"do-not-touch"}, nil))
+		if !res.IsError {
+			t.Fatal("excluded label allowed an add")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+}
+
+func TestUpdateMergeRequestLabelsArgumentFilterFallsThrough(t *testing.T) {
+	fake := newFake()
+	rules := []policy.RuleSpec{
+		{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{{
+				Name:   policy.CapMRLabel,
+				Filter: policy.CapabilityFilter{Labels: policy.LabelFilter{Include: []string{"restricted"}}},
+			}},
+		},
+		{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{{Name: policy.CapMRLabel}},
+		},
+	}
+	env := newTestEnv(t, rules, fake)
+
+	res := env.call(t, "update_merge_request_labels", labelArgs([]string{"allowed-by-later-rule"}, nil))
+	if res.IsError {
+		t.Fatalf("label filter fall-through denied: %s", resultText(t, res))
+	}
+	if fake.updateLabelsCalls != 1 {
+		t.Errorf("UpdateMergeRequestLabels called %d times, want 1", fake.updateLabelsCalls)
+	}
+}
+
+func TestUpdateMergeRequestLabelsPostStateRecheck(t *testing.T) {
+	t.Run("removing a required label is denied", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "ai-reviewed")
+		rules := []policy.RuleSpec{{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{{
+				Name:   policy.CapMRLabel,
+				Filter: policy.CapabilityFilter{Require: []string{"ai-reviewed"}},
+			}},
+		}}
+		env := newTestEnv(t, rules, fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs(nil, []string{"ai-reviewed"}))
+		if !res.IsError {
+			t.Fatal("removing the required label was allowed")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("adding an excluded label is denied", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true)
+		rules := []policy.RuleSpec{{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{{
+				Name:   policy.CapMRLabel,
+				Filter: policy.CapabilityFilter{Exclude: []string{"do-not-touch"}},
+			}},
+		}}
+		env := newTestEnv(t, rules, fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs([]string{"do-not-touch"}, nil))
+		if !res.IsError {
+			t.Fatal("adding the excluded label was allowed")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+	t.Run("removal is case-insensitive", func(t *testing.T) {
+		fake := newFake()
+		setLabels(fake, true, "AI-Reviewed")
+		rules := []policy.RuleSpec{{
+			Repositories: []string{"team/app"},
+			Effect:       "allow",
+			Capabilities: []policy.CapabilityGrant{{
+				Name:   policy.CapMRLabel,
+				Filter: policy.CapabilityFilter{Require: []string{"AI-Reviewed"}},
+			}},
+		}}
+		env := newTestEnv(t, rules, fake)
+
+		res := env.call(t, "update_merge_request_labels", labelArgs(nil, []string{"ai-reviewed"}))
+		if !res.IsError {
+			t.Fatal("case-variant removal of the required label was allowed")
+		}
+		if fake.updateLabelsCalls != 0 {
+			t.Errorf("UpdateMergeRequestLabels called %d times, want 0", fake.updateLabelsCalls)
+		}
+	})
+}
+
+func TestListConfiguredRulesExposesLabelFilter(t *testing.T) {
+	rules := []policy.RuleSpec{{
+		Repositories: []string{"team/app"},
+		Effect:       "allow",
+		Capabilities: []policy.CapabilityGrant{
+			{
+				Name:   policy.CapMRLabel,
+				Filter: policy.CapabilityFilter{Labels: policy.LabelFilter{Include: []string{"ai-approved"}, Exclude: []string{"do-not-touch"}}},
+			},
+			{Name: policy.CapPolicyRead},
+		},
+	}}
+	env := newTestEnv(t, rules, newFake())
+
+	res := env.call(t, "list_configured_rules", map[string]any{})
+	if res.IsError {
+		t.Fatalf("list_configured_rules: %s", resultText(t, res))
+	}
+	var out listConfiguredRulesOutput
+	if err := json.Unmarshal([]byte(resultText(t, res)), &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	c, ok := findCapability(out.Repositories[0].ConfiguredCapabilities, "mr:label")
+	if !ok {
+		t.Fatalf("mr:label missing from configured rules: %+v", out)
+	}
+	if c.Labels == nil {
+		t.Fatalf("labels missing from configured capability: %+v", c)
+	}
+	if len(c.Labels.Include) != 1 || c.Labels.Include[0] != "ai-approved" {
+		t.Errorf("labels.include = %v, want [ai-approved]", c.Labels.Include)
+	}
+	if len(c.Labels.Exclude) != 1 || c.Labels.Exclude[0] != "do-not-touch" {
+		t.Errorf("labels.exclude = %v, want [do-not-touch]", c.Labels.Exclude)
 	}
 }

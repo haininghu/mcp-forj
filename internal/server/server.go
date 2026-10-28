@@ -37,6 +37,9 @@ const (
 	maxSearchRepos    = 50  // discovered candidates and named-repos cap per search_commits (literals uncapped)
 	maxCommitsPerRepo = 200 // commit match limit and scan budget per repository
 	maxAuthorBytes    = 255 // author filter length bound
+
+	maxLabelChanges = 50  // labels changed per update_merge_request_labels call
+	maxLabelRunes   = 255 // length bound for one label name
 )
 
 // GitRemoteResolver resolves the git proxy clone URL for a repository and
@@ -119,6 +122,11 @@ func (s *Server) MCPServer(version string) *mcp.Server {
 	}, s.mergeMergeRequest)
 
 	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "update_merge_request_labels",
+		Description: "Add and/or remove labels on a merge request without replacing the full label set. Requires the mr:label capability; the grant may restrict which label names may change. Labels are authorization tags for other mr:* capabilities, so the post-mutation label set is re-checked against the grant. Returns only an acknowledgement, never merge request metadata or label names. .noai-protected unless the grant is exempted.",
+	}, s.updateMergeRequestLabels)
+
+	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "search_commits",
 		Description: "Search the commit history of repositories for one author (default: the authenticated user), newest first, default branch only. IMPORTANT: if the request names one or more repositories, pass them in `repos` (namespace/project paths) to restrict the search to exactly those repositories; that path is content-only and needs the commit:read capability (implied by repo:read), with no repo:list required. If `repos` is omitted, the search covers the literal commit:read repositories and, when repo:list is granted, additionally discovers repositories. Optional filters: `since`/`until` (inclusive committer-date range) and `query` (case-insensitive substring of the commit message). Repositories you cannot access contribute no commits. .noai-protected unless the grant is exempted.",
 	}, s.searchCommits)
@@ -192,6 +200,14 @@ type mergeMergeRequestInput struct {
 	Number   int64  `json:"number" jsonschema:"merge request number"`
 }
 
+type updateMergeRequestLabelsInput struct {
+	Provider string   `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
+	Repo     string   `json:"repo" jsonschema:"repository path (namespace/project)"`
+	Number   int64    `json:"number" jsonschema:"merge request number"`
+	Add      []string `json:"add,omitempty" jsonschema:"optional labels to add; at least one of add or remove is required"`
+	Remove   []string `json:"remove,omitempty" jsonschema:"optional labels to remove; at least one of add or remove is required"`
+}
+
 type readFileInput struct {
 	Provider string `json:"provider,omitempty" jsonschema:"logical provider name; optional when exactly one provider is configured"`
 	Repo     string `json:"repo" jsonschema:"repository path (namespace/project)"`
@@ -225,6 +241,7 @@ type configuredCapability struct {
 	Exclude    []string              `json:"exclude,omitempty"`
 	Paths      *configuredPathFilter `json:"paths,omitempty"`
 	Branches   *configuredPathFilter `json:"branches,omitempty"`
+	Labels     *configuredPathFilter `json:"labels,omitempty"`
 	NoAIExempt bool                  `json:"noai_exempt,omitempty"`
 }
 
@@ -305,6 +322,13 @@ type rebaseMergeRequestOutput struct {
 	Repo     string `json:"repo"`
 	Number   int64  `json:"number"`
 	Status   string `json:"status"`
+}
+
+type updateMergeRequestLabelsOutput struct {
+	Provider string `json:"provider"`
+	Repo     string `json:"repo"`
+	Number   int64  `json:"number"`
+	Status   string `json:"status"` // "labels updated"
 }
 
 type readFileOutput struct {
@@ -395,6 +419,12 @@ func (s *Server) listConfiguredRules(_ context.Context, _ *mcp.CallToolRequest, 
 				c.Branches = &configuredPathFilter{
 					Include: grant.Filter.Branches.Include,
 					Exclude: grant.Filter.Branches.Exclude,
+				}
+			}
+			if !grant.Filter.Labels.IsZero() {
+				c.Labels = &configuredPathFilter{
+					Include: grant.Filter.Labels.Include,
+					Exclude: grant.Filter.Labels.Exclude,
 				}
 			}
 			caps[i] = c
@@ -927,6 +957,161 @@ func (s *Server) mergeMergeRequest(ctx context.Context, _ *mcp.CallToolRequest, 
 			"the merge request is not in a mergeable state")
 	}
 	return jsonResult(toMergeRequestJSON(*merged, maxTextBytes))
+}
+
+// updateMergeRequestLabels adds and/or removes labels on a merge request. The
+// merge request metadata is fetched first as an internal authorization input:
+// the grant's tag filter is evaluated against the current labels and the labels
+// filter against every requested label; a fetch failure denies (fail-closed).
+// When the current labels are known, the post-mutation label set is also
+// evaluated so the operation cannot create a state the grant would not
+// authorize. Only an acknowledgement is returned: mr:label does not imply
+// mr:read, and label names are never returned.
+func (s *Server) updateMergeRequestLabels(ctx context.Context, _ *mcp.CallToolRequest, in updateMergeRequestLabelsInput) (*mcp.CallToolResult, any, error) {
+	if in.Number <= 0 {
+		return nil, nil, errors.New("number must be positive")
+	}
+	add, remove, err := normalizeLabelChanges(in.Add, in.Remove)
+	if err != nil {
+		return nil, nil, err
+	}
+	repo, err := validateRepo(in.Repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	p, providerName, err := s.resolveProvider(in.Provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Provider = providerName
+	repo, err = p.CanonicalRepository(repo)
+	if err != nil {
+		return nil, nil, err
+	}
+	in.Repo = repo
+	if err := s.guard.AuthorizeRepoCapability(in.Provider, in.Repo, policy.CapMRLabel); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	mr, err := p.GetMergeRequest(ctx, in.Repo, in.Number)
+	if err != nil {
+		return nil, nil, mapProviderError(err, "reading merge requests needs the Merge Request: Read permission")
+	}
+	requested := append(append([]string(nil), add...), remove...)
+	if err := s.guard.AuthorizeLabels(ctx, in.Provider, in.Repo, policy.CapMRLabel, tagSetFromMR(*mr), requested); err != nil {
+		return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+	}
+	// Re-check the resulting label set. This prevents an operation from creating
+	// a label state the grant's tag filter would not authorize. Unknown current
+	// labels already failed closed above when a tag filter is active.
+	if mr.LabelsKnown {
+		post := applyLabelChanges(mr.Labels, add, remove)
+		if err := s.guard.AuthorizeWithTags(ctx, in.Provider, in.Repo, policy.CapMRLabel, policy.TagSet{Known: true, Values: post}); err != nil {
+			return nil, nil, mapAuthError(err, in.Provider, in.Repo)
+		}
+	}
+	if _, err := p.UpdateMergeRequestLabels(ctx, in.Repo, in.Number, add, remove); err != nil {
+		return nil, nil, mapProviderErrorState(err,
+			"updating merge request labels needs the Merge Request: Update permission",
+			"the merge request labels could not be updated")
+	}
+	return jsonResult(updateMergeRequestLabelsOutput{
+		Provider: in.Provider,
+		Repo:     in.Repo,
+		Number:   in.Number,
+		Status:   "labels updated",
+	})
+}
+
+// normalizeLabelChanges validates and normalizes an add/remove request. It
+// rejects empty, padded, overlong, control-character and comma-containing label
+// names, deduplicates case-insensitively (keeping the first spelling), and
+// rejects a label requested for both add and remove. At least one label is
+// required and at most maxLabelChanges are accepted.
+func normalizeLabelChanges(add, remove []string) ([]string, []string, error) {
+	if len(add)+len(remove) == 0 {
+		return nil, nil, errors.New("at least one label to add or remove is required")
+	}
+	normalizedAdd, err := normalizeLabelList(add, "add")
+	if err != nil {
+		return nil, nil, err
+	}
+	normalizedRemove, err := normalizeLabelList(remove, "remove")
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(normalizedAdd)+len(normalizedRemove) > maxLabelChanges {
+		return nil, nil, fmt.Errorf("at most %d labels may be changed per request", maxLabelChanges)
+	}
+	added := make(map[string]bool, len(normalizedAdd))
+	for _, label := range normalizedAdd {
+		added[strings.ToLower(label)] = true
+	}
+	for _, label := range normalizedRemove {
+		if added[strings.ToLower(label)] {
+			return nil, nil, fmt.Errorf("label %q must not appear in both add and remove", label)
+		}
+	}
+	return normalizedAdd, normalizedRemove, nil
+}
+
+// normalizeLabelList validates one label list and removes case-insensitive
+// duplicates while preserving the first spelling and order.
+func normalizeLabelList(labels []string, field string) ([]string, error) {
+	out := make([]string, 0, len(labels))
+	seen := make(map[string]bool, len(labels))
+	for _, label := range labels {
+		if strings.TrimSpace(label) == "" {
+			return nil, fmt.Errorf("%s labels must not be empty", field)
+		}
+		if strings.TrimSpace(label) != label {
+			return nil, fmt.Errorf("%s label %q must not have leading or trailing whitespace", field, label)
+		}
+		if utf8.RuneCountInString(label) > maxLabelRunes {
+			return nil, fmt.Errorf("%s label exceeds the %d rune limit", field, maxLabelRunes)
+		}
+		for _, r := range label {
+			if r == ',' || r == 0 || r < 0x20 || r == 0x7f {
+				return nil, fmt.Errorf("%s label %q contains a comma or control character", field, label)
+			}
+		}
+		key := strings.ToLower(label)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, label)
+	}
+	return out, nil
+}
+
+// applyLabelChanges computes the post-mutation label set: current labels minus
+// remove plus add, without duplicates. Labels are compared case-insensitively,
+// matching the request normalization and GitLab's label identity.
+func applyLabelChanges(current, add, remove []string) []string {
+	key := strings.ToLower
+	removed := make(map[string]bool, len(remove))
+	for _, label := range remove {
+		removed[key(label)] = true
+	}
+	seen := make(map[string]bool, len(current)+len(add))
+	out := make([]string, 0, len(current)+len(add))
+	for _, label := range current {
+		k := key(label)
+		if removed[k] || seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, label)
+	}
+	for _, label := range add {
+		k := key(label)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, label)
+	}
+	return out
 }
 
 // searchCommits performs a bounded cross-repository search for one author's

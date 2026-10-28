@@ -73,6 +73,10 @@ func run() error {
 							Include: grant.Branches.Include,
 							Exclude: grant.Branches.Exclude,
 						},
+						Labels: policy.LabelFilter{
+							Include: grant.Labels.Include,
+							Exclude: grant.Labels.Exclude,
+						},
 						NoAIExempt: grant.NoAIExempt,
 					},
 				}

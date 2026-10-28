@@ -33,7 +33,9 @@ labels/topics or tokens.
   capability contribute nothing.
 - Output shape per rule:
   `{provider, repositories, effect, configured_capabilities}` where each capability
-  is `{name, require?, exclude?, paths?, noai_exempt?}` (`paths` = `{include?, exclude?}`).
+  is `{name, require?, exclude?, paths?, branches?, labels?, noai_exempt?}` (`paths`,
+  `branches` and `labels` = `{include?, exclude?}`). `labels` appears only on `mr:label`
+  and lists the exact label names a request may change.
 - `configured_capabilities` may also be present on a `deny` rule: a `deny` rule may list the
   capabilities and filters it refuses (ADR 0012); a `deny` rule without capabilities denies every
   capability in its scope and has an empty list.

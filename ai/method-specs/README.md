@@ -21,6 +21,7 @@ these tools; `git_remote` is its clone-URL discovery tool.
 | `add_merge_request_note.md`   | Create an MR note.                                         |
 | `rebase_merge_request.md`     | Trigger an asynchronous MR rebase.                         |
 | `merge_merge_request.md`      | Merge a merge request and return the merged MR.            |
+| `update_merge_request_labels.md` | Add/remove MR labels (ack only, no labels returned).    |
 | `read_file.md`                | Read a repository file.                                    |
 | `git_remote.md`               | Git proxy clone URL (`repo:read`, token never returned).   |
 

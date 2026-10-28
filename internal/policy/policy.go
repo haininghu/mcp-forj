@@ -37,12 +37,29 @@ func (f PathFilter) IsZero() bool {
 	return len(f.Include) == 0 && len(f.Exclude) == 0
 }
 
+// LabelFilter constrains the label names a capability request may change. It is
+// evaluated against every requested label (not against the subject's current
+// labels) and matches exact, case-sensitive names. Include, when non-empty,
+// lists the allowed names; Exclude lists denied names and always wins.
+type LabelFilter struct {
+	// Include lists the label names a request may change.
+	Include []string
+	// Exclude lists the label names a request must not change (exclude wins).
+	Exclude []string
+}
+
+// IsZero reports whether the label filter imposes no constraints.
+func (f LabelFilter) IsZero() bool {
+	return len(f.Include) == 0 && len(f.Exclude) == 0
+}
+
 // CapabilityFilter constrains a granted capability. Tags (Require/Exclude) are
 // matched by exact, case-sensitive equality; path globs (Paths) are matched
 // against a repository-relative file path with doublestar; branch globs
 // (Branches) are matched against a push target branch name with doublestar and
-// are valid on repo:write only. An empty list imposes no constraint of that
-// kind.
+// are valid on repo:write only. Labels constrains the label names a request may
+// change and is valid on mr:label only. An empty list imposes no constraint of
+// that kind.
 type CapabilityFilter struct {
 	// Require lists tags the subject must all carry.
 	Require []string
@@ -53,6 +70,8 @@ type CapabilityFilter struct {
 	// Branches constrains the push target branch (repo:write only). A branch
 	// evaluation without an active branch filter denies (fail-closed).
 	Branches PathFilter
+	// Labels constrains the label names a request may change (mr:label only).
+	Labels LabelFilter
 	// NoAIExempt exempts the capability from the .noai default-deny overlay. It
 	// is an override, not a constraint: IsZero ignores it.
 	NoAIExempt bool
@@ -61,7 +80,8 @@ type CapabilityFilter struct {
 // IsZero reports whether the filter imposes no constraints. NoAIExempt is an
 // override and is not a constraint, so it does not affect IsZero.
 func (f CapabilityFilter) IsZero() bool {
-	return len(f.Require) == 0 && len(f.Exclude) == 0 && f.Paths.IsZero() && f.Branches.IsZero()
+	return len(f.Require) == 0 && len(f.Exclude) == 0 && f.Paths.IsZero() &&
+		f.Branches.IsZero() && f.Labels.IsZero()
 }
 
 // TagSet is an observed set of tags. Known=false means the tags could not be
@@ -199,6 +219,14 @@ func Build(specs []RuleSpec) (*Policy, error) {
 			if err := validatePathPatterns(grant.Filter.Branches.Exclude); err != nil {
 				return nil, fmt.Errorf("policy: rule %d: capability %q branches.exclude: %w", i, grant.Name, err)
 			}
+			if !grant.Filter.Labels.IsZero() {
+				if grant.Name != CapMRLabel {
+					return nil, fmt.Errorf("policy: rule %d: label filters are only supported for capability %q, not %q", i, CapMRLabel, grant.Name)
+				}
+				if err := validateLabelFilter(grant.Filter.Labels); err != nil {
+					return nil, fmt.Errorf("policy: rule %d: capability %q labels: %w", i, grant.Name, err)
+				}
+			}
 			caps[grant.Name] = grant.Filter
 		}
 		rules = append(rules, Rule{
@@ -222,6 +250,18 @@ func (p *Policy) EvaluateWithTags(repo string, c Capability, tags TagSet) Decisi
 	return p.EvaluateResource(repo, c, tags, "")
 }
 
+// EvaluateWithLabels returns the decision for repo, capability c, the observed
+// tags and the requested labels, with no path or branch. It is used by
+// mr:label, whose labels filter is evaluated against every requested label. A
+// nil labels slice is treated as an active labels context with no requested
+// labels, so an active labels filter fails closed.
+func (p *Policy) EvaluateWithLabels(repo string, c Capability, tags TagSet, labels []string) Decision {
+	if labels == nil {
+		labels = []string{}
+	}
+	return p.evaluateResource(repo, c, tags, "", false, "", labels)
+}
+
 // EvaluateResource returns the decision for repo, capability c, the observed
 // tags and the repository-relative path. It follows the firewall-style rule
 // model of ADR 0012: a rule applies when its repository scope matches AND (it
@@ -233,7 +273,7 @@ func (p *Policy) EvaluateWithTags(repo string, c Capability, tags TagSet) Decisi
 // branch filter is not applied; use EvaluateResourceBranch to authorize an
 // operation that names a branch.
 func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path string) Decision {
-	return p.evaluateResource(repo, c, tags, path, false, "")
+	return p.evaluateResource(repo, c, tags, path, false, "", nil)
 }
 
 // EvaluateResourceBranch is EvaluateResource extended with a branch dimension.
@@ -245,7 +285,7 @@ func (p *Policy) EvaluateResource(repo string, c Capability, tags TagSet, path s
 // branch filter that is evaluated and does not match makes the rule fall
 // through, while the branch filter's exclude list wins over its include list.
 func (p *Policy) EvaluateResourceBranch(repo string, c Capability, tags TagSet, path, branch string) Decision {
-	return p.evaluateResource(repo, c, tags, path, true, branch)
+	return p.evaluateResource(repo, c, tags, path, true, branch, nil)
 }
 
 // evaluateResource is the shared first-match-wins evaluation. When withBranch
@@ -258,7 +298,7 @@ func (p *Policy) EvaluateResourceBranch(repo string, c Capability, tags TagSet, 
 // apply, but a filter whose input is unavailable (unknown tags, an empty path
 // for an active path filter, or a branch dimension that cannot be resolved)
 // denies outright, so fail-closed is never defeated by a later, broader rule.
-func (p *Policy) evaluateResource(repo string, c Capability, tags TagSet, path string, withBranch bool, branch string) Decision {
+func (p *Policy) evaluateResource(repo string, c Capability, tags TagSet, path string, withBranch bool, branch string, requestedLabels []string) Decision {
 	matchedScope := false
 	reason := ""
 	for _, rule := range p.rules {
@@ -286,6 +326,21 @@ func (p *Policy) evaluateResource(repo string, c Capability, tags TagSet, path s
 				return Decision{Matched: true, Reason: "tag information unavailable"}
 			}
 			if miss := tagMiss(filter, tags.Values); miss != "" {
+				reason = moreRelevantReason(reason, miss)
+				continue
+			}
+		}
+
+		// Label dimension (mr:label). A nil slice means the caller has no label
+		// context (e.g. a tags-only post-state check), so the dimension imposes
+		// nothing. In a label context the filter applies to every requested
+		// label; an active filter with no requested labels fails closed, while
+		// an evaluated miss makes the rule fall through.
+		if requestedLabels != nil && !filter.Labels.IsZero() {
+			if len(requestedLabels) == 0 {
+				return Decision{Matched: true, Reason: "labels required"}
+			}
+			if miss := labelMiss(filter.Labels, requestedLabels); miss != "" {
 				reason = moreRelevantReason(reason, miss)
 				continue
 			}
@@ -379,6 +434,41 @@ func tagMiss(filter CapabilityFilter, values []string) string {
 		}
 	}
 	return ""
+}
+
+// labelMiss reports why the requested labels fail filter, or "" when they pass.
+// Exclude wins over include and every requested label must pass.
+func labelMiss(filter LabelFilter, values []string) string {
+	for _, value := range values {
+		if slices.Contains(filter.Exclude, value) {
+			return "label excluded"
+		}
+		if len(filter.Include) > 0 && !slices.Contains(filter.Include, value) {
+			return "label not allowed"
+		}
+	}
+	return ""
+}
+
+// validateLabelFilter rejects empty label names and a name that appears in both
+// include and exclude. Labels are exact names, not globs.
+func validateLabelFilter(filter LabelFilter) error {
+	seen := make(map[string]bool, len(filter.Include))
+	for _, label := range filter.Include {
+		if label == "" {
+			return fmt.Errorf("include: empty label")
+		}
+		seen[label] = true
+	}
+	for _, label := range filter.Exclude {
+		if label == "" {
+			return fmt.Errorf("exclude: empty label")
+		}
+		if seen[label] {
+			return fmt.Errorf("label %q appears in both include and exclude", label)
+		}
+	}
+	return nil
 }
 
 // globMiss reports why value fails filter, or "" when it passes. Exclude wins
@@ -702,6 +792,10 @@ func cloneFilter(f CapabilityFilter) CapabilityFilter {
 		Branches: PathFilter{
 			Include: append([]string(nil), f.Branches.Include...),
 			Exclude: append([]string(nil), f.Branches.Exclude...),
+		},
+		Labels: LabelFilter{
+			Include: append([]string(nil), f.Labels.Include...),
+			Exclude: append([]string(nil), f.Labels.Exclude...),
 		},
 		NoAIExempt: f.NoAIExempt,
 	}

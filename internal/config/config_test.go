@@ -1771,3 +1771,103 @@ providers:
 		})
 	}
 }
+
+func TestCapabilityGrantLabelFilterAccepted(t *testing.T) {
+	yaml := `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+          - mr:label:
+              labels:
+                include: [" ai-reviewed ", "ai-done"]
+                exclude: ["do-not-touch"]
+`
+	cfg, err := Parse([]byte(yaml))
+	if err != nil {
+		t.Fatalf("Parse rejected an mr:label labels filter: %v", err)
+	}
+	grant := cfg.Providers[0].Rules[0].Capabilities[0]
+	if grant.Name != "mr:label" {
+		t.Fatalf("grant = %+v", grant)
+	}
+	if len(grant.Labels.Include) != 2 || grant.Labels.Include[0] != "ai-reviewed" || grant.Labels.Include[1] != "ai-done" {
+		t.Errorf("labels.include = %v, want trimmed values in order", grant.Labels.Include)
+	}
+	if len(grant.Labels.Exclude) != 1 || grant.Labels.Exclude[0] != "do-not-touch" {
+		t.Errorf("labels.exclude = %v", grant.Labels.Exclude)
+	}
+}
+
+func TestCapabilityGrantLabelFilterRejections(t *testing.T) {
+	caps := func(body string) string {
+		return `
+providers:
+  - name: p
+    type: gitlab
+    base_url: https://example.com
+    token: T
+    rules:
+      - repositories: ["a/b"]
+        effect: allow
+        capabilities:
+` + body
+	}
+	tests := []struct {
+		name    string
+		body    string
+		wantErr string
+	}{
+		{
+			name:    "labels on another capability",
+			body:    "          - mr:comment:\n              labels:\n                include: [ai-reviewed]\n",
+			wantErr: "label filters are only supported",
+		},
+		{
+			name:    "labels on repo:read",
+			body:    "          - repo:read:\n              labels:\n                include: [ai-reviewed]\n",
+			wantErr: "label filters are only supported",
+		},
+		{
+			name:    "include and exclude overlap",
+			body:    "          - mr:label:\n              labels:\n                include: [ai-reviewed]\n                exclude: [ai-reviewed]\n",
+			wantErr: "appears in both labels.include and labels.exclude",
+		},
+		{
+			name:    "empty label",
+			body:    "          - mr:label:\n              labels:\n                include: [\"   \"]\n",
+			wantErr: "labels.include: tag must not be empty",
+		},
+		{
+			name:    "unknown key inside labels",
+			body:    "          - mr:label:\n              labels:\n                bogus: [ai-reviewed]\n",
+			wantErr: "unknown key",
+		},
+		{
+			name:    "paths on mr:label",
+			body:    "          - mr:label:\n              paths:\n                include: [\"docs/**\"]\n",
+			wantErr: "path filters are not supported",
+		},
+		{
+			name:    "branches on mr:label",
+			body:    "          - mr:label:\n              branches:\n                include: [\"ai/**\"]\n",
+			wantErr: "branch filters are only supported",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(caps(tt.body)))
+			if err == nil {
+				t.Fatal("Parse succeeded, want error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}

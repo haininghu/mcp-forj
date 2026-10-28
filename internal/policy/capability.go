@@ -7,8 +7,9 @@ package policy
 type Capability string
 
 // Known capabilities. CapRepoList, CapRepoRead, CapMRRead, CapMRDiff,
-// CapCommitRead, CapMRComment, CapRebase, CapMRMerge and CapPolicyRead are used
-// by the tools, CapRepoWrite and CapMRWrite by the git smart-HTTP proxy.
+// CapCommitRead, CapMRComment, CapRebase, CapMRMerge, CapMRLabel and
+// CapPolicyRead are used by the tools, CapRepoWrite and CapMRWrite by the git
+// smart-HTTP proxy.
 const (
 	// CapRepoList permits discovering repositories matching the configured
 	// patterns.
@@ -34,6 +35,12 @@ const (
 	// CapMRMerge permits merging a merge request. The git smart-HTTP proxy also
 	// requires it for push options that arm auto-merge.
 	CapMRMerge Capability = "mr:merge"
+	// CapMRLabel permits adding and removing labels on a merge request. It is
+	// separate from mr:write, which stays reserved for create/update/close of
+	// core merge request fields. Labels are authorization tags for other mr:*
+	// capabilities, so the grant may restrict the names it allows with the
+	// labels include/exclude filter.
+	CapMRLabel Capability = "mr:label"
 	// CapMRWrite permits creating, updating or closing merge requests. No MCP
 	// tool uses it yet; it gates merge-request creation via git push options in
 	// the git smart-HTTP proxy.
@@ -56,6 +63,7 @@ var knownCapabilities = []Capability{
 	CapMRComment,
 	CapRebase,
 	CapMRMerge,
+	CapMRLabel,
 	CapMRWrite,
 	CapRepoWrite,
 	CapPolicyRead,

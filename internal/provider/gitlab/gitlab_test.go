@@ -1232,3 +1232,76 @@ func TestCurrentUserError(t *testing.T) {
 		t.Fatalf("error = %v, want provider.ErrForbidden", err)
 	}
 }
+
+func TestUpdateMergeRequestLabelsHTTP(t *testing.T) {
+	var gotMethod, gotPath string
+	var body map[string]any
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"iid": 42, "title": "t", "state": "opened", "labels": []string{"ai-done"},
+		})
+	}))
+
+	mr, err := c.UpdateMergeRequestLabels(context.Background(), "team/app", 42, []string{"ai-done"}, []string{"ai-reviewed"})
+	if err != nil {
+		t.Fatalf("UpdateMergeRequestLabels: %v", err)
+	}
+	if gotMethod != http.MethodPut {
+		t.Errorf("method = %s, want PUT", gotMethod)
+	}
+	if !strings.HasSuffix(gotPath, "/projects/team/app/merge_requests/42") {
+		t.Errorf("path = %s, want suffix /projects/team/app/merge_requests/42", gotPath)
+	}
+	if body["add_labels"] != "ai-done" {
+		t.Errorf("add_labels = %v, want ai-done", body["add_labels"])
+	}
+	if body["remove_labels"] != "ai-reviewed" {
+		t.Errorf("remove_labels = %v, want ai-reviewed", body["remove_labels"])
+	}
+	if _, present := body["labels"]; present {
+		t.Errorf("body contains full-replace labels: %v", body)
+	}
+	if mr.Number != 42 {
+		t.Errorf("number = %d, want 42", mr.Number)
+	}
+}
+
+func TestUpdateMergeRequestLabelsRequiresAChange(t *testing.T) {
+	c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("provider was called with no label changes")
+	}))
+	if _, err := c.UpdateMergeRequestLabels(context.Background(), "team/app", 42, nil, nil); err == nil {
+		t.Fatal("UpdateMergeRequestLabels succeeded with no changes, want error")
+	}
+}
+
+func TestUpdateMergeRequestLabelsHTTPError(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{"forbidden", http.StatusForbidden, provider.ErrForbidden},
+		{"bad request", http.StatusBadRequest, provider.ErrInvalidState},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			_, err := c.UpdateMergeRequestLabels(context.Background(), "team/app", 42, []string{"ai-done"}, nil)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+			if got := provider.HTTPStatus(err); got != tt.status {
+				t.Errorf("HTTPStatus = %d, want %d", got, tt.status)
+			}
+		})
+	}
+}

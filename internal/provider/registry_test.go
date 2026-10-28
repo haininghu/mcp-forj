@@ -42,6 +42,9 @@ func (s stubProvider) RebaseMergeRequest(context.Context, string, int64) error {
 func (s stubProvider) MergeMergeRequest(context.Context, string, int64) (*MergeRequest, error) {
 	return nil, nil
 }
+func (s stubProvider) UpdateMergeRequestLabels(context.Context, string, int64, []string, []string) (*MergeRequest, error) {
+	return nil, nil
+}
 func (s stubProvider) ReadFile(context.Context, string, string, string) ([]byte, error) {
 	return nil, ErrNotFound
 }

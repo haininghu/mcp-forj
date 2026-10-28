@@ -191,6 +191,15 @@ func TestBuildValidation(t *testing.T) {
 		{"noai exemption on deny rule", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "deny", Capabilities: []CapabilityGrant{
 			{Name: CapRepoRead, Filter: CapabilityFilter{NoAIExempt: true}},
 		}}}},
+		{"labels on another capability", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRComment, Filter: CapabilityFilter{Labels: LabelFilter{Include: []string{"ai-reviewed"}}}},
+		}}}},
+		{"empty label in include", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRLabel, Filter: CapabilityFilter{Labels: LabelFilter{Include: []string{""}}}},
+		}}}},
+		{"label in include and exclude", []RuleSpec{{Repositories: []string{"a/b"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRLabel, Filter: CapabilityFilter{Labels: LabelFilter{Include: []string{"x"}, Exclude: []string{"x"}}}},
+		}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -220,8 +229,11 @@ func TestKnownCapabilities(t *testing.T) {
 	if !IsKnownCapability("commit:read") {
 		t.Error("commit:read should be known")
 	}
-	if len(KnownCapabilities()) != 11 {
-		t.Errorf("KnownCapabilities length = %d, want 11", len(KnownCapabilities()))
+	if !IsKnownCapability("mr:label") {
+		t.Error("mr:label should be known")
+	}
+	if len(KnownCapabilities()) != 12 {
+		t.Errorf("KnownCapabilities length = %d, want 12", len(KnownCapabilities()))
 	}
 }
 
@@ -714,6 +726,54 @@ func TestEvaluateWithTagsRepoCapability(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithLabels(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRLabel, Filter: CapabilityFilter{
+				Require: []string{"ai-reviewed"},
+				Labels:  LabelFilter{Include: []string{"ai-reviewed", "ai-done"}, Exclude: []string{"do-not-touch"}},
+			}},
+		}},
+	})
+	tests := []struct {
+		name    string
+		tags    TagSet
+		labels  []string
+		allowed bool
+		reason  string
+	}{
+		{"allowed labels", TagSet{Known: true, Values: []string{"ai-reviewed"}}, []string{"ai-done"}, true, "capability granted"},
+		{"label not in include falls through", TagSet{Known: true, Values: []string{"ai-reviewed"}}, []string{"other"}, false, "label not allowed"},
+		{"excluded label wins", TagSet{Known: true, Values: []string{"ai-reviewed"}}, []string{"do-not-touch"}, false, "label excluded"},
+		{"active filter with no labels fails closed", TagSet{Known: true, Values: []string{"ai-reviewed"}}, nil, false, "labels required"},
+		{"unknown tags fail closed", TagSet{}, []string{"ai-done"}, false, "tag information unavailable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := p.EvaluateWithLabels("team/app", CapMRLabel, tt.tags, tt.labels)
+			if d.Allowed != tt.allowed || d.Reason != tt.reason {
+				t.Errorf("EvaluateWithLabels = %+v, want Allowed=%v Reason=%q", d, tt.allowed, tt.reason)
+			}
+		})
+	}
+}
+
+// TestEvaluateWithLabelsFallThrough checks the firewall semantics: an evaluated
+// label miss falls through to a later applicable allow rule.
+func TestEvaluateWithLabelsFallThrough(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRLabel, Filter: CapabilityFilter{Labels: LabelFilter{Include: []string{"restricted"}}}},
+		}},
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRLabel},
+		}},
+	})
+	if d := p.EvaluateWithLabels("team/app", CapMRLabel, TagSet{}, []string{"other"}); !d.Allowed {
+		t.Errorf("label fall-through = %+v, want the broader grant to allow", d)
+	}
+}
+
 func TestGrantsAnywhereWithFilter(t *testing.T) {
 	p := mustBuild(t, []RuleSpec{
 		{Repositories: []string{"team/**"}, Effect: "allow", Capabilities: []CapabilityGrant{
@@ -892,5 +952,22 @@ func TestNoAIExemptAll(t *testing.T) {
 	}
 	if all.NoAIExemptAll("other/repo", CapMRRead) {
 		t.Error("no matching grant: NoAIExemptAll = true, want false")
+	}
+}
+
+// TestEvaluateWithTagsIgnoresLabelsDimension pins that a tags-only evaluation
+// has no label context: the post-state re-check must be able to evaluate the
+// grant's tag filter without re-evaluating the labels argument filter.
+func TestEvaluateWithTagsIgnoresLabelsDimension(t *testing.T) {
+	p := mustBuild(t, []RuleSpec{
+		{Repositories: []string{"team/app"}, Effect: "allow", Capabilities: []CapabilityGrant{
+			{Name: CapMRLabel, Filter: CapabilityFilter{
+				Require: []string{"ai-reviewed"},
+				Labels:  LabelFilter{Include: []string{"ai-done"}},
+			}},
+		}},
+	})
+	if d := p.EvaluateWithTags("team/app", CapMRLabel, TagSet{Known: true, Values: []string{"ai-reviewed"}}); !d.Allowed {
+		t.Errorf("tags-only evaluation = %+v, want the labels dimension ignored", d)
 	}
 }

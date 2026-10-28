@@ -93,7 +93,30 @@ func (g *Guard) AuthorizeResourceRef(ctx context.Context, providerName, repo str
 
 	decision := p.EvaluateResource(repo, c, tags, path)
 	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
+	return g.finishAuthorize(ctx, providerName, repo, decision, ref)
+}
 
+// AuthorizeLabels checks whether capability c may be used on repo at
+// providerName with the observed tags and the requested labels. It evaluates the
+// labels filter (valid on mr:label) and then performs the .noai marker check
+// unless the matched grant is exempt. Every decision is logged; tokens are never
+// logged.
+func (g *Guard) AuthorizeLabels(ctx context.Context, providerName, repo string, c Capability, tags TagSet, labels []string) error {
+	p, ok := g.policies[providerName]
+	if !ok {
+		g.logDecision(providerName, repo, c, "deny", "unknown provider")
+		return fmt.Errorf("%w: %s", ErrUnknownProvider, providerName)
+	}
+
+	decision := p.EvaluateWithLabels(repo, c, tags, labels)
+	g.logDecision(providerName, repo, c, decisionWord(decision.Allowed), decision.Reason)
+	return g.finishAuthorize(ctx, providerName, repo, decision, "")
+}
+
+// finishAuthorize maps a decision to a guard error and, when allowed, runs the
+// .noai marker check unless the matched grant exempts the capability. ref, when
+// non-empty and not HEAD, is checked in addition to the default branch.
+func (g *Guard) finishAuthorize(ctx context.Context, providerName, repo string, decision Decision, ref string) error {
 	if !decision.Matched {
 		return fmt.Errorf("%w: %s", ErrUnknownRepository, repo)
 	}

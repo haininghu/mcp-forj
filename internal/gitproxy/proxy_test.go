@@ -103,6 +103,9 @@ func (f *fakeProvider) RebaseMergeRequest(context.Context, string, int64) error 
 func (f *fakeProvider) MergeMergeRequest(context.Context, string, int64) (*provider.MergeRequest, error) {
 	return nil, nil
 }
+func (f *fakeProvider) UpdateMergeRequestLabels(context.Context, string, int64, []string, []string) (*provider.MergeRequest, error) {
+	return nil, nil
+}
 func (f *fakeProvider) ReadFile(context.Context, string, string, string) ([]byte, error) {
 	return nil, provider.ErrNotFound
 }

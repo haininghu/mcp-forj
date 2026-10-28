@@ -130,6 +130,10 @@ type RuleConfig struct {
 //	  - repo:write:
 //	      branches:
 //	        include: ["ai/**"]
+//	  - mr:label:
+//	      labels:
+//	        include: [ai-reviewed]
+//	        exclude: [do-not-touch]
 type CapabilityGrant struct {
 	// Name is the capability name.
 	Name string
@@ -142,13 +146,18 @@ type CapabilityGrant struct {
 	// Branches constrains the push target branch (repo:write only). Without a
 	// branch filter a repo:write grant allows no push (fail-closed).
 	Branches PathFilter
+	// Labels constrains the label names an mr:label request may change. Include,
+	// when non-empty, lists the allowed names; Exclude lists denied names and
+	// wins. It is accepted only on mr:label.
+	Labels PathFilter
 	// NoAIExempt, set by "noai: allow", exempts the capability from the .noai
 	// default-deny overlay.
 	NoAIExempt bool
 }
 
-// PathFilter is a nested glob constraint for a capability grant, used for the
-// paths (file path) and branches (push target branch) dimensions.
+// PathFilter is a nested include/exclude constraint for a capability grant. It
+// is used for the paths (file path), branches (push target branch) and labels
+// (exact label names) dimensions; only paths and branches contain globs.
 type PathFilter struct {
 	// Include lists path globs; when non-empty the file path must match one.
 	Include []string
@@ -213,6 +222,12 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 					return fmt.Errorf("capability %q: branches: %w", name, err)
 				}
 				g.Branches = branches
+			case "labels":
+				labels, err := decodePathFilter(val)
+				if err != nil {
+					return fmt.Errorf("capability %q: labels: %w", name, err)
+				}
+				g.Labels = labels
 			case "noai":
 				var value string
 				if err := val.Decode(&value); err != nil {
@@ -232,7 +247,8 @@ func (g *CapabilityGrant) UnmarshalYAML(value *yaml.Node) error {
 	}
 }
 
-// decodePathFilter decodes a nested paths mapping with only include/exclude keys.
+// decodePathFilter decodes a nested paths, branches or labels mapping with only
+// include/exclude keys.
 func decodePathFilter(value *yaml.Node) (PathFilter, error) {
 	if value.Tag == "!!null" {
 		return PathFilter{}, nil
@@ -484,9 +500,30 @@ func (c *Config) Validate() error {
 				}
 				grant.Branches.Include, grant.Branches.Exclude = includeBranches, excludeBranches
 
+				includeLabels, err := normalizeTags(p.Name, j, grant.Name, "labels.include", grant.Labels.Include)
+				if err != nil {
+					return err
+				}
+				excludeLabels, err := normalizeTags(p.Name, j, grant.Name, "labels.exclude", grant.Labels.Exclude)
+				if err != nil {
+					return err
+				}
+				grant.Labels.Include, grant.Labels.Exclude = includeLabels, excludeLabels
+
 				if len(require) == 0 && len(exclude) == 0 && len(include) == 0 && len(excludePaths) == 0 &&
-					len(includeBranches) == 0 && len(excludeBranches) == 0 {
+					len(includeBranches) == 0 && len(excludeBranches) == 0 &&
+					len(includeLabels) == 0 && len(excludeLabels) == 0 {
 					continue
+				}
+				if len(includeLabels) > 0 || len(excludeLabels) > 0 {
+					if grant.Name != string(policy.CapMRLabel) {
+						return fmt.Errorf("config: provider %q rule %d: label filters are only supported for capability %q, not %q", p.Name, j, policy.CapMRLabel, grant.Name)
+					}
+					for _, included := range includeLabels {
+						if slices.Contains(excludeLabels, included) {
+							return fmt.Errorf("config: provider %q rule %d: label %q appears in both labels.include and labels.exclude", p.Name, j, included)
+						}
+					}
 				}
 				if len(includeBranches) > 0 || len(excludeBranches) > 0 {
 					if grant.Name != string(policy.CapRepoWrite) {
