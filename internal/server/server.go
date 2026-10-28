@@ -1027,15 +1027,15 @@ func (s *Server) updateMergeRequestLabels(ctx context.Context, _ *mcp.CallToolRe
 // names, deduplicates case-insensitively (keeping the first spelling), and
 // rejects a label requested for both add and remove. At least one label is
 // required and at most maxLabelChanges are accepted.
-func normalizeLabelChanges(add, remove []string) ([]string, []string, error) {
+func normalizeLabelChanges(add, remove []string) (normalizedAdd, normalizedRemove []string, err error) {
 	if len(add)+len(remove) == 0 {
 		return nil, nil, errors.New("at least one label to add or remove is required")
 	}
-	normalizedAdd, err := normalizeLabelList(add, "add")
+	normalizedAdd, err = normalizeLabelList(add, "add")
 	if err != nil {
 		return nil, nil, err
 	}
-	normalizedRemove, err := normalizeLabelList(remove, "remove")
+	normalizedRemove, err = normalizeLabelList(remove, "remove")
 	if err != nil {
 		return nil, nil, err
 	}

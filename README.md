@@ -84,21 +84,21 @@ opencode loads its configuration once at startup, so restart it after editing.
 
 ## Tools
 
-| Tool                       | Capability    | Description                                     |
-|----------------------------|---------------|-------------------------------------------------|
-| `list_configured_rules`    | `policy:read` | List configured rules and capabilities.         |
-| `list_repositories`        | see below     | List configured repositories, plus discovered.  |
-| `list_merge_requests`      | `mr:read`     | List merge requests (metadata only, no diffs).  |
-| `get_merge_request`        | `mr:read`     | Fetch one merge request.                        |
-| `list_merge_request_notes` | `mr:read`¹    | List comments on a merge request.               |
-| `get_merge_request_diff`   | `mr:diff`     | Fetch the file diffs of a merge request.        |
-| `add_merge_request_note`   | `mr:comment`¹ | Comment on a merge request.                     |
-| `rebase_merge_request`     | `mr:rebase`   | Trigger an asynchronous merge request rebase.   |
-| `merge_merge_request`      | `mr:merge`    | Merge a merge request (returns the merged MR).  |
-| `update_merge_request_labels` | `mr:label` | Add/remove MR labels (ack only, no labels returned). |
-| `read_file`                | `repo:read`   | Read a repository file at an optional ref.      |
-| `search_commits`           | `commit:read`² | Search one author's commits (across or in named repositories). |
-| `git_remote`               | `repo:read`   | Return the git proxy clone URL (token never returned). |
+| Tool                          | Capability     | Description                                                    |
+|-------------------------------|----------------|----------------------------------------------------------------|
+| `list_configured_rules`       | `policy:read`  | List configured rules and capabilities.                        |
+| `list_repositories`           | see below      | List configured repositories, plus discovered.                 |
+| `list_merge_requests`         | `mr:read`      | List merge requests (metadata only, no diffs).                 |
+| `get_merge_request`           | `mr:read`      | Fetch one merge request.                                       |
+| `list_merge_request_notes`    | `mr:read`¹     | List comments on a merge request.                              |
+| `get_merge_request_diff`      | `mr:diff`      | Fetch the file diffs of a merge request.                       |
+| `add_merge_request_note`      | `mr:comment`¹  | Comment on a merge request.                                    |
+| `rebase_merge_request`        | `mr:rebase`    | Trigger an asynchronous merge request rebase.                  |
+| `merge_merge_request`         | `mr:merge`     | Merge a merge request (returns the merged MR).                 |
+| `update_merge_request_labels` | `mr:label`     | Add/remove MR labels (ack only, no labels returned).           |
+| `read_file`                   | `repo:read`    | Read a repository file at an optional ref.                     |
+| `search_commits`              | `commit:read`² | Search one author's commits (across or in named repositories). |
+| `git_remote`                  | `repo:read`    | Return the git proxy clone URL (token never returned).         |
 
 Every tool that takes a `provider` argument treats it as optional when exactly one provider is
 configured: it defaults to that provider and the resolved name is returned in the output. With
@@ -362,22 +362,22 @@ logged or returned. The config is git-ignored, so a real config with a literal t
 Fine-grained personal access tokens (GitLab 18.10+, GA 19.2): add the target **groups/projects** under
 "Group and project access", then grant the permissions for the operations you enable:
 
-| Capability / tool                    | Fine-grained permission                                                       |
-|--------------------------------------|-------------------------------------------------------------------------------|
-| `list_repositories` (`repo:list`)    | **Project: Read**                                                             |
-| `read_file` (`repo:read`, `.noai`)   | **Repository: Read**                                                          |
-| `search_commits` (`commit:read`)     | **Commit: Read** (+ `read_user` for the `/user` default)                      |
-| `search_commits` discovery           | **Project: Read** (when `repo:list` is granted)                               |
-| `mr:read` (list/get)                 | **Merge Request: Read**                                                       |
-| `get_merge_request_diff` (`mr:diff`) | **Merge Request: Read**                                                       |
-| `rebase_merge_request` (`mr:rebase`) | **Merge Request: Update** (+ Merge Request: Read; push to source)             |
-| `merge_merge_request` (`mr:merge`)   | **Merge Request: Update** (+ Merge Request: Read; merge role, e.g. Developer) |
-| `update_merge_request_labels` (`mr:label`) | **Merge Request: Update** (+ Merge Request: Read for current labels)   |
-| `list_merge_request_notes`           | **Work Item: Read** (+ Merge Request: Read)                                   |
-| `add_merge_request_note`             | **Work Item: Create** (+ Merge Request: Read)                                 |
-| git fetch/clone via proxy (`repo:read`) | **Repository: Read**                                                       |
-| git push via proxy (`repo:write`)    | **Repository: Write**                                                         |
-| `mr:write` (push options)            | Merge Request: Create/Update/Close                                            |
+| Capability / tool                          | Fine-grained permission                                                       |
+|--------------------------------------------|-------------------------------------------------------------------------------|
+| `list_repositories` (`repo:list`)          | **Project: Read**                                                             |
+| `read_file` (`repo:read`, `.noai`)         | **Repository: Read**                                                          |
+| `search_commits` (`commit:read`)           | **Commit: Read** (+ `read_user` for the `/user` default)                      |
+| `search_commits` discovery                 | **Project: Read** (when `repo:list` is granted)                               |
+| `mr:read` (list/get)                       | **Merge Request: Read**                                                       |
+| `get_merge_request_diff` (`mr:diff`)       | **Merge Request: Read**                                                       |
+| `rebase_merge_request` (`mr:rebase`)       | **Merge Request: Update** (+ Merge Request: Read; push to source)             |
+| `merge_merge_request` (`mr:merge`)         | **Merge Request: Update** (+ Merge Request: Read; merge role, e.g. Developer) |
+| `update_merge_request_labels` (`mr:label`) | **Merge Request: Update** (+ Merge Request: Read for current labels)          |
+| `list_merge_request_notes`                 | **Work Item: Read** (+ Merge Request: Read)                                   |
+| `add_merge_request_note`                   | **Work Item: Create** (+ Merge Request: Read)                                 |
+| git fetch/clone via proxy (`repo:read`)    | **Repository: Read**                                                          |
+| git push via proxy (`repo:write`)          | **Repository: Write**                                                         |
+| `mr:write` (push options)                  | Merge Request: Create/Update/Close                                            |
 
 `update_merge_request_labels` needs **Merge Request: Read** to fetch the current labels and
 **Merge Request: Update** to change them. Depending on the token's permissions, adding a label that

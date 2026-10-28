@@ -18,18 +18,18 @@ It exposes tools that let an AI agent inspect and (limitedly) act on code hostin
 
 ## Repository map
 
-| Path                            | Contents                                                        |
-|---------------------------------|-----------------------------------------------------------------|
-| `cmd/mcp-forj`                  | Entrypoint and wiring (`main.go`).                              |
-| `internal/config`               | YAML config loading, defaults, validation, `Secret` redaction.  |
-| `internal/policy`               | Capabilities, ordered rule engine, `.noai` guard.              |
-| `internal/provider`             | Provider interface, neutral types, registry and factory.        |
-| `internal/provider/gitlab`      | GitLab implementation (official `client-go`).                   |
-| `internal/gitproxy`             | Authenticated git smart-HTTP reverse proxy (pkt-line, policy).  |
-| `internal/server`               | MCP server, tool handlers, argument validation, limits.         |
-| `ai/`                           | Agent docs: architecture overview, ADRs, bug analyses, method specs.  |
-| `configs/config.example.yaml`   | Documented example configuration.                               |
-| `README.md`, `AGENTS.md`        | User-facing overview and this file.                            |
+| Path                          | Contents                                                             |
+|-------------------------------|----------------------------------------------------------------------|
+| `cmd/mcp-forj`                | Entrypoint and wiring (`main.go`).                                   |
+| `internal/config`             | YAML config loading, defaults, validation, `Secret` redaction.       |
+| `internal/policy`             | Capabilities, ordered rule engine, `.noai` guard.                    |
+| `internal/provider`           | Provider interface, neutral types, registry and factory.             |
+| `internal/provider/gitlab`    | GitLab implementation (official `client-go`).                        |
+| `internal/gitproxy`           | Authenticated git smart-HTTP reverse proxy (pkt-line, policy).       |
+| `internal/server`             | MCP server, tool handlers, argument validation, limits.              |
+| `ai/`                         | Agent docs: architecture overview, ADRs, bug analyses, method specs. |
+| `configs/config.example.yaml` | Documented example configuration.                                    |
+| `README.md`, `AGENTS.md`      | User-facing overview and this file.                                  |
 
 ## Commands
 
